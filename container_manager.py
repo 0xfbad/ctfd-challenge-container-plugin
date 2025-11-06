@@ -3,6 +3,7 @@ import time
 import json
 import random
 import socket
+import os
 
 from flask import Flask
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -12,7 +13,12 @@ import paramiko
 import requests
 
 from CTFd.models import db
-from .models import ContainerInfoModel
+from .models import ContainerInfoModel, DockerContextModel
+
+PORT_RANGE_MIN = 1024
+PORT_RANGE_MAX = 65536
+CPU_QUOTA_BASE = 100000
+DEFAULT_CONTEXT_NAME = "default"
 
 
 class ContainerException(Exception):
@@ -28,55 +34,107 @@ class ContainerManager:
     def __init__(self, settings, app):
         self.settings = settings
         self.app = app
-        self.client = None
+        self.clients = {}
+        self.weighted_contexts = []
+        self.context_index = 0
 
-        docker_base_url = settings.get("docker_base_url", "")
-        if not docker_base_url:
-            return
-
-        # initialize docker client
         try:
             self.initialize_connection()
         except ContainerException:
-            print("docker could not initialize or connect.")
+            print("docker could not initialize or connect")
 
     def initialize_connection(self):
-        # shut down existing scheduler if running
-        try:
-            self.expiration_scheduler.shutdown()
-        except (SchedulerNotRunningError, AttributeError):
-            pass  # scheduler was never running
+        import threading
+        current_thread = threading.current_thread()
+        is_scheduler_thread = hasattr(current_thread, '_target') and 'apscheduler' in str(current_thread._target)
 
-        docker_base_url = self.settings.get("docker_base_url", "")
-        if not docker_base_url:
-            self.client = None
-            return
+        if not is_scheduler_thread:
+            try:
+                self.expiration_scheduler.shutdown()
+            except (SchedulerNotRunningError, AttributeError):
+                pass
 
-        # initialize docker client
+        self.load_docker_contexts()
+
+        if not is_scheduler_thread:
+            self.setup_expiration_scheduler()
+
+    def load_docker_contexts(self):
+        new_clients = {}
+        new_weighted_contexts = []
+
         try:
-            self.client = docker.DockerClient(base_url=docker_base_url)
-            self.client.ping()
+            contexts = DockerContextModel.query.filter_by(enabled=True).all()
+        except Exception as e:
+            print(f"could not query docker contexts (database may need migration): {e}")
+            contexts = []
+
+        try:
+            client = docker.from_env()
+            client.ping()
+            new_clients[DEFAULT_CONTEXT_NAME] = client
+            new_weighted_contexts.append("default")
         except (
             docker.errors.DockerException,
             paramiko.ssh_exception.SSHException,
             requests.exceptions.RequestException,
         ) as e:
-            self.client = None
-            raise ContainerException(f"could not connect to docker: {e}")
+            print(f"could not connect to default docker context: {e}")
 
-        # set up container expiration scheduler
-        try:
-            self.expiration_seconds = int(self.settings.get("container_expiration", 0)) * 60
-        except (ValueError, TypeError):
-            self.expiration_seconds = 0
+        for context in contexts:
+            try:
+                docker_endpoint = None
 
-        if self.expiration_seconds > 0:
-            self.setup_expiration_scheduler()
+                context_file = os.path.expanduser(f'~/.docker/contexts/meta/{context.context_name}/meta.json')
+
+                if os.path.exists(context_file):
+                    try:
+                        with open(context_file, 'r') as f:
+                            context_meta = json.load(f)
+                            docker_endpoint = context_meta.get('Endpoints', {}).get('docker', {}).get('Host')
+                    except Exception as e:
+                        print(f"could not read context meta file: {e}")
+
+                if not docker_endpoint:
+                    if context.hostname:
+                        if '@' in context.hostname:
+                            docker_endpoint = f"ssh://{context.hostname}"
+                        else:
+                            docker_endpoint = f"ssh://root@{context.hostname}"
+                    else:
+                        print(f"no hostname configured for context '{context.context_name}', skipping")
+                        continue
+
+                client = docker.DockerClient(base_url=docker_endpoint)
+                client.ping()
+                new_clients[context.context_name] = client
+
+                for _ in range(context.weight):
+                    new_weighted_contexts.append(context.context_name)
+            except (
+                docker.errors.DockerException,
+                paramiko.ssh_exception.SSHException,
+                requests.exceptions.RequestException,
+            ) as e:
+                print(f"could not connect to docker context '{context.context_name}': {e}")
+
+        if not new_clients:
+            print("no docker contexts available, containers will not work until contexts are configured")
+
+        self.clients = new_clients
+        self.weighted_contexts = new_weighted_contexts
+
+    def get_next_context(self):
+        if not self.weighted_contexts:
+            raise ContainerException("no docker contexts available")
+
+        context_name = self.weighted_contexts[self.context_index]
+        self.context_index = (self.context_index + 1) % len(self.weighted_contexts)
+        return context_name
 
     def setup_expiration_scheduler(self):
-        expiration_check_interval = 5  # seconds
+        expiration_check_interval = 5
 
-        # initialize the background scheduler
         self.expiration_scheduler = BackgroundScheduler()
         self.expiration_scheduler.add_job(
             func=self.kill_expired_containers,
@@ -86,11 +144,9 @@ class ContainerManager:
         )
         self.expiration_scheduler.start()
 
-        # ensure scheduler shuts down when app exits
         atexit.register(lambda: self.expiration_scheduler.shutdown())
 
     def _is_port_available(self, port: int) -> bool:
-        # check if a given port is available for binding
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(1)
             try:
@@ -99,46 +155,80 @@ class ContainerManager:
             except OSError:
                 return False
 
+    def _allocate_random_port(self):
+        selectable_port_range = list(range(PORT_RANGE_MIN, PORT_RANGE_MAX))
+        random.shuffle(selectable_port_range)
+
+        for external_port in selectable_port_range:
+            if self._is_port_available(external_port):
+                return external_port
+
+        raise ContainerException("no available port found")
+
     def run_command(func):
-        # decorator to ensure docker client is connected before running a command
         def wrapper(self, *args, **kwargs):
-            if self.client is None:
+            if not self.clients:
                 try:
                     self.initialize_connection()
                 except ContainerException:
                     raise ContainerException("docker is not connected")
 
-            try:
-                self.client.ping()
-            except (docker.errors.DockerException, requests.exceptions.RequestException):
-                try:
-                    self.initialize_connection()
-                except ContainerException:
-                    pass
-                raise ContainerException("docker connection was lost. please try your request again later.")
+            if not self.clients:
+                raise ContainerException("no docker contexts available")
 
             return func(self, *args, **kwargs)
         return wrapper
 
     @run_command
     def kill_expired_containers(self, app: Flask):
-        # kill containers that have expired
         with app.app_context():
+            from .event_logger import event_logger
+
             containers = ContainerInfoModel.query.all()
             for container in containers:
                 if container.expires < int(time.time()):
                     try:
-                        self.kill_container(container.container_id)
+                        self.kill_container(container.container_id, container.docker_context)
                     except ContainerException:
-                        print("[container expiry job] docker is not initialized. please check your settings.")
+                        print("[container expiry job] docker is not initialized, please check your settings")
+
+                    challenge_id = container.challenge_id
+                    challenge_name = container.challenge.name if container.challenge else None
+                    user_id = container.user_id
+                    user_name = container.user.name if container.user else None
+                    team_id = container.team_id
+                    team_name = container.team.name if container.team else None
+
+                    event_logger.log_event(
+                        event_type="expired",
+                        container_id=container.container_id,
+                        challenge_id=challenge_id,
+                        challenge_name=challenge_name,
+                        user_id=user_id,
+                        user_name=user_name,
+                        team_id=team_id,
+                        team_name=team_name,
+                        message=f"container expired for {challenge_name}"
+                    )
+
                     db.session.delete(container)
                     db.session.commit()
 
     @run_command
-    def is_container_running(self, container_id: str) -> bool:
-        # check if a container is currently running
+    def is_container_running(self, container_id: str, context_name: str = None) -> bool:
+        if context_name and context_name in self.clients:
+            client = self.clients[context_name]
+        else:
+            for client in self.clients.values():
+                try:
+                    container = client.containers.get(container_id)
+                    return container.status == "running"
+                except docker.errors.NotFound:
+                    continue
+            return False
+
         try:
-            container = self.client.containers.get(container_id)
+            container = client.containers.get(container_id)
             return container.status == "running"
         except docker.errors.NotFound:
             return False
@@ -155,34 +245,31 @@ class ContainerManager:
         port: int,
         command: str,
         volumes: str,
+        max_memory_mb: int = None,
+        max_cpu: float = None,
+        context_name: str = None,
     ):
-        # create and start a new container
         kwargs = {}
 
-        # set memory limit if specified
-        mem_limit = self.settings.get("container_maxmemory")
-        if mem_limit:
+        if max_memory_mb:
             try:
-                mem_limit = int(mem_limit)
+                mem_limit = int(max_memory_mb)
                 if mem_limit > 0:
                     kwargs["mem_limit"] = f"{mem_limit}m"
             except ValueError:
-                raise ContainerException("configured container memory limit must be an integer")
+                raise ContainerException("memory limit must be an integer")
 
-        # set cpu limit if specified
-        cpu_limit = self.settings.get("container_maxcpu")
-        if cpu_limit:
+        if max_cpu:
             try:
-                cpu_quota = float(cpu_limit)
+                cpu_quota = float(max_cpu)
                 if cpu_quota > 0:
-                    kwargs["cpu_quota"] = int(cpu_quota * 100000)
-                    kwargs["cpu_period"] = 100000
+                    kwargs["cpu_quota"] = int(cpu_quota * CPU_QUOTA_BASE)
+                    kwargs["cpu_period"] = CPU_QUOTA_BASE
                 else:
                     raise ValueError
             except ValueError:
-                raise ContainerException("configured container cpu limit must be a positive number")
+                raise ContainerException("cpu limit must be a positive number")
 
-        # set volumes if specified
         if volumes:
             try:
                 volumes_dict = json.loads(volumes)
@@ -190,41 +277,90 @@ class ContainerManager:
             except json.decoder.JSONDecodeError:
                 raise ContainerException("volumes json string is invalid")
 
-        # find an available external port
-        selectable_port_range = list(range(1024, 65536))
-        random.shuffle(selectable_port_range)
-    
-        for external_port in selectable_port_range:
-            if self._is_port_available(external_port):
-                break
-        else:
-            raise ContainerException("no available port found")
+        external_port = self._allocate_random_port()
 
-        # create the container
-        try:
-            return self.client.containers.run(
-                image,
-                ports={str(port): str(external_port)},
-                command=command,
-                detach=True,
-                auto_remove=True,
-                environment={
-                    "CHALLENGE_ID": chal_id,
-                    "TEAM_ID": team_id,
-                    "USER_ID": user_id,
-                },
-                **kwargs,
-            )
-        except docker.errors.ImageNotFound:
-            raise ContainerException("docker image not found")
-        except docker.errors.DockerException as e:
-            raise ContainerException(f"docker error: {e}")
+        if context_name:
+            if context_name not in self.clients:
+                raise ContainerException(f"docker context '{context_name}' not available")
+
+            client = self.clients[context_name]
+
+            try:
+                container = client.containers.run(
+                    image,
+                    ports={str(port): str(external_port)},
+                    command=command,
+                    detach=True,
+                    auto_remove=True,
+                    environment={
+                        "CHALLENGE_ID": chal_id,
+                        "TEAM_ID": team_id,
+                        "USER_ID": user_id,
+                    },
+                    **kwargs,
+                )
+                return container, context_name
+            except docker.errors.ImageNotFound:
+                raise ContainerException("docker image not found")
+            except docker.errors.DockerException as e:
+                raise ContainerException(f"failed to create container: {e}")
+        else:
+            tried_contexts = set()
+            last_error = None
+
+            while len(tried_contexts) < len(self.clients):
+                selected_context = self.get_next_context()
+
+                if selected_context in tried_contexts:
+                    continue
+
+                tried_contexts.add(selected_context)
+                client = self.clients.get(selected_context)
+
+                if not client:
+                    continue
+
+                try:
+                    container = client.containers.run(
+                        image,
+                        ports={str(port): str(external_port)},
+                        command=command,
+                        detach=True,
+                        auto_remove=True,
+                        environment={
+                            "CHALLENGE_ID": chal_id,
+                            "TEAM_ID": team_id,
+                            "USER_ID": user_id,
+                        },
+                        **kwargs,
+                    )
+                    return container, selected_context
+                except docker.errors.ImageNotFound:
+                    raise ContainerException("docker image not found")
+                except docker.errors.DockerException as e:
+                    last_error = e
+                    continue
+
+            raise ContainerException(f"failed to create container on any context: {last_error}")
 
     @run_command
-    def get_container_port(self, container_id: str) -> str:
-        # get the host port mapped to the container's exposed port
+    def get_container_port(self, container_id: str, context_name: str = None) -> str:
+        if context_name and context_name in self.clients:
+            client = self.clients[context_name]
+        else:
+            for client in self.clients.values():
+                try:
+                    container = client.containers.get(container_id)
+                    ports = container.attrs["NetworkSettings"]["Ports"]
+                    for port_mappings in ports.values():
+                        if port_mappings:
+                            return port_mappings[0]["HostPort"]
+                except docker.errors.NotFound:
+                    continue
+            return None
+
         try:
-            container = self.client.containers.get(container_id)
+            container = client.containers.get(container_id)
             ports = container.attrs["NetworkSettings"]["Ports"]
             for port_mappings in ports.values():
                 if port_mappings:
@@ -237,33 +373,78 @@ class ContainerManager:
 
     @run_command
     def get_images(self) -> list:
-        # retrieve a list of available docker images
-        try:
-            images = self.client.images.list()
-            images_list = [tag for image in images for tag in image.tags if tag]
-            return sorted(images_list)
-        except docker.errors.DockerException as e:
-            raise ContainerException(f"docker error: {e}")
-        return []
+        images_by_context = {}
+        for context_name, client in self.clients.items():
+            try:
+                images = client.images.list()
+                for image in images:
+                    for tag in image.tags:
+                        if tag:
+                            if tag not in images_by_context:
+                                images_by_context[tag] = []
+                            images_by_context[tag].append(context_name)
+            except docker.errors.DockerException:
+                continue
+
+        result = []
+        for image, contexts in sorted(images_by_context.items()):
+            if len(contexts) == 1:
+                result.append(image)
+            else:
+                for context in contexts:
+                    result.append(f"{image} ({context})")
+
+        return result
 
     @run_command
-    def kill_container(self, container_id: str):
-        # kill and remove a container by its id
+    def get_images_for_context(self, context_name: str) -> list:
+        if context_name not in self.clients:
+            return []
+
+        client = self.clients[context_name]
+        result = []
+
         try:
-            container = self.client.containers.get(container_id)
+            images = client.images.list()
+            for image in images:
+                for tag in image.tags:
+                    if tag:
+                        result.append(tag)
+        except docker.errors.DockerException:
+            pass
+
+        return sorted(result)
+
+    @run_command
+    def kill_container(self, container_id: str, context_name: str = None):
+        if context_name and context_name in self.clients:
+            client = self.clients[context_name]
+        else:
+            for client in self.clients.values():
+                try:
+                    container = client.containers.get(container_id)
+                    container.kill()
+                    return
+                except docker.errors.NotFound:
+                    continue
+            return
+
+        try:
+            container = client.containers.get(container_id)
             container.kill()
         except docker.errors.NotFound:
-            pass  # container already removed
+            pass
         except docker.errors.DockerException as e:
             raise ContainerException(f"docker error: {e}")
 
     def is_connected(self) -> bool:
-        # check if docker client is connected
-        if not self.client:
+        if not self.clients:
             return False
 
-        try:
-            self.client.ping()
-            return True
-        except docker.errors.DockerException:
-            return False
+        for client in self.clients.values():
+            try:
+                client.ping()
+                return True
+            except docker.errors.DockerException:
+                continue
+        return False

@@ -1,19 +1,300 @@
 {% extends "challenge.html" %}
 
 {% block connection_info %}
-<div class="mb-3 text-center deployment-actions">
-  <img class="d-none" src onerror='view_container_info({{ challenge.id }})'> 
-  <div class="alert alert-primary" id="deployment-info"></div>
-  <span>
-    <button onclick="container_request({{ challenge.id }})" class="btn btn-primary d-none" id="create-chal">
-      <small style="color:white;"> Start Instance </small>
-    </button>
-    <button onclick="container_renew({{ challenge.id }})" class='extend-chal btn btn-info d-none' id="extend-chal">
-      <small style='color:white;'> Extend Time </small>
-    </button>
-    <button onclick="container_stop({{ challenge.id }})" class='terminate-chal btn btn-danger d-none' id="terminate-chal">
-      <small style='color:white;'> Terminate Instance </small>
-    </button>
-  </span>
+<style>
+	.instance-container {
+		background-color: var(--bs-body-bg, #fff);
+		filter: brightness(0.96);
+		border: 1px solid var(--bs-border-color-translucent, rgba(0, 0, 0, 0.175));
+		border-radius: 6px;
+		padding: 16px;
+		margin-bottom: 16px;
+	}
+
+	@media (prefers-color-scheme: dark) {
+		.instance-container {
+			filter: brightness(1.08);
+		}
+	}
+
+	.instance-header {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		margin-bottom: 8px;
+		font-weight: 600;
+		font-size: 14px;
+		color: var(--bs-body-color, #212529);
+	}
+
+	.instance-info-icon {
+		cursor: help;
+		color: var(--bs-body-color, #212529);
+		opacity: 0.6;
+		position: relative;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 16px;
+		height: 16px;
+		border: 1.5px solid currentColor;
+		border-radius: 50%;
+		font-size: 11px;
+		font-weight: bold;
+		transition: opacity 0.2s;
+	}
+
+	.instance-info-icon:hover {
+		opacity: 1;
+		color: var(--bs-link-color, #007bff);
+	}
+
+	.instance-tooltip {
+		position: absolute;
+		bottom: 100%;
+		left: 50%;
+		transform: translateX(-50%);
+		background-color: var(--bs-body-bg, #fff);
+		color: var(--bs-body-color, #212529);
+		padding: 14px 18px;
+		border-radius: 6px;
+		font-size: 12px;
+		font-weight: normal;
+		white-space: normal;
+		max-width: 300px;
+		width: max-content;
+		z-index: 1000;
+		display: none;
+		margin-bottom: 8px;
+		box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+		border: 1px solid var(--bs-border-color-translucent, rgba(0, 0, 0, 0.175));
+		line-height: 1.6;
+		text-align: left;
+	}
+
+	.instance-tooltip::after {
+		content: '';
+		position: absolute;
+		top: 100%;
+		left: 50%;
+		transform: translateX(-50%);
+		border: 7px solid transparent;
+		border-top-color: var(--bs-body-bg, #fff);
+	}
+
+	.instance-info-icon:hover .instance-tooltip {
+		display: block;
+	}
+
+	.tooltip-header {
+		font-weight: 600;
+		margin-bottom: 8px;
+		color: var(--bs-link-color, #007bff);
+		opacity: 0.9;
+		font-size: 13px;
+	}
+
+	.tooltip-item {
+		margin-bottom: 6px;
+		padding-left: 2px;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.tooltip-item i {
+		font-size: 11px;
+		opacity: 0.6;
+		width: 14px;
+		flex-shrink: 0;
+	}
+
+	.tooltip-warning {
+		margin-top: 10px;
+		padding-top: 10px;
+		border-top: 1px solid;
+		border-top-color: var(--bs-body-color, #212529);
+		border-top-opacity: 0.2;
+		color: #ff6b6b;
+		font-weight: 500;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.tooltip-warning i {
+		color: #ff6b6b;
+		font-size: 12px;
+		width: 14px;
+		flex-shrink: 0;
+	}
+
+	.instance-content {
+		text-align: center;
+	}
+
+	.instance-timer {
+		font-family: 'Courier New', Consolas, monospace;
+		font-size: 13px;
+		font-weight: 600;
+		margin: 2px 0 6px 0;
+		padding: 5px 10px;
+		border-radius: 4px;
+		display: inline-block;
+		min-width: 85px;
+	}
+
+	.instance-timer.timer-ok {
+		color: #1e7e34;
+		background-color: rgba(40, 167, 69, 0.15);
+		border: 1px solid rgba(40, 167, 69, 0.3);
+	}
+
+	.instance-timer.timer-warning {
+		color: #856404;
+		background-color: rgba(255, 193, 7, 0.15);
+		border: 1px solid rgba(255, 193, 7, 0.3);
+	}
+
+	.instance-timer.timer-expired {
+		color: #a71d2a;
+		background-color: rgba(220, 53, 69, 0.15);
+		border: 1px solid rgba(220, 53, 69, 0.3);
+	}
+
+	@media (prefers-color-scheme: dark) {
+		.instance-timer.timer-ok {
+			color: #6fdc8c;
+			background-color: rgba(76, 175, 80, 0.2);
+			border-color: rgba(76, 175, 80, 0.4);
+		}
+
+		.instance-timer.timer-warning {
+			color: #ffd93d;
+			background-color: rgba(255, 235, 59, 0.2);
+			border-color: rgba(255, 235, 59, 0.4);
+		}
+
+		.instance-timer.timer-expired {
+			color: #ff6b6b;
+			background-color: rgba(244, 67, 54, 0.2);
+			border-color: rgba(244, 67, 54, 0.4);
+		}
+	}
+
+	.instance-buttons {
+		display: flex;
+		gap: 8px;
+		justify-content: center;
+		flex-wrap: wrap;
+		margin-top: 8px;
+	}
+
+	.instance-btn {
+		min-width: 120px;
+		font-weight: 500;
+		transition: all 0.2s;
+	}
+
+	.instance-btn:disabled {
+		cursor: not-allowed;
+		opacity: 0.65;
+	}
+
+	.loading-spinner {
+		width: 14px;
+		height: 14px;
+		border: 2px solid currentColor;
+		border-top: 2px solid transparent;
+		border-radius: 50%;
+		animation: spin 0.8s linear infinite;
+		display: inline-block;
+		margin-right: 6px;
+		vertical-align: middle;
+	}
+
+	@keyframes spin {
+		0% { transform: rotate(0deg); }
+		100% { transform: rotate(360deg); }
+	}
+
+	.deployment-info {
+		margin: 8px 0;
+		padding: 10px;
+		border-radius: 4px;
+		font-size: 15px;
+	}
+
+	.deployment-info code {
+		background: var(--bs-body-color, #212529);
+		color: var(--bs-body-bg, #fff);
+		padding: 8px 12px;
+		border-radius: 4px;
+		font-family: 'Courier New', Consolas, monospace;
+		font-size: 14px;
+		display: inline-block;
+		margin-top: 8px;
+		opacity: 0.95;
+	}
+
+	.deployment-info a {
+		color: var(--bs-link-color, #007bff);
+		font-weight: 500;
+		text-decoration: none;
+		word-break: break-all;
+		font-size: 15px;
+	}
+
+	.deployment-info a:hover {
+		text-decoration: underline;
+		color: var(--bs-link-hover-color, #0056b3);
+	}
+</style>
+
+<div class="instance-container">
+	<img class="d-none" src onerror='view_container_info({{ challenge.id }})'>
+
+	<div class="instance-header">
+		<span>Challenge Instance</span>
+		<span class="instance-info-icon">
+			?
+			<span class="instance-tooltip">
+				<div class="tooltip-header">Personal Container</div>
+				<div class="tooltip-item">
+					<i class="fas fa-server"></i>
+					<span>You get your own isolated environment to prevent interference</span>
+				</div>
+				<div class="tooltip-item">
+					<i class="fas fa-clock"></i>
+					<span>Expires after a time limit to free up server resources</span>
+				</div>
+				<div class="tooltip-item">
+					<i class="fas fa-flag"></i>
+					<span>Your flag may be unique to prevent sharing answers</span>
+				</div>
+				<div class="tooltip-warning">
+					<i class="fas fa-exclamation-triangle"></i>
+					<span>Sharing flags with other users is cheating</span>
+				</div>
+			</span>
+		</span>
+	</div>
+
+	<div class="instance-content">
+		<div id="deployment-info" class="deployment-info" style="display: none;"></div>
+
+		<div class="instance-buttons">
+			<button onclick="container_request({{ challenge.id }})" class="btn btn-success instance-btn d-none" id="create-chal">
+				<i class="fas fa-play"></i> Start Instance
+			</button>
+			<button onclick="container_renew({{ challenge.id }})" class="btn btn-info instance-btn d-none" id="extend-chal">
+				<i class="fas fa-clock"></i> Extend Time
+			</button>
+			<button onclick="container_stop({{ challenge.id }})" class="btn btn-danger instance-btn d-none" id="terminate-chal">
+				<i class="fas fa-power-off"></i> Terminate Instance
+			</button>
+		</div>
+	</div>
 </div>
 {% endblock %}

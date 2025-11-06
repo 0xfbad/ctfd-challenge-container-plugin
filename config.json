@@ -1,4 +1,4 @@
 {
-	"name": "Containers",
-	"route": "/containers/dashboard"
+	"name": "Challenge Containers",
+	"config": "plugins/individualized-containers/templates/admin/plugin_config.html"
 }

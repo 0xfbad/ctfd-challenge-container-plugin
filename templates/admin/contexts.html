@@ -1,0 +1,138 @@
+{% extends 'admin/base.html' %}
+{% block content %}
+<div class="jumbotron">
+	<div class="container">
+		<h1>Docker Contexts</h1>
+	</div>
+</div>
+<div class="container">
+	<div class="row mb-3">
+		<div class="col-md-12">
+			<button type="button" class="btn btn-primary" id="add-context-btn">
+				Add Docker Context
+			</button>
+		</div>
+	</div>
+	<div class="row">
+		<div class="col-md-12">
+			<table class="table table-striped">
+				<thead>
+					<tr>
+						<th>Context Name</th>
+						<th>Hostname</th>
+						<th>Status</th>
+						<th>Actions</th>
+					</tr>
+				</thead>
+				<tbody id="contexts-table-body">
+					{% for context in contexts %}
+					<tr data-context-id="{{ context.id }}">
+						<td>{{ context.context_name }}{% if context.context_name == 'default' %} <span class="badge badge-info">Auto-detected</span>{% endif %}</td>
+						<td>{{ context.hostname if context.hostname else 'Auto-detected from request' }}</td>
+						<td>
+							<span class="badge badge-{{ 'success' if context.enabled else 'secondary' }}">
+								{{ 'Enabled' if context.enabled else 'Disabled' }}
+							</span>
+						</td>
+						<td>
+							{% if context.id %}
+							<button class="btn btn-sm btn-info test-context-btn" data-context-id="{{ context.id }}">
+								Test
+							</button>
+							<button class="btn btn-sm btn-warning edit-context-btn" data-context-id="{{ context.id }}"
+								data-hostname="{{ context.hostname }}" data-enabled="{{ context.enabled }}">
+								Edit
+							</button>
+							<button class="btn btn-sm btn-danger delete-context-btn" data-context-id="{{ context.id }}">
+								Delete
+							</button>
+							{% else %}
+							<span class="text-muted">Default context (cannot be edited)</span>
+							{% endif %}
+						</td>
+					</tr>
+					{% endfor %}
+				</tbody>
+			</table>
+		</div>
+	</div>
+</div>
+
+<div class="modal fade" id="addContextModal" tabindex="-1" role="dialog">
+	<div class="modal-dialog" role="document">
+		<div class="modal-content">
+			<div class="modal-header">
+				<h5 class="modal-title">Add Docker Context</h5>
+				<button type="button" class="close" data-dismiss="modal">
+					<span>&times;</span>
+				</button>
+			</div>
+			<div class="modal-body">
+				<form id="add-context-form">
+					<div class="form-group">
+						<label for="context-name">Context Name</label>
+						<input type="text" class="form-control" id="context-name" required
+							placeholder="e.g. default, server1, server2">
+						<small class="form-text text-muted">
+							This should match a docker context name configured on your system
+						</small>
+					</div>
+					<div class="form-group">
+						<label for="context-hostname">Public Hostname</label>
+						<input type="text" class="form-control" id="context-hostname" required
+							placeholder="e.g. ctf.example.com, server1.example.com">
+						<small class="form-text text-muted">
+							The hostname users will connect to for containers on this context
+						</small>
+					</div>
+					<div class="form-group">
+						<div class="custom-control custom-checkbox">
+							<input type="checkbox" class="custom-control-input" id="context-enabled" checked>
+							<label class="custom-control-label" for="context-enabled">Enabled</label>
+						</div>
+					</div>
+				</form>
+			</div>
+			<div class="modal-footer">
+				<button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+				<button type="button" class="btn btn-primary" id="save-context-btn">Add Context</button>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div class="modal fade" id="editContextModal" tabindex="-1" role="dialog">
+	<div class="modal-dialog" role="document">
+		<div class="modal-content">
+			<div class="modal-header">
+				<h5 class="modal-title">Edit Docker Context</h5>
+				<button type="button" class="close" data-dismiss="modal">
+					<span>&times;</span>
+				</button>
+			</div>
+			<div class="modal-body">
+				<form id="edit-context-form">
+					<input type="hidden" id="edit-context-id">
+					<div class="form-group">
+						<label for="edit-context-hostname">Public Hostname</label>
+						<input type="text" class="form-control" id="edit-context-hostname" required>
+					</div>
+					<div class="form-group">
+						<div class="custom-control custom-checkbox">
+							<input type="checkbox" class="custom-control-input" id="edit-context-enabled">
+							<label class="custom-control-label" for="edit-context-enabled">Enabled</label>
+						</div>
+					</div>
+				</form>
+			</div>
+			<div class="modal-footer">
+				<button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+				<button type="button" class="btn btn-primary" id="update-context-btn">Update Context</button>
+			</div>
+		</div>
+	</div>
+</div>
+{% endblock content %}
+{% block scripts %}
+<script src="{{ url_for('.static', filename='admin/contexts.js') }}"></script>
+{% endblock scripts %}

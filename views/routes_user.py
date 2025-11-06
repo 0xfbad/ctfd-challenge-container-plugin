@@ -19,7 +19,6 @@ from ..utils import is_team_mode, settings
 from ..container_manager import ContainerException
 from ..models import ContainerInfoModel
 
-# helper function to validate request data and user
 def validate_request(required_fields):
 	user = get_current_user()
 

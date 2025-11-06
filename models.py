@@ -16,19 +16,13 @@ class ContainerChallengeModel(Challenges):
 	ctype = db.Column(db.Text, default='tcp')
 	ssh_username = db.Column(db.Text, nullable=True)
 	ssh_password = db.Column(db.Text, nullable=True)
-
-	# dynamic challenge properties
-	initial = db.Column(db.Integer, default=0)
-	minimum = db.Column(db.Integer, default=0)
-	decay = db.Column(db.Integer, default=0)
-
-	def __init__(self, *args, **kwargs):
-		super().__init__(**kwargs)
-		self.value = kwargs.get('initial', 0)
+	expiration_minutes = db.Column(db.Integer, default=30)
+	max_memory_mb = db.Column(db.Integer, nullable=True)
+	max_cpu = db.Column(db.Float, nullable=True)
+	docker_context = db.Column(db.String(512), nullable=True)
 
 class ContainerInfoModel(db.Model):
 	__tablename__ = 'container_info'
-	__mapper_args__ = {'polymorphic_identity': 'container_info'}
 	container_id = db.Column(db.String(512), primary_key=True)
 	challenge_id = db.Column(
 		db.Integer,
@@ -49,12 +43,20 @@ class ContainerInfoModel(db.Model):
 	ssh_password = db.Column(db.Text, nullable=True)
 	timestamp = db.Column(db.Integer)
 	expires = db.Column(db.Integer)
+	docker_context = db.Column(db.String(512), nullable=True)
 	team = relationship('Teams', foreign_keys=[team_id])
 	user = relationship('Users', foreign_keys=[user_id])
 	challenge = relationship(ContainerChallengeModel, foreign_keys=[challenge_id])
 
 class ContainerSettingsModel(db.Model):
 	__tablename__ = 'container_settings'
-	__mapper_args__ = {'polymorphic_identity': 'container_settings'}
 	key = db.Column(db.String(512), primary_key=True)
 	value = db.Column(db.Text)
+
+class DockerContextModel(db.Model):
+	__tablename__ = 'docker_contexts'
+	id = db.Column(db.Integer, primary_key=True)
+	context_name = db.Column(db.String(512), unique=True, nullable=False)
+	hostname = db.Column(db.String(512), nullable=True)
+	weight = db.Column(db.Integer, default=1)
+	enabled = db.Column(db.Boolean, default=True)

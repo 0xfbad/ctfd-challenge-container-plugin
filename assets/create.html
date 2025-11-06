@@ -7,6 +7,16 @@
 {% endblock %}
 
 {% block value %}
+<div class="form-group">
+    <label>
+        Value<br>
+        <small class="form-text text-muted">
+            Points awarded for solving this challenge.
+        </small>
+    </label>
+    <input type="number" class="form-control" name="value" placeholder="100" required min="0">
+</div>
+
 <div class="form-group d-none">
     <label>
         Connection Info<br>
@@ -18,42 +28,27 @@
 </div>
 
 <div class="form-group">
-    <label for="value">Initial Value<br>
+    <label>
+        Docker Context<br>
         <small class="form-text text-muted">
-            This is how many points the challenge is worth initially.
+            Select which docker context/host will run this challenge's containers.
         </small>
     </label>
-    <input type="number" class="form-control" name="initial" placeholder="Enter value" required>
-</div>
-
-<div class="form-group">
-    <label for="value">Decay Limit<br>
-        <small class="form-text text-muted">
-            The number of solves before the challenge reaches its minimum value.
-        </small>
-    </label>
-    <input type="number" class="form-control chal-decay" name="decay" placeholder="Enter decay limit" min="1" required>
-</div>
-
-<div class="form-group">
-    <label for="value">Minimum Value<br>
-        <small class="form-text text-muted">
-            This is the lowest that the challenge can be worth.
-        </small>
-    </label>
-    <input type="number" class="form-control chal-minimum" name="minimum" placeholder="Enter minimum value" required>
+    <select class="form-control" name="docker_context" id="docker-context" required>
+        <option value="" disabled selected>Loading contexts...</option>
+    </select>
 </div>
 
 <div class="form-group">
     <label>
         Image<br>
         <small class="form-text text-muted">
-            Name of the Docker image to spin up.
+            Name of the Docker image to spin up (from selected context).
         </small>
     </label>
     <select type="text" class="form-control" name="image" placeholder="Enter image" id="container-image"
         title="Name of the Docker image to spin up" required disabled>
-        <option value="" id="container-image-default" disabled selected>Loading...</option>
+        <option value="" id="container-image-default" disabled selected>Select a context first...</option>
     </select>
 </div>
 
@@ -124,6 +119,36 @@
         </small>
     </label>
     <input type="text" class="form-control" name="volumes" placeholder="Enter volumes or leave blank">
+</div>
+
+<div class="form-group">
+    <label>
+        Expiration (minutes)<br>
+        <small class="form-text text-muted">
+            Container lifetime in minutes before auto-kill (0 = never expire).
+        </small>
+    </label>
+    <input type="number" class="form-control" name="expiration_minutes" placeholder="30" value="30" min="0">
+</div>
+
+<div class="form-group">
+    <label>
+        Max Memory (MB)<br>
+        <small class="form-text text-muted">
+            Maximum memory limit per container in megabytes (leave blank for no limit).
+        </small>
+    </label>
+    <input type="number" class="form-control" name="max_memory_mb" placeholder="1024" min="1">
+</div>
+
+<div class="form-group">
+    <label>
+        Max CPU<br>
+        <small class="form-text text-muted">
+            Maximum CPU cores per container as a decimal (e.g., 1.5 for 1.5 cores, leave blank for no limit).
+        </small>
+    </label>
+    <input type="number" class="form-control" name="max_cpu" placeholder="1.0" step="0.1" min="0.1">
 </div>
 
 <script>

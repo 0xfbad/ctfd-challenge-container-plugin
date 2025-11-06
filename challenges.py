@@ -1,9 +1,7 @@
-import math
 import json
 
-from CTFd.models import db, Solves
 from CTFd.plugins.challenges import BaseChallenge
-from CTFd.utils.modes import get_model
+from CTFd.models import db
 
 from .models import ContainerChallengeModel
 from .utils import get_settings_path
@@ -16,9 +14,39 @@ class ContainerChallenge(BaseChallenge):
     name = settings["plugin-info"]["name"]
     templates = settings["plugin-info"]["templates"]
     scripts = settings["plugin-info"]["scripts"]
-    route = "/plugins/containers/assets/"
+    route = settings["plugin-info"]["route"]
 
     challenge_model = ContainerChallengeModel
+
+    @staticmethod
+    def sanitize_value(value):
+        return value if value and value != '' else None
+
+    @classmethod
+    def create(cls, request):
+        data = request.form or request.get_json()
+
+        for attr in ("max_memory_mb", "max_cpu", "expiration_minutes"):
+            if attr in data:
+                data[attr] = cls.sanitize_value(data[attr])
+
+        challenge = cls.challenge_model(**data)
+        db.session.add(challenge)
+        db.session.commit()
+
+        return challenge
+
+    @classmethod
+    def update(cls, challenge, request):
+        data = request.form or request.get_json()
+
+        for attr, value in data.items():
+            if attr in ("max_memory_mb", "max_cpu", "expiration_minutes"):
+                value = cls.sanitize_value(value)
+            setattr(challenge, attr, value)
+
+        db.session.commit()
+        return challenge
 
     @classmethod
     def read(cls, challenge):
@@ -26,15 +54,16 @@ class ContainerChallenge(BaseChallenge):
             "id": challenge.id,
             "name": challenge.name,
             "value": challenge.value,
+            "docker_context": challenge.docker_context,
             "image": challenge.image,
             "port": challenge.port,
             "command": challenge.command,
             "ctype": challenge.ctype,
             "ssh_username": challenge.ssh_username,
             "ssh_password": challenge.ssh_password,
-            "initial": challenge.initial,
-            "decay": challenge.decay,
-            "minimum": challenge.minimum,
+            "expiration_minutes": challenge.expiration_minutes,
+            "max_memory_mb": challenge.max_memory_mb,
+            "max_cpu": challenge.max_cpu,
             "description": challenge.description,
             "connection_info": challenge.connection_info,
             "category": challenge.category,
@@ -49,63 +78,3 @@ class ContainerChallenge(BaseChallenge):
             },
         }
         return data
-
-    @classmethod
-    def calculate_value(cls, challenge):
-        # get the current user or team model
-        Model = get_model()
-
-        # count the number of valid solves for the challenge
-        solve_count = (
-            Solves.query.join(Model, Solves.account_id == Model.id)
-            .filter(
-                Solves.challenge_id == challenge.id,
-                Model.hidden == False,
-                Model.banned == False,
-            )
-            .count()
-        )
-
-        # adjust solve count for calculation
-        adjusted_solve_count = max(solve_count - 1, 0)
-
-        # calculate the new challenge value based on decay formula
-        value = (
-            ((challenge.minimum - challenge.initial) / (challenge.decay ** 2))
-            * (adjusted_solve_count ** 2)
-        ) + challenge.initial
-
-        value = math.ceil(value)
-
-        if value < challenge.minimum:
-            value = challenge.minimum
-
-        # update the challenge value in the database
-        challenge.value = value
-        db.session.commit()
-
-        return challenge
-
-    @classmethod
-    def update(cls, challenge, request):
-        data = request.form or request.get_json() or {}
-
-        # update challenge attributes with provided data
-        for attr, value in data.items():
-            # convert numeric fields to float if necessary
-            if attr in ("initial", "minimum", "decay"):
-                try:
-                    value = float(value)
-                except (ValueError, TypeError):
-                    continue  # skip invalid numeric values
-            setattr(challenge, attr, value)
-
-        # recalculate the challenge value after update
-        return cls.calculate_value(challenge)
-
-    @classmethod
-    def solve(cls, user, team, challenge, request):
-        # call the parent solve method to register the solve
-        super().solve(user, team, challenge, request)
-        # recalculate the challenge value after a solve
-        cls.calculate_value(challenge)

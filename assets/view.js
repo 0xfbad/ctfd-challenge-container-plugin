@@ -38,6 +38,7 @@ function resetAlert() {
     const alert = document.getElementById("deployment-info");
     alert.innerHTML = "";
     alert.classList.remove("alert-danger");
+    alert.style.display = "none";
 
     return alert;
 }
@@ -73,26 +74,36 @@ function formatTime(seconds) {
     return hoursStr + `${minutesStr}:${secondsStr}`;
 }
 
+function getTimerClass(seconds) {
+    if (seconds <= 0) return 'timer-expired';
+    if (seconds < 300) return 'timer-warning';
+    return 'timer-ok';
+}
+
 
 function createChallengeLinkElement(data, parent) {
-    // clear any existing interval associated with the parent
     if (parent.expiryInterval) {
         clearInterval(parent.expiryInterval);
     }
     parent.innerHTML = '';
+    parent.style.display = 'block';
 
-    const expires = document.createElement('span');
-    parent.append(expires, document.createElement('br'));
+    const timerDiv = document.createElement('div');
+    timerDiv.className = 'instance-timer';
+    parent.append(timerDiv);
 
     const connectionDetails = document.createElement('div');
+    connectionDetails.style.marginTop = '10px';
     parent.append(connectionDetails);
 
     function updateExpiry() {
         const secondsLeft = calculateExpiry(data.expires);
 
-        expires.textContent = secondsLeft > 0 
-            ? `Instance will expire in ${formatTime(secondsLeft)}` 
-            : "Instance has expired";
+        timerDiv.textContent = secondsLeft > 0
+            ? `Expires in ${formatTime(secondsLeft)}`
+            : "Expired";
+
+        timerDiv.className = 'instance-timer ' + getTimerClass(secondsLeft);
 
         if (secondsLeft <= 0) {
             clearInterval(parent.expiryInterval);
@@ -114,9 +125,9 @@ function createChallengeLinkElement(data, parent) {
         connectionDetails.append(codeElement);
     } else if (data.connect === "ssh") {
         const codeElement = document.createElement('code');
-        codeElement.textContent = data.ssh_password 
-            ? `sshpass -p ${data.ssh_password} ssh -o StrictHostKeyChecking=no ${data.ssh_username}@${data.hostname} -p ${data.port}`
-            : `ssh -o StrictHostKeyChecking=no ${data.ssh_username}@${data.hostname} -p ${data.port}`;
+        codeElement.textContent = data.ssh_password
+            ? `sshpass -p ${data.ssh_password} ssh -o StrictHostKeyChecking=no ${data.hostname} -p ${data.port}`
+            : `ssh -o StrictHostKeyChecking=no ${data.hostname} -p ${data.port}`;
         connectionDetails.append(codeElement);
     } else {
         const link = document.createElement('a');
@@ -143,7 +154,7 @@ function view_container_info(challengeId) {
     .then((response) => response.json())
     .then((data) => {
         if (data.status === "instance not started") {
-            alert.textContent = "Instance not started" ;
+            alert.style.display = "none";
             toggleChallengeCreate();
         } else if (data.status === "already_running") {
             createChallengeLinkElement(data, alert);
@@ -152,7 +163,7 @@ function view_container_info(challengeId) {
             resetAlert();
             alert.textContent = data.message;
             alert.classList.add('alert-danger');
-            toggleChallengeUpdate();
+            alert.style.display = "block";
         }
     })
     .catch((error) => console.error("Fetch error:", error));
@@ -160,6 +171,10 @@ function view_container_info(challengeId) {
 
 function container_request(challengeId) {
     const alert = resetAlert();
+    const btn = document.getElementById("create-chal");
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="loading-spinner"></span> Starting...';
 
     fetch("/containers/api/request", {
         method: "POST",
@@ -175,18 +190,30 @@ function container_request(challengeId) {
         if (data.error || data.message) {
             alert.textContent = data.error || data.message;
             alert.classList.add('alert-danger');
-            toggleChallengeCreate();
+            alert.style.display = "block";
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-play"></i> Start Instance';
         } else {
             createChallengeLinkElement(data, alert);
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-play"></i> Start Instance';
             toggleChallengeCreate();
             toggleChallengeUpdate();
         }
     })
-    .catch((error) => console.error("Fetch error:", error));
+    .catch((error) => {
+        console.error("Fetch error:", error);
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-play"></i> Start Instance';
+    });
 }
 
 function container_renew(challengeId) {
     const alert = resetAlert();
+    const btn = document.getElementById("extend-chal");
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="loading-spinner"></span> Extending...';
 
     fetch("/containers/api/renew", {
         method: "POST",
@@ -202,16 +229,33 @@ function container_renew(challengeId) {
         if (data.error || data.message) {
             alert.textContent = data.error || data.message;
             alert.classList.add('alert-danger');
-            toggleChallengeCreate();
+            alert.style.display = "block";
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-clock"></i> Extend Time';
         } else {
             createChallengeLinkElement(data, alert);
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-clock"></i> Extend Time';
         }
     })
-    .catch((error) => console.error("Fetch error:", error));
+    .catch((error) => {
+        console.error("Fetch error:", error);
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-clock"></i> Extend Time';
+    });
 }
 
 function container_stop(challengeId) {
     const alert = resetAlert();
+    const btn = document.getElementById("terminate-chal");
+    const extendBtn = document.getElementById("extend-chal");
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="loading-spinner"></span> Terminating...';
+
+    if (extendBtn) {
+        extendBtn.disabled = true;
+    }
 
     fetch("/containers/api/stop", {
         method: "POST",
@@ -224,15 +268,30 @@ function container_stop(challengeId) {
     })
     .then((response) => response.json())
     .then((data) => {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-power-off"></i> Terminate Instance';
+
+        if (extendBtn) {
+            extendBtn.disabled = false;
+        }
+
         if (data.error || data.message) {
             alert.textContent = data.error || data.message;
             alert.classList.add('alert-danger');
-            toggleChallengeCreate();
+            alert.style.display = "block";
         } else {
-            alert.textContent = "Instance terminated";
-            toggleChallengeCreate();
-            toggleChallengeUpdate();
+            alert.style.display = "none";
         }
+
+        toggleChallengeCreate();
+        toggleChallengeUpdate();
     })
-    .catch((error) => console.error("Fetch error:", error));
+    .catch((error) => {
+        console.error("Fetch error:", error);
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-power-off"></i> Terminate Instance';
+        if (extendBtn) {
+            extendBtn.disabled = false;
+        }
+    });
 }

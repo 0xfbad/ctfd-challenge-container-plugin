@@ -8,16 +8,16 @@
         "id": "container",
         "name": "container",
         "templates" : {
-            "create": "/plugins/containers/assets/create.html",
-            "update": "/plugins/containers/assets/update.html",
-            "view": "/plugins/containers/assets/view.html"
+            "create": "plugins/individualized-containers/assets/create.html",
+            "update": "plugins/individualized-containers/assets/update.html",
+            "view": "plugins/individualized-containers/assets/view.html"
         },
         "scripts": {
-            "create": "/plugins/containers/assets/create.js",
-            "update": "/plugins/containers/assets/update.js",
-            "view": "/plugins/containers/assets/view.js"
+            "create": "/plugins/individualized-containers/assets/create.js",
+            "update": "/plugins/individualized-containers/assets/update.js",
+            "view": "/plugins/individualized-containers/assets/view.js"
         },
-        "route" : "/plugins/containers/assets/"
+        "route" : "/plugins/individualized-containers/assets/"
     },
 
     "requests" : {
