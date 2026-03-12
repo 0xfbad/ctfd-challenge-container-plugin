@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 import atexit
 import time
 import json
 import random
 import socket
 import os
+from typing import Any
 
 from flask import Flask
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -45,8 +48,9 @@ class ContainerManager:
 
     def initialize_connection(self):
         import threading
+
         current_thread = threading.current_thread()
-        is_scheduler_thread = hasattr(current_thread, '_target') and 'apscheduler' in str(current_thread._target)
+        is_scheduler_thread = hasattr(current_thread, "_target") and "apscheduler" in str(current_thread._target)
 
         if not is_scheduler_thread:
             try:
@@ -85,19 +89,19 @@ class ContainerManager:
             try:
                 docker_endpoint = None
 
-                context_file = os.path.expanduser(f'~/.docker/contexts/meta/{context.context_name}/meta.json')
+                context_file = os.path.expanduser(f"~/.docker/contexts/meta/{context.context_name}/meta.json")
 
                 if os.path.exists(context_file):
                     try:
-                        with open(context_file, 'r') as f:
+                        with open(context_file, "r") as f:
                             context_meta = json.load(f)
-                            docker_endpoint = context_meta.get('Endpoints', {}).get('docker', {}).get('Host')
+                            docker_endpoint = context_meta.get("Endpoints", {}).get("docker", {}).get("Host")
                     except Exception as e:
                         print(f"could not read context meta file: {e}")
 
                 if not docker_endpoint:
                     if context.hostname:
-                        if '@' in context.hostname:
+                        if "@" in context.hostname:
                             docker_endpoint = f"ssh://{context.hostname}"
                         else:
                             docker_endpoint = f"ssh://root@{context.hostname}"
@@ -165,8 +169,8 @@ class ContainerManager:
 
         raise ContainerException("no available port found")
 
-    def run_command(func):
-        def wrapper(self, *args, **kwargs):
+    def run_command(func: Any) -> Any:
+        def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
             if not self.clients:
                 try:
                     self.initialize_connection()
@@ -177,6 +181,7 @@ class ContainerManager:
                 raise ContainerException("no docker contexts available")
 
             return func(self, *args, **kwargs)
+
         return wrapper
 
     @run_command
@@ -208,14 +213,14 @@ class ContainerManager:
                         user_name=user_name,
                         team_id=team_id,
                         team_name=team_name,
-                        message=f"container expired for {challenge_name}"
+                        message=f"container expired for {challenge_name}",
                     )
 
                     db.session.delete(container)
                     db.session.commit()
 
     @run_command
-    def is_container_running(self, container_id: str, context_name: str = None) -> bool:
+    def is_container_running(self, container_id: str, context_name: str | None = None) -> bool:
         if context_name and context_name in self.clients:
             client = self.clients[context_name]
         else:
@@ -238,18 +243,18 @@ class ContainerManager:
     @run_command
     def create_container(
         self,
-        chal_id: str,
-        team_id: str,
-        user_id: str,
+        chal_id: int | str,
+        team_id: int | str,
+        user_id: int | str,
         image: str,
         port: int,
         command: str,
         volumes: str,
-        max_memory_mb: int = None,
-        max_cpu: float = None,
-        context_name: str = None,
+        max_memory_mb: int | None = None,
+        max_cpu: float | None = None,
+        context_name: str | None = None,
     ):
-        kwargs = {}
+        kwargs: dict[str, Any] = {}
 
         if max_memory_mb:
             try:
@@ -305,7 +310,7 @@ class ContainerManager:
             except docker.errors.DockerException as e:
                 raise ContainerException(f"failed to create container: {e}")
         else:
-            tried_contexts = set()
+            tried_contexts: set[str] = set()
             last_error = None
 
             while len(tried_contexts) < len(self.clients):
@@ -344,7 +349,7 @@ class ContainerManager:
             raise ContainerException(f"failed to create container on any context: {last_error}")
 
     @run_command
-    def get_container_port(self, container_id: str, context_name: str = None) -> str:
+    def get_container_port(self, container_id: str, context_name: str | None = None) -> str | None:
         if context_name and context_name in self.clients:
             client = self.clients[context_name]
         else:
@@ -373,7 +378,7 @@ class ContainerManager:
 
     @run_command
     def get_images(self) -> list:
-        images_by_context = {}
+        images_by_context: dict[str, list[str]] = {}
         for context_name, client in self.clients.items():
             try:
                 images = client.images.list()
@@ -416,7 +421,7 @@ class ContainerManager:
         return sorted(result)
 
     @run_command
-    def kill_container(self, container_id: str, context_name: str = None):
+    def kill_container(self, container_id: str, context_name: str | None = None):
         if context_name and context_name in self.clients:
             client = self.clients[context_name]
         else:
