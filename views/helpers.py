@@ -9,48 +9,62 @@ from ..container_manager import ContainerException
 from ..utils import settings
 from ..event_logger import event_logger
 
-def log_container_event(event_type, container_id=None, challenge_id=None, challenge_name=None, user_id=None, user_name=None, team_id=None, team_name=None, message=None):
-	event_logger.log_event(
-		event_type=event_type,
-		container_id=container_id,
-		challenge_id=challenge_id,
-		challenge_name=challenge_name,
-		user_id=user_id,
-		user_name=user_name,
-		team_id=team_id,
-		team_name=team_name,
-		message=message
-	)
+
+def log_container_event(
+    event_type,
+    container_id=None,
+    challenge_id=None,
+    challenge_name=None,
+    user_id=None,
+    user_name=None,
+    team_id=None,
+    team_name=None,
+    message=None,
+):
+    event_logger.log_event(
+        event_type=event_type,
+        container_id=container_id,
+        challenge_id=challenge_id,
+        challenge_name=challenge_name,
+        user_id=user_id,
+        user_name=user_name,
+        team_id=team_id,
+        team_name=team_name,
+        message=message,
+    )
+
 
 def build_connection_response(status, challenge, container, context_name):
-	return {
-		"status": status,
-		"hostname": get_hostname_for_context(context_name),
-		"port": container.port,
-		"ssh_username": challenge.ssh_username,
-		"ssh_password": challenge.ssh_password,
-		"connect": challenge.ctype,
-		"expires": container.expires,
-	}
+    return {
+        "status": status,
+        "hostname": get_hostname_for_context(context_name),
+        "port": container.port,
+        "ssh_username": challenge.ssh_username,
+        "ssh_password": challenge.ssh_password,
+        "connect": challenge.ctype,
+        "expires": container.expires,
+    }
+
 
 def get_hostname_for_context(context_name):
-	if not context_name or context_name == "default":
-		try:
-			return request.host.split(':')[0]
-		except:
-			return "localhost"
+    if not context_name or context_name == "default":
+        try:
+            return request.host.split(":")[0]
+        except Exception:
+            return "localhost"
 
-	context = DockerContextModel.query.filter_by(context_name=context_name).first()
-	if context and context.hostname:
-		hostname = context.hostname
-		if '@' in hostname:
-			hostname = hostname.split('@')[1]
-		return hostname
+    context = DockerContextModel.query.filter_by(context_name=context_name).first()
+    if context and context.hostname:
+        hostname = context.hostname
+        if "@" in hostname:
+            hostname = hostname.split("@")[1]
+        return hostname
 
-	try:
-		return request.host.split(':')[0]
-	except:
-		return "localhost"
+    try:
+        return request.host.split(":")[0]
+    except Exception:
+        return "localhost"
+
 
 def kill_container(container_id):
     container_manager = current_app.container_manager
@@ -82,7 +96,7 @@ def kill_container(container_id):
                 user_name=user_name,
                 team_id=team_id,
                 team_name=team_name,
-                message=f"container killed for {challenge_name}"
+                message=f"container killed for {challenge_name}",
             )
 
             db.session.delete(container)
@@ -93,14 +107,15 @@ def kill_container(container_id):
     else:
         return {"error": "container not found"}
 
+
 def renew_container(chal_id, xid, is_team):
     challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
 
     if challenge is None:
         return {"error": "challenge not found"}, 400
 
-    filter_args = {'challenge_id': challenge.id}
-    filter_args['team_id' if is_team else 'user_id'] = xid
+    filter_args = {"challenge_id": challenge.id}
+    filter_args["team_id" if is_team else "user_id"] = xid
     running_container = ContainerInfoModel.query.filter_by(**filter_args).first()
 
     if running_container is None:
@@ -127,12 +142,13 @@ def renew_container(chal_id, xid, is_team):
         user_name=user_name,
         team_id=team_id,
         team_name=team_name,
-        message=f"container renewed for {challenge.name}"
+        message=f"container renewed for {challenge.name}",
     )
 
     response = build_connection_response("success", challenge, running_container, running_container.docker_context)
     response["success"] = "container renewed"
     return response
+
 
 def create_container(chal_id, xid, uid, is_team):
     container_manager = current_app.container_manager
@@ -151,14 +167,16 @@ def create_container(chal_id, xid, uid, is_team):
             "error": f"you can only spawn {max_containers_allowed} containers at a time, please stop other containers to continue"
         }, 500
 
-    filter_args = {'challenge_id': challenge.id}
-    filter_args['team_id' if is_team else 'user_id'] = xid
+    filter_args = {"challenge_id": challenge.id}
+    filter_args["team_id" if is_team else "user_id"] = xid
     running_container = ContainerInfoModel.query.filter_by(**filter_args).first()
 
     if running_container:
         try:
             if container_manager.is_container_running(running_container.container_id, running_container.docker_context):
-                response = build_connection_response("already_running", challenge, running_container, running_container.docker_context)
+                response = build_connection_response(
+                    "already_running", challenge, running_container, running_container.docker_context
+                )
                 return response
             else:
                 db.session.delete(running_container)
@@ -217,11 +235,12 @@ def create_container(chal_id, xid, uid, is_team):
         user_name=user_name,
         team_id=team_id,
         team_name=team_name,
-        message=f"container created for {challenge.name}"
+        message=f"container created for {challenge.name}",
     )
 
     response = build_connection_response("created", challenge, new_container, context_name)
     return response
+
 
 def view_container_info(chal_id, xid, is_team):
     container_manager = current_app.container_manager
@@ -230,14 +249,16 @@ def view_container_info(chal_id, xid, is_team):
     if challenge is None:
         return {"error": "challenge not found"}, 400
 
-    filter_args = {'challenge_id': challenge.id}
-    filter_args['team_id' if is_team else 'user_id'] = xid
+    filter_args = {"challenge_id": challenge.id}
+    filter_args["team_id" if is_team else "user_id"] = xid
     running_container = ContainerInfoModel.query.filter_by(**filter_args).first()
 
     if running_container:
         try:
             if container_manager.is_container_running(running_container.container_id, running_container.docker_context):
-                response = build_connection_response("already_running", challenge, running_container, running_container.docker_context)
+                response = build_connection_response(
+                    "already_running", challenge, running_container, running_container.docker_context
+                )
                 return response
             else:
                 db.session.delete(running_container)
@@ -247,6 +268,7 @@ def view_container_info(chal_id, xid, is_team):
     else:
         return {"status": "instance not started"}
 
+
 def connect_type(chal_id):
     challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
 
@@ -254,6 +276,7 @@ def connect_type(chal_id):
         return {"error": "challenge not found"}, 400
 
     return {"status": "ok", "connect": challenge.ctype}
+
 
 @containers_bp.app_template_filter("format_time")
 def format_time_filter(unix_seconds):
