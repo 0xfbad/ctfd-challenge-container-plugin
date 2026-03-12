@@ -6,8 +6,9 @@ from CTFd.models import db
 from .models import ContainerChallengeModel
 from .utils import get_settings_path
 
-with open(get_settings_path(), 'r') as f:
+with open(get_settings_path(), "r") as f:
     settings = json.load(f)
+
 
 class ContainerChallenge(BaseChallenge):
     id = settings["plugin-info"]["id"]
@@ -20,7 +21,7 @@ class ContainerChallenge(BaseChallenge):
 
     @staticmethod
     def sanitize_value(value):
-        return value if value and value != '' else None
+        return value if value and value != "" else None
 
     @classmethod
     def create(cls, request):
