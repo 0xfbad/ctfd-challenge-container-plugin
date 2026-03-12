@@ -1,0 +1,8 @@
+[tool.ruff]
+line-length = 120
+
+[tool.mypy]
+ignore_missing_imports = true
+explicit_package_bases = true
+namespace_packages = true
+disable_error_code = ["import-untyped"]
