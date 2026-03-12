@@ -1,62 +1,51 @@
 from sqlalchemy.orm import relationship
 from CTFd.models import db, Challenges
 
+
 class ContainerChallengeModel(Challenges):
-	__tablename__ = 'container_challenges'
-	__mapper_args__ = {'polymorphic_identity': 'container'}
-	id = db.Column(
-		db.Integer,
-		db.ForeignKey('challenges.id', ondelete='CASCADE'),
-		primary_key=True
-	)
-	image = db.Column(db.Text)
-	port = db.Column(db.Integer)
-	command = db.Column(db.Text, default='')
-	volumes = db.Column(db.Text, default='')
-	ctype = db.Column(db.Text, default='tcp')
-	ssh_username = db.Column(db.Text, nullable=True)
-	ssh_password = db.Column(db.Text, nullable=True)
-	expiration_minutes = db.Column(db.Integer, default=30)
-	max_memory_mb = db.Column(db.Integer, nullable=True)
-	max_cpu = db.Column(db.Float, nullable=True)
-	docker_context = db.Column(db.String(512), nullable=True)
+    __tablename__ = "container_challenges"
+    __mapper_args__ = {"polymorphic_identity": "container"}
+    id = db.Column(db.Integer, db.ForeignKey("challenges.id", ondelete="CASCADE"), primary_key=True)
+    image = db.Column(db.Text)
+    port = db.Column(db.Integer)
+    command = db.Column(db.Text, default="")
+    volumes = db.Column(db.Text, default="")
+    ctype = db.Column(db.Text, default="tcp")
+    ssh_username = db.Column(db.Text, nullable=True)
+    ssh_password = db.Column(db.Text, nullable=True)
+    expiration_minutes = db.Column(db.Integer, default=30)
+    max_memory_mb = db.Column(db.Integer, nullable=True)
+    max_cpu = db.Column(db.Float, nullable=True)
+    docker_context = db.Column(db.String(512), nullable=True)
+
 
 class ContainerInfoModel(db.Model):
-	__tablename__ = 'container_info'
-	container_id = db.Column(db.String(512), primary_key=True)
-	challenge_id = db.Column(
-		db.Integer,
-		db.ForeignKey('challenges.id', ondelete='CASCADE')
-	)
-	team_id = db.Column(
-		db.Integer,
-		db.ForeignKey('teams.id', ondelete='CASCADE'),
-		nullable=True
-	)
-	user_id = db.Column(
-		db.Integer,
-		db.ForeignKey('users.id', ondelete='CASCADE'),
-		nullable=True
-	)
-	port = db.Column(db.Integer)
-	ssh_username = db.Column(db.Text, nullable=True)
-	ssh_password = db.Column(db.Text, nullable=True)
-	timestamp = db.Column(db.Integer)
-	expires = db.Column(db.Integer)
-	docker_context = db.Column(db.String(512), nullable=True)
-	team = relationship('Teams', foreign_keys=[team_id])
-	user = relationship('Users', foreign_keys=[user_id])
-	challenge = relationship(ContainerChallengeModel, foreign_keys=[challenge_id])
+    __tablename__ = "container_info"
+    container_id = db.Column(db.String(512), primary_key=True)
+    challenge_id = db.Column(db.Integer, db.ForeignKey("challenges.id", ondelete="CASCADE"))
+    team_id = db.Column(db.Integer, db.ForeignKey("teams.id", ondelete="CASCADE"), nullable=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    port = db.Column(db.Integer)
+    ssh_username = db.Column(db.Text, nullable=True)
+    ssh_password = db.Column(db.Text, nullable=True)
+    timestamp = db.Column(db.Integer)
+    expires = db.Column(db.Integer)
+    docker_context = db.Column(db.String(512), nullable=True)
+    team = relationship("Teams", foreign_keys=[team_id])
+    user = relationship("Users", foreign_keys=[user_id])
+    challenge = relationship(ContainerChallengeModel, foreign_keys=[challenge_id])
+
 
 class ContainerSettingsModel(db.Model):
-	__tablename__ = 'container_settings'
-	key = db.Column(db.String(512), primary_key=True)
-	value = db.Column(db.Text)
+    __tablename__ = "container_settings"
+    key = db.Column(db.String(512), primary_key=True)
+    value = db.Column(db.Text)
+
 
 class DockerContextModel(db.Model):
-	__tablename__ = 'docker_contexts'
-	id = db.Column(db.Integer, primary_key=True)
-	context_name = db.Column(db.String(512), unique=True, nullable=False)
-	hostname = db.Column(db.String(512), nullable=True)
-	weight = db.Column(db.Integer, default=1)
-	enabled = db.Column(db.Boolean, default=True)
+    __tablename__ = "docker_contexts"
+    id = db.Column(db.Integer, primary_key=True)
+    context_name = db.Column(db.String(512), unique=True, nullable=False)
+    hostname = db.Column(db.String(512), nullable=True)
+    weight = db.Column(db.Integer, default=1)
+    enabled = db.Column(db.Boolean, default=True)
