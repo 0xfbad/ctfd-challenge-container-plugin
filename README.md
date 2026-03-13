@@ -110,6 +110,32 @@ Every container gets hardened defaults regardless of challenge configuration
 - `pids_limit=256` caps the process count to prevent fork bombs
 - `auto_remove=True` so Docker cleans up the filesystem when the container stops
 
+## Freshness tokens
+
+Challenges with static flags are vulnerable to flag sharing between participants. The plugin can inject a deterministic per-user token into each container as the `FRESHNESS_TOKEN` environment variable, challenge authors use it to build unique flags and a custom CTFd flag type handles validation by recomputing the expected flag for whoever submitted it
+
+The token is 4 lowercase alphanumeric chars (`[a-z0-9]`) derived from HMAC-SHA256. Same inputs always produce the same output so restarting a container doesn't change the flag. The `freshness_secret` key gets auto-generated on first boot and stored in plugin settings, no manual configuration needed
+
+To use it you set up the flag in CTFd with the "freshness" type and put `%TOKEN%` where you want the token substituted, like `ctf{this_is_a_flag_%TOKEN%}`. On the challenge side you build the flag from the environment variable in your entrypoint
+
+```dockerfile
+FROM python:3.12-slim
+COPY server.py /app/server.py
+WORKDIR /app
+CMD FLAG="ctf{this_is_a_flag_${FRESHNESS_TOKEN}}" python server.py
+```
+
+The server code just reads `FLAG` from the environment like normal, nothing changes there
+
+```python
+import os
+flag = os.environ.get('FLAG')
+```
+
+When a user submits a flag that matches the template structure but contains another participant's token the submission gets rejected and they're told the flag belongs to someone else. The event gets logged as `flag_sharing` with warning level so admins can see it in the dashboard. The expensive all-users check only runs when the submission matches the flag pattern but with the wrong token, normal incorrect guesses skip it
+
+Clearing `freshness_secret` in the admin settings disables the feature entirely, no tokens get injected into containers and the `attempt()` override falls through to normal flag checking
+
 ## Race condition protection
 
 Container creation is serialized per challenge+team (or challenge+user in user mode) using a per-key lock, so if someone mashes the start button or sends concurrent requests only one container gets created and the second request waits on the lock. This prevents the duplicate container problem where two requests both pass the existence check and each spin up a container
@@ -178,6 +204,7 @@ Managed through the admin settings page, no config files needed
 | expiration_check_interval | 5 | seconds between expiry sweeps |
 | rate_limit_requests | 500 | max requests per rate limit interval |
 | rate_limit_interval | 10 | rate limit window in seconds |
+| freshness_secret | (auto-generated) | HMAC key for freshness tokens, clear to disable |
 
 Rate limit changes require a CTFd restart because the decorator values are evaluated at import time
 
