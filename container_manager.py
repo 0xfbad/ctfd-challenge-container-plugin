@@ -487,6 +487,7 @@ class ContainerManager:
         max_memory_mb: int | None = None,
         max_cpu: float | None = None,
         context_name: str | None = None,
+        extra_env: dict | None = None,
     ):
         kwargs: dict[str, Any] = {}
 
@@ -532,6 +533,7 @@ class ContainerManager:
                         "CHALLENGE_ID": chal_id,
                         "TEAM_ID": team_id,
                         "USER_ID": user_id,
+                        **(extra_env or {}),
                     },
                     **kwargs,
                 )
