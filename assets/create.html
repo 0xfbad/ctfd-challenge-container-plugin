@@ -7,16 +7,6 @@
 {% endblock %}
 
 {% block value %}
-<div class="form-group">
-    <label>
-        Value<br>
-        <small class="form-text text-muted">
-            Points awarded for solving this challenge.
-        </small>
-    </label>
-    <input type="number" class="form-control" name="value" placeholder="100" required min="0">
-</div>
-
 <div class="form-group d-none">
     <label>
         Connection Info<br>
@@ -29,27 +19,28 @@
 
 <div class="form-group">
     <label>
-        Docker Context<br>
+        Value<br>
         <small class="form-text text-muted">
-            Select which docker context/host will run this challenge's containers.
+            Points awarded for solving this challenge.
         </small>
     </label>
-    <select class="form-control" name="docker_context" id="docker-context" required>
-        <option value="" disabled selected>Loading contexts...</option>
-    </select>
+    <input type="number" class="form-control" name="value" placeholder="100" required min="0">
 </div>
 
 <div class="form-group">
     <label>
         Image<br>
         <small class="form-text text-muted">
-            Name of the Docker image to spin up (from selected context).
+            Name of the Docker image to spin up. Type to search.
         </small>
     </label>
-    <select type="text" class="form-control" name="image" placeholder="Enter image" id="container-image"
-        title="Name of the Docker image to spin up" required disabled>
-        <option value="" id="container-image-default" disabled selected>Select a context first...</option>
-    </select>
+    <div style="position: relative;">
+        <input type="text" class="form-control" id="image-search" placeholder="Loading images..." autocomplete="off">
+        <input type="hidden" name="image" id="image-hidden">
+        <div class="list-group" id="image-dropdown"
+            style="display: none; position: absolute; z-index: 1000; width: 100%; max-height: 300px; overflow-y: auto;">
+        </div>
+    </div>
 </div>
 
 <div class="form-group">
@@ -59,10 +50,8 @@
             Connect via web, tcp, or ssh.
         </small>
     </label>
-    <select type="text" class="form-control" name="ctype" placeholder="Connect via" id="connect-type"
-        title="Connect via web, tcp, or ssh" required>
-        <option value="" selected disabled>Choose a value...</option>
-        <option value="web">Web</option>
+    <select class="form-control" name="ctype" id="connect-type" required>
+        <option value="web" selected>Web</option>
         <option value="tcp">TCP</option>
         <option value="ssh">SSH</option>
     </select>
@@ -97,28 +86,19 @@
             Internal container port that should be exposed (external port will be automatically assigned).
         </small>
     </label>
-    <input type="number" class="form-control" name="port" placeholder="Enter port" required>
+    <input type="number" class="form-control" name="port" placeholder="80" value="80" required>
 </div>
 
 <div class="form-group">
     <label>
-        Command<br>
+        Docker Context<br>
         <small class="form-text text-muted">
-            Command to run in the Docker container.
+            Select which docker context/host will run this challenge's containers.
         </small>
     </label>
-    <input type="text" class="form-control" name="command" placeholder="Enter command or leave blank">
-</div>
-
-<div class="form-group">
-    <label>
-        Volumes<br>
-        <small class="form-text text-muted">
-            Custom volumes to mount, in JSON format. E.g.
-            <pre>{"/home/user1/": {"bind": "/mnt/vol2", "mode": "rw"}, "/var/www": {"bind": "/mnt/vol1", "mode": "ro"}}</pre>
-        </small>
-    </label>
-    <input type="text" class="form-control" name="volumes" placeholder="Enter volumes or leave blank">
+    <select class="form-control" name="docker_context" id="docker-context">
+        <option value="" selected>Loading contexts...</option>
+    </select>
 </div>
 
 <div class="form-group">
@@ -131,40 +111,59 @@
     <input type="number" class="form-control" name="expiration_minutes" placeholder="30" value="30" min="0">
 </div>
 
-<div class="form-group">
-    <label>
-        Max Memory (MB)<br>
-        <small class="form-text text-muted">
-            Maximum memory limit per container in megabytes (leave blank for no limit).
-        </small>
-    </label>
-    <input type="number" class="form-control" name="max_memory_mb" placeholder="1024" min="1">
+<style>
+    #advanced-toggle .fa-chevron-right { transition: transform 0.2s; }
+    #advanced-toggle:not(.collapsed) .fa-chevron-right { transform: rotate(90deg); }
+</style>
+<a id="advanced-toggle" class="collapsed" data-toggle="collapse" href="#advanced-section" role="button"
+    aria-expanded="false" aria-controls="advanced-section" style="display: inline-block; margin-bottom: 1rem;">
+    <i class="fas fa-chevron-right mr-1"></i> Advanced options
+</a>
+
+<div class="collapse" id="advanced-section">
+    <div class="form-group">
+        <label>
+            Command<br>
+            <small class="form-text text-muted">
+                Command to run in the Docker container.
+            </small>
+        </label>
+        <input type="text" class="form-control" name="command" placeholder="Enter command or leave blank">
+    </div>
+
+    <div class="form-group">
+        <label>
+            Volumes<br>
+            <small class="form-text text-muted">
+                Custom volumes to mount, in JSON format. E.g.
+                <pre>{"/home/user1/": {"bind": "/mnt/vol2", "mode": "rw"}, "/var/www": {"bind": "/mnt/vol1", "mode": "ro"}}</pre>
+            </small>
+        </label>
+        <input type="text" class="form-control" name="volumes" placeholder="Enter volumes or leave blank">
+    </div>
+
+    <div class="form-group">
+        <label>
+            Max Memory (MB)<br>
+            <small class="form-text text-muted">
+                Maximum memory limit per container in megabytes (leave blank for no limit).
+            </small>
+        </label>
+        <input type="number" class="form-control" name="max_memory_mb" placeholder="1024" min="1">
+    </div>
+
+    <div class="form-group">
+        <label>
+            Max CPU<br>
+            <small class="form-text text-muted">
+                Maximum CPU cores per container as a decimal (e.g., 1.5 for 1.5 cores, leave blank for no limit).
+            </small>
+        </label>
+        <input type="number" class="form-control" name="max_cpu" placeholder="1.0" step="0.1" min="0.1">
+    </div>
 </div>
 
-<div class="form-group">
-    <label>
-        Max CPU<br>
-        <small class="form-text text-muted">
-            Maximum CPU cores per container as a decimal (e.g., 1.5 for 1.5 cores, leave blank for no limit).
-        </small>
-    </label>
-    <input type="number" class="form-control" name="max_cpu" placeholder="1.0" step="0.1" min="0.1">
-</div>
-
-<script>
-    function toggleSSHFields() {
-        const connectType = document.getElementById('connect-type').value;
-        const sshFields = document.getElementById('ssh-fields');
-
-        sshFields.style.display = connectType === 'ssh' ? 'block' : 'none';
-    }
-
-    document.getElementById('connect-type').addEventListener('change', toggleSSHFields);
-
-    window.onload = function () {
-        toggleSSHFields();
-    };
-</script>
+<script src="/plugins/individualized-containers/assets/challenge-form-utils.js"></script>
 {% endblock %}
 
 {% block type %}
