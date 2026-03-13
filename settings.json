@@ -18,14 +18,5 @@
             "view": "/plugins/individualized-containers/assets/view.js"
         },
         "route" : "/plugins/individualized-containers/assets/"
-    },
-
-    "requests" : {
-        "limit": 500,
-        "interval": 10
-    },
-
-    "vars" : {
-        "MAX_CONTAINERS_ALLOWED": 4
     }
 }
