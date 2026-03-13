@@ -1,3 +1,95 @@
+<div class="mb-4">
+	<div class="mb-3 d-flex align-items-center">
+		<h3 class="mb-0">
+			<i class="fas fa-cog mr-2"></i>Plugin Settings
+		</h3>
+	</div>
+
+	<form id="plugin-settings-form">
+		<div class="row">
+			<div class="col-md-6">
+				<h5>Container Limits</h5>
+				<div class="form-group">
+					<label for="setting-max_containers_per_user">Max containers per user</label>
+					<input type="number" class="form-control setting-input" id="setting-max_containers_per_user"
+						data-key="max_containers_per_user" min="1">
+				</div>
+				<div class="form-group">
+					<label for="setting-default_memory_mb">Default memory limit (MB)</label>
+					<input type="number" class="form-control setting-input" id="setting-default_memory_mb"
+						data-key="default_memory_mb" min="0">
+					<small class="form-text text-muted">0 = unlimited</small>
+				</div>
+				<div class="form-group">
+					<label for="setting-default_cpu_limit">Default CPU limit</label>
+					<input type="number" class="form-control setting-input" id="setting-default_cpu_limit"
+						data-key="default_cpu_limit" min="0" step="0.1">
+					<small class="form-text text-muted">0 = unlimited, 1.0 = one full core</small>
+				</div>
+			</div>
+
+			<div class="col-md-6">
+				<h5>Image Management</h5>
+				<div class="form-group">
+					<label for="pull-image-name">Pre-pull image to all contexts</label>
+					<div class="input-group">
+						<input type="text" class="form-control" id="pull-image-name"
+							placeholder="e.g. nginx:latest">
+						<div class="input-group-append">
+							<button type="button" class="btn btn-outline-primary" id="pull-image-btn">
+								<i class="fas fa-download"></i> Pull
+							</button>
+						</div>
+					</div>
+					<small class="form-text text-muted" id="pull-image-status"></small>
+				</div>
+			</div>
+		</div>
+
+		<div class="row">
+			<div class="col-md-6">
+				<h5>Performance</h5>
+				<div class="form-group">
+					<label for="setting-thread_pool_size">Thread pool size</label>
+					<input type="number" class="form-control setting-input" id="setting-thread_pool_size"
+						data-key="thread_pool_size" min="1" max="32">
+				</div>
+				<div class="form-group">
+					<label for="setting-max_concurrent_creates">Max concurrent creates per context</label>
+					<input type="number" class="form-control setting-input" id="setting-max_concurrent_creates"
+						data-key="max_concurrent_creates" min="1" max="32">
+				</div>
+				<div class="form-group">
+					<label for="setting-expiration_check_interval">Expiration check interval (seconds)</label>
+					<input type="number" class="form-control setting-input" id="setting-expiration_check_interval"
+						data-key="expiration_check_interval" min="1">
+				</div>
+			</div>
+
+			<div class="col-md-6">
+				<h5>Rate Limiting <span class="badge badge-warning">restart required</span></h5>
+				<div class="form-group">
+					<label for="setting-rate_limit_requests">Requests per interval</label>
+					<input type="number" class="form-control setting-input" id="setting-rate_limit_requests"
+						data-key="rate_limit_requests" min="1">
+				</div>
+				<div class="form-group">
+					<label for="setting-rate_limit_interval">Interval (seconds)</label>
+					<input type="number" class="form-control setting-input" id="setting-rate_limit_interval"
+						data-key="rate_limit_interval" min="1">
+				</div>
+			</div>
+		</div>
+
+		<button type="button" class="btn btn-success" id="save-settings-btn">
+			<i class="fas fa-save"></i> Save Settings
+		</button>
+		<span id="settings-save-status" class="ml-2"></span>
+	</form>
+</div>
+
+<hr>
+
 <div class="mb-3 d-flex align-items-center">
 	<h3 class="mb-0">
 		<i class="fas fa-cubes mr-2"></i>Docker Contexts
@@ -151,6 +243,112 @@
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
+	// --- settings ---
+	const saveSettingsBtn = document.getElementById('save-settings-btn');
+	const settingsStatus = document.getElementById('settings-save-status');
+
+	function loadSettings() {
+		fetch('/containers/api/settings')
+			.then(r => r.json())
+			.then(data => {
+				const settings = data.settings;
+				document.querySelectorAll('.setting-input').forEach(input => {
+					const key = input.dataset.key;
+					if (settings[key]) {
+						input.value = settings[key].value;
+						input.placeholder = settings[key].default;
+					}
+				});
+			})
+			.catch(err => console.error('failed to load settings:', err));
+	}
+
+	saveSettingsBtn.addEventListener('click', async function() {
+		const payload = {};
+		document.querySelectorAll('.setting-input').forEach(input => {
+			const key = input.dataset.key;
+			if (input.value !== '') {
+				payload[key] = input.type === 'number' ? Number(input.value) : input.value;
+			}
+		});
+
+		try {
+			const response = await fetch('/containers/api/settings', {
+				method: 'PUT',
+				headers: {
+					'Content-Type': 'application/json',
+					'Accept': 'application/json',
+					'CSRF-Token': init.csrfNonce
+				},
+				body: JSON.stringify(payload)
+			});
+
+			const data = await response.json();
+			if (response.ok) {
+				settingsStatus.textContent = 'Saved';
+				settingsStatus.className = 'ml-2 text-success';
+				setTimeout(() => { settingsStatus.textContent = ''; }, 3000);
+			} else {
+				settingsStatus.textContent = 'Error: ' + (data.error || 'unknown');
+				settingsStatus.className = 'ml-2 text-danger';
+			}
+		} catch (error) {
+			settingsStatus.textContent = 'Error: ' + error.message;
+			settingsStatus.className = 'ml-2 text-danger';
+		}
+	});
+
+	loadSettings();
+
+	// --- pull image ---
+	const pullImageBtn = document.getElementById('pull-image-btn');
+	const pullImageStatus = document.getElementById('pull-image-status');
+
+	if (pullImageBtn) {
+		pullImageBtn.addEventListener('click', async function() {
+			const image = document.getElementById('pull-image-name').value.trim();
+			if (!image) {
+				pullImageStatus.textContent = 'Enter an image name';
+				pullImageStatus.className = 'form-text text-danger';
+				return;
+			}
+
+			pullImageBtn.disabled = true;
+			pullImageStatus.textContent = 'Pulling...';
+			pullImageStatus.className = 'form-text text-info';
+
+			try {
+				const response = await fetch('/containers/api/pull', {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						'Accept': 'application/json',
+						'CSRF-Token': init.csrfNonce
+					},
+					body: JSON.stringify({ image: image })
+				});
+
+				const data = await response.json();
+				if (response.ok && data.results) {
+					const summary = Object.entries(data.results)
+						.map(([ctx, status]) => `${ctx}: ${status}`)
+						.join(', ');
+					pullImageStatus.textContent = summary;
+					pullImageStatus.className = 'form-text text-success';
+				} else {
+					pullImageStatus.textContent = 'Error: ' + (data.error || 'unknown');
+					pullImageStatus.className = 'form-text text-danger';
+				}
+			} catch (error) {
+				pullImageStatus.textContent = 'Error: ' + error.message;
+				pullImageStatus.className = 'form-text text-danger';
+			} finally {
+				pullImageBtn.disabled = false;
+			}
+		});
+	}
+
+	// --- contexts ---
 	const addContextBtn = document.getElementById('add-context-btn');
 	const saveContextBtn = document.getElementById('save-context-btn');
 	const updateContextBtn = document.getElementById('update-context-btn');
