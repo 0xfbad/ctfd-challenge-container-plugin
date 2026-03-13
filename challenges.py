@@ -30,7 +30,7 @@ class ContainerChallenge(BaseChallenge):
     def create(cls, request):
         data = request.form or request.get_json()
 
-        for attr in ("max_memory_mb", "max_cpu", "expiration_minutes"):
+        for attr in ("docker_context", "max_memory_mb", "max_cpu", "expiration_minutes"):
             if attr in data:
                 data[attr] = cls.sanitize_value(data[attr])
 
@@ -45,7 +45,7 @@ class ContainerChallenge(BaseChallenge):
         data = request.form or request.get_json()
 
         for attr, value in data.items():
-            if attr in ("max_memory_mb", "max_cpu", "expiration_minutes"):
+            if attr in ("docker_context", "max_memory_mb", "max_cpu", "expiration_minutes"):
                 value = cls.sanitize_value(value)
             setattr(challenge, attr, value)
 
