@@ -159,6 +159,14 @@ function view_container_info(challengeId) {
         } else if (data.status === "already_running") {
             createChallengeLinkElement(data, alert);
             toggleChallengeUpdate();
+        } else if (data.status === "host_unavailable") {
+            createChallengeLinkElement(data, alert);
+            const warning = document.createElement('div');
+            warning.className = 'alert alert-warning';
+            warning.style.marginTop = '8px';
+            warning.textContent = data.message || 'Host temporarily unreachable';
+            alert.prepend(warning);
+            toggleChallengeUpdate();
         } else {
             resetAlert();
             alert.textContent = data.message;
@@ -169,12 +177,26 @@ function view_container_info(challengeId) {
     .catch((error) => console.error("Fetch error:", error));
 }
 
-function container_request(challengeId) {
+var _requestInFlight = false;
+
+function _isPermanentError(msg) {
+    if (!msg) return false;
+    const permanent = ["image not found", "max containers", "challenge not found"];
+    const lower = msg.toLowerCase();
+    return permanent.some(p => lower.includes(p));
+}
+
+function _doContainerRequest(challengeId, isRetry) {
     const alert = resetAlert();
     const btn = document.getElementById("create-chal");
 
+    if (_requestInFlight) return;
+    _requestInFlight = true;
+
     btn.disabled = true;
-    btn.innerHTML = '<span class="loading-spinner"></span> Starting...';
+    btn.innerHTML = isRetry
+        ? '<span class="loading-spinner"></span> Retrying...'
+        : '<span class="loading-spinner"></span> Starting...';
 
     fetch("/containers/api/request", {
         method: "POST",
@@ -188,7 +210,16 @@ function container_request(challengeId) {
     .then((response) => response.json())
     .then((data) => {
         if (data.error || data.message) {
-            alert.textContent = data.error || data.message;
+            const errMsg = data.error || data.message;
+
+            if (!isRetry && !_isPermanentError(errMsg)) {
+                btn.innerHTML = '<span class="loading-spinner"></span> Retrying...';
+                _requestInFlight = false;
+                setTimeout(() => _doContainerRequest(challengeId, true), 2000);
+                return;
+            }
+
+            alert.textContent = errMsg;
             alert.classList.add('alert-danger');
             alert.style.display = "block";
             btn.disabled = false;
@@ -205,7 +236,14 @@ function container_request(challengeId) {
         console.error("Fetch error:", error);
         btn.disabled = false;
         btn.innerHTML = '<i class="fas fa-play"></i> Start Instance';
+    })
+    .finally(() => {
+        _requestInFlight = false;
     });
+}
+
+function container_request(challengeId) {
+    _doContainerRequest(challengeId, false);
 }
 
 function container_renew(challengeId) {
