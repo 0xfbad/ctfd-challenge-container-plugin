@@ -15,9 +15,14 @@ from .helpers import (
     renew_container,
     kill_container,
 )
-from ..utils import is_team_mode, settings
+from ..utils import is_team_mode, DEFAULTS
 from ..container_manager import ContainerException
 from ..models import ContainerInfoModel
+
+# rate limit values are evaluated at import time (before app context),
+# so we use hardcoded defaults here, changes require a restart
+_RATE_LIMIT = DEFAULTS["rate_limit_requests"]
+_RATE_INTERVAL = DEFAULTS["rate_limit_interval"]
 
 
 def validate_request(required_fields):
@@ -45,8 +50,8 @@ def validate_request(required_fields):
 @require_verified_emails
 @ratelimit(
     method="GET",
-    limit=settings["requests"]["limit"],
-    interval=settings["requests"]["interval"],
+    limit=_RATE_LIMIT,
+    interval=_RATE_INTERVAL,
 )
 def get_connect_type_route(challenge_id):
     try:
@@ -61,8 +66,8 @@ def get_connect_type_route(challenge_id):
 @require_verified_emails
 @ratelimit(
     method="POST",
-    limit=settings["requests"]["limit"],
-    interval=settings["requests"]["interval"],
+    limit=_RATE_LIMIT,
+    interval=_RATE_INTERVAL,
 )
 def route_view_info():
     error_response, status_code, user = validate_request(["chal_id"])
@@ -85,8 +90,8 @@ def route_view_info():
 @require_verified_emails
 @ratelimit(
     method="POST",
-    limit=settings["requests"]["limit"],
-    interval=settings["requests"]["interval"],
+    limit=_RATE_LIMIT,
+    interval=_RATE_INTERVAL,
 )
 def route_request_container():
     error_response, status_code, user = validate_request(["chal_id"])
@@ -109,8 +114,8 @@ def route_request_container():
 @require_verified_emails
 @ratelimit(
     method="POST",
-    limit=settings["requests"]["limit"],
-    interval=settings["requests"]["interval"],
+    limit=_RATE_LIMIT,
+    interval=_RATE_INTERVAL,
 )
 def route_renew_container_route():
     error_response, status_code, user = validate_request(["chal_id"])
@@ -133,8 +138,8 @@ def route_renew_container_route():
 @require_verified_emails
 @ratelimit(
     method="POST",
-    limit=settings["requests"]["limit"],
-    interval=settings["requests"]["interval"],
+    limit=_RATE_LIMIT,
+    interval=_RATE_INTERVAL,
 )
 def route_stop_container():
     error_response, status_code, user = validate_request(["chal_id"])
