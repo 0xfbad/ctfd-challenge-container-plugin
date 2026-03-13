@@ -9,15 +9,25 @@ from .utils import settings_to_dict, DEFAULTS
 from .container_manager import ContainerManager
 from .models import ContainerInfoModel
 from .views import containers_bp
+from .flag_type import register as register_freshness_flag
+from .freshness import generate_secret
 
 
 def _seed_defaults(app):
     from CTFd.models import db
 
-    existing = {s.key for s in ContainerSettingsModel.query.all()}
+    existing = {s.key: s.value for s in ContainerSettingsModel.query.all()}
     for key, value in DEFAULTS.items():
         if key not in existing:
             db.session.add(ContainerSettingsModel(key=key, value=str(value)))
+
+    if not existing.get("freshness_secret"):
+        secret_row = ContainerSettingsModel.query.filter_by(key="freshness_secret").first()
+        if secret_row:
+            secret_row.value = generate_secret()
+        else:
+            db.session.add(ContainerSettingsModel(key="freshness_secret", value=generate_secret()))
+
     db.session.commit()
 
 
@@ -44,6 +54,7 @@ def _reconcile_containers(app, container_manager):
 def load(app: Flask):
     app.db.create_all()
     CHALLENGE_CLASSES["container"] = ContainerChallenge
+    register_freshness_flag()
 
     plugin_name = os.path.basename(os.path.dirname(__file__))
     assets_path = f"plugins/{plugin_name}/assets"
