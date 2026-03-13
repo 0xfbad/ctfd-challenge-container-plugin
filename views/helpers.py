@@ -8,6 +8,7 @@ from . import containers_bp
 from ..models import ContainerInfoModel, ContainerChallengeModel, DockerContextModel
 from ..container_manager import ContainerException
 from ..utils import get_setting
+from ..freshness import compute_token
 from ..event_logger import event_logger
 
 _create_locks_guard = threading.Lock()
@@ -213,6 +214,12 @@ def _create_container_inner(chal_id, xid, uid, is_team):
         except ContainerException as err:
             return {"error": str(err)}, 500
 
+    extra_env = None
+    freshness_secret = get_setting("freshness_secret")
+    if freshness_secret:
+        token = compute_token(freshness_secret, chal_id, xid)
+        extra_env = {"FRESHNESS_TOKEN": token}
+
     try:
         created_container, context_name = container_manager.create_container(
             chal_id,
@@ -225,6 +232,7 @@ def _create_container_inner(chal_id, xid, uid, is_team):
             challenge.max_memory_mb,
             challenge.max_cpu,
             challenge.docker_context,
+            extra_env=extra_env,
         )
     except ContainerException as err:
         return {"error": str(err)}
