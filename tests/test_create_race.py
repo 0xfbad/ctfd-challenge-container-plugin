@@ -49,7 +49,12 @@ def test_db_commit_failure_triggers_rollback_and_kill():
         patch(f"{_MOD}.current_app", mock_app),
         patch(f"{_MOD}.ContainerChallengeModel") as mock_ccm,
         patch(f"{_MOD}.ContainerInfoModel") as mock_cim,
-        patch(f"{_MOD}.get_setting", return_value=10),
+        patch(
+            f"{_MOD}.get_setting",
+            side_effect=lambda k, *a: {"max_containers_per_user": 10, "freshness_secret": ""}.get(
+                k, a[0] if a else None
+            ),
+        ),
         patch(f"{_MOD}.db") as mock_db,
     ):
         mock_ccm.query.filter_by.return_value.first.return_value = mock_challenge

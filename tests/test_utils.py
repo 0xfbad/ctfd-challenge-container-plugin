@@ -59,6 +59,7 @@ def test_defaults_dict_has_expected_keys():
         "default_cpu_limit",
         "thread_pool_size",
         "max_concurrent_creates",
+        "freshness_secret",
     }
     assert set(DEFAULTS.keys()) == expected
 
