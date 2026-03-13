@@ -1,36 +1,50 @@
 import time
 import datetime
+import threading
 from flask import current_app, request
 from CTFd.models import db
 
 from . import containers_bp
 from ..models import ContainerInfoModel, ContainerChallengeModel, DockerContextModel
 from ..container_manager import ContainerException
-from ..utils import settings
+from ..utils import get_setting
 from ..event_logger import event_logger
+
+_create_locks_guard = threading.Lock()
+_create_locks: dict[tuple, threading.Lock] = {}
+
+
+def _get_create_lock(chal_id, xid, is_team):
+    key = (chal_id, "team" if is_team else "user", xid)
+    with _create_locks_guard:
+        if key not in _create_locks:
+            _create_locks[key] = threading.Lock()
+        return _create_locks[key]
 
 
 def log_container_event(
     event_type,
+    message,
+    user_id=None,
+    user_name=None,
     container_id=None,
     challenge_id=None,
     challenge_name=None,
-    user_id=None,
-    user_name=None,
     team_id=None,
     team_name=None,
-    message=None,
 ):
     event_logger.log_event(
         event_type=event_type,
-        container_id=container_id,
-        challenge_id=challenge_id,
-        challenge_name=challenge_name,
-        user_id=user_id,
-        user_name=user_name,
-        team_id=team_id,
-        team_name=team_name,
         message=message,
+        user_id=user_id,
+        username=user_name,
+        metadata={
+            "container_id": container_id,
+            "challenge_id": challenge_id,
+            "challenge_name": challenge_name,
+            "team_id": team_id,
+            "team_name": team_name,
+        },
     )
 
 
@@ -54,11 +68,14 @@ def get_hostname_for_context(context_name):
             return "localhost"
 
     context = DockerContextModel.query.filter_by(context_name=context_name).first()
-    if context and context.hostname:
-        hostname = context.hostname
-        if "@" in hostname:
-            hostname = hostname.split("@")[1]
-        return hostname
+    if context:
+        if context.pub_hostname:
+            return context.pub_hostname
+        if context.hostname:
+            hostname = context.hostname
+            if "@" in hostname:
+                hostname = hostname.split("@")[1]
+            return hostname
 
     try:
         return request.host.split(":")[0]
@@ -151,13 +168,25 @@ def renew_container(chal_id, xid, is_team):
 
 
 def create_container(chal_id, xid, uid, is_team):
+    lock = _get_create_lock(chal_id, xid, is_team)
+    acquired = lock.acquire(timeout=30)
+    if not acquired:
+        return {"error": "another container request is in progress, please wait"}, 429
+
+    try:
+        return _create_container_inner(chal_id, xid, uid, is_team)
+    finally:
+        lock.release()
+
+
+def _create_container_inner(chal_id, xid, uid, is_team):
     container_manager = current_app.container_manager
     challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
 
     if challenge is None:
         return {"error": "challenge not found"}, 400
 
-    max_containers_allowed = int(settings["vars"]["MAX_CONTAINERS_ALLOWED"])
+    max_containers_allowed = get_setting("max_containers_per_user")
     if not is_team:
         uid = xid
     user_containers = ContainerInfoModel.query.filter_by(user_id=uid)
@@ -219,7 +248,16 @@ def create_container(chal_id, xid, uid, is_team):
         docker_context=context_name,
     )
     db.session.add(new_container)
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        # kill the orphaned docker container best-effort
+        try:
+            container_manager.kill_container(created_container.id, context_name)
+        except Exception:
+            pass
+        return {"error": "database error, container has been cleaned up"}, 500
 
     user_id = new_container.user_id
     user_name = new_container.user.name if new_container.user else None
@@ -263,8 +301,14 @@ def view_container_info(chal_id, xid, is_team):
             else:
                 db.session.delete(running_container)
                 db.session.commit()
-        except ContainerException as err:
-            return {"error": str(err)}, 500
+                return {"status": "instance not started"}
+        except ContainerException:
+            # host is down but the container record is still valid
+            response = build_connection_response(
+                "host_unavailable", challenge, running_container, running_container.docker_context
+            )
+            response["message"] = "the container host is temporarily unreachable, please wait"
+            return response
     else:
         return {"status": "instance not started"}
 
