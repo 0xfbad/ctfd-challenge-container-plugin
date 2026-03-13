@@ -177,14 +177,18 @@ The admin dashboard gets a real-time SSE stream backed by a bounded queue (100 e
 
 ### Challenge settings
 
-Select "Container" challenge type when creating a challenge and configure
+Select "Container" challenge type when creating a challenge, the form defaults to `web` connection type, port `80`, and "Auto (load-balanced)" context so the typical web challenge only needs a point value and an image picked from the search box
 
-- Docker Context: which host runs this challenge's containers, leave blank for automatic load balancing
-- Image: Docker image (must exist on the selected context)
-- Port: internal container port, the host port gets assigned by Docker automatically
+The image field is a fuzzy search input instead of a flat dropdown, it loads available images from the selected context (or from all contexts when Auto is selected) and you type a few characters to filter by name or tag, results are scored so prefix matches rank higher than substring hits and you can navigate with arrow keys
+
+Core fields sit at the top, runner fields like context and expiration come next, and command, volumes, and resource limits are tucked under a collapsible "Advanced options" section that auto-expands on the update form if any of those fields already have values
+
+- Docker Context: which host runs this challenge's containers, defaults to Auto which lets the load balancer pick
+- Image: Docker image, fuzzy searchable by name or tag (must exist on the selected context or any context when Auto)
+- Port: internal container port, the host port gets assigned by Docker automatically (default 80)
 - Command: optional override command
 - Volumes: JSON object for volume mounts
-- Connection Type: `tcp`, `ssh`, or `web`
+- Connection Type: `tcp`, `ssh`, or `web` (default web)
 - SSH Credentials: username/password for ssh type
 - Expiration: minutes until auto-kill (0 means never, default 30)
 - Max Memory: MB limit per container
