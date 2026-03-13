@@ -22,6 +22,7 @@ _ctfd_models.db = MagicMock()
 _ctfd_models.Challenges = type("Challenges", (), {})
 _ctfd_models.Users = MagicMock()
 _ctfd_models.Teams = MagicMock()
+_ctfd_models.Flags = MagicMock()
 
 _stub_modules = [
     "CTFd",
@@ -82,8 +83,15 @@ _plugins.register_plugin_assets_directory = MagicMock()
 _plugins.register_admin_plugin_menu_bar = MagicMock()
 
 _challenges = sys.modules["CTFd.plugins.challenges"]
-_challenges.BaseChallenge = type("BaseChallenge", (), {})
+_challenges.BaseChallenge = type(
+    "BaseChallenge", (), {"attempt": staticmethod(lambda challenge, request: (False, "incorrect"))}
+)
 _challenges.CHALLENGE_CLASSES = {}
+
+_flags_mod = types.ModuleType("CTFd.plugins.flags")
+_flags_mod.BaseFlag = type("BaseFlag", (), {"name": "static", "templates": {}})
+_flags_mod.FLAG_CLASSES = {}
+sys.modules["CTFd.plugins.flags"] = _flags_mod
 
 # docker stubs
 _docker = sys.modules["docker"]
@@ -191,7 +199,9 @@ def _load_subpackage(name):
 _load_module("models")
 _load_module("event_logger")
 _load_module("utils")
+_load_module("freshness")
 _load_module("container_manager")
+_load_module("flag_type")
 _load_module("challenges")
 _load_subpackage("views")
 
