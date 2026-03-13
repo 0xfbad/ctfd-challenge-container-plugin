@@ -6,7 +6,7 @@ from CTFd.models import db
 
 from . import containers_bp
 from .helpers import kill_container, get_hostname_for_context
-from ..utils import is_team_mode
+from ..utils import is_team_mode, get_setting, set_setting, DEFAULTS
 from ..models import ContainerInfoModel, DockerContextModel
 from ..container_manager import ContainerException
 from ..event_logger import event_logger
@@ -16,7 +16,7 @@ def get_contexts_with_default(container_manager):
     contexts = DockerContextModel.query.all()
     contexts_list = list(contexts)
 
-    if "default" in container_manager.clients and not any(c.context_name == "default" for c in contexts_list):
+    if "default" in container_manager._context_configs and not any(c.context_name == "default" for c in contexts_list):
 
         class DefaultContext:
             id = None
@@ -37,13 +37,16 @@ def get_contexts_data_with_default(container_manager):
             "id": ctx.id,
             "context_name": ctx.context_name,
             "hostname": ctx.hostname,
+            "pub_hostname": getattr(ctx, "pub_hostname", None),
             "weight": ctx.weight,
             "enabled": ctx.enabled,
         }
         for ctx in contexts
     ]
 
-    if "default" in container_manager.clients and not any(c["context_name"] == "default" for c in contexts_data):
+    if "default" in container_manager._context_configs and not any(
+        c["context_name"] == "default" for c in contexts_data
+    ):
         contexts_data.insert(
             0,
             {
@@ -69,14 +72,13 @@ def route_containers_dashboard():
     except ContainerException:
         connected = False
 
-    for container in running_containers:
-        try:
-            container.is_running = container_manager.is_container_running(
-                container.container_id, container.docker_context
-            )
-        except ContainerException:
-            container.is_running = False
+    try:
+        running_ids = container_manager.get_running_container_ids()
+    except ContainerException:
+        running_ids = set()
 
+    for container in running_containers:
+        container.is_running = container.container_id in running_ids
         container.hostname = get_hostname_for_context(container.docker_context)
 
     return render_template(
@@ -97,16 +99,16 @@ def route_get_running_containers():
     except ContainerException:
         connected = False
 
+    try:
+        running_ids = container_manager.get_running_container_ids()
+    except ContainerException:
+        running_ids = set()
+
     team_mode = is_team_mode()
 
     running_containers_data = []
     for container in running_containers:
-        try:
-            container.is_running = container_manager.is_container_running(
-                container.container_id, container.docker_context
-            )
-        except ContainerException:
-            container.is_running = False
+        container.is_running = container.container_id in running_ids
 
         hostname = get_hostname_for_context(container.docker_context)
 
@@ -150,10 +152,21 @@ def route_get_recent_events():
 @admins_only
 def route_events_stream():
     def event_stream():
-        q = queue.Queue()
+        q = queue.Queue(maxsize=100)
 
         def listener(event):
-            q.put_nowait(event)
+            try:
+                q.put_nowait(event)
+            except queue.Full:
+                # drop oldest event to make room
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    q.put_nowait(event)
+                except queue.Full:
+                    pass
 
         event_logger.add_listener(listener)
 
@@ -193,10 +206,10 @@ def route_kill_container():
 @containers_bp.route("/api/purge", methods=["POST"])
 @admins_only
 def route_purge_containers():
-    containers = ContainerInfoModel.query.all()
-    for container in containers:
+    container_ids = [c.container_id for c in ContainerInfoModel.query.all()]
+    for cid in container_ids:
         try:
-            kill_container(container.container_id)
+            kill_container(cid)
         except ContainerException:
             pass
     return jsonify(success="purged all containers"), 200
@@ -230,7 +243,7 @@ def route_get_images_for_context(context_name):
 @admins_only
 def route_get_contexts():
     container_manager = current_app.container_manager
-    contexts = list(container_manager.clients.keys())
+    contexts = list(container_manager._context_configs.keys())
     return jsonify(contexts=contexts)
 
 
@@ -262,6 +275,7 @@ def route_api_add_context():
 
     context_name = request.json.get("context_name")
     hostname = request.json.get("hostname")
+    pub_hostname = request.json.get("pub_hostname")
     weight = request.json.get("weight", 1)
     enabled = request.json.get("enabled", True)
 
@@ -282,7 +296,9 @@ def route_api_add_context():
     except ValueError:
         return jsonify(error="weight must be an integer"), 400
 
-    new_context = DockerContextModel(context_name=context_name, hostname=hostname, weight=weight, enabled=enabled)
+    new_context = DockerContextModel(
+        context_name=context_name, hostname=hostname, pub_hostname=pub_hostname, weight=weight, enabled=enabled
+    )
     db.session.add(new_context)
     db.session.commit()
 
@@ -306,6 +322,9 @@ def route_api_update_context(context_id):
         if not request.json["hostname"]:
             return jsonify(error="hostname cannot be empty"), 400
         context.hostname = request.json["hostname"]
+
+    if "pub_hostname" in request.json:
+        context.pub_hostname = request.json["pub_hostname"] or None
 
     if "weight" in request.json:
         try:
@@ -346,24 +365,75 @@ def route_api_delete_context(context_id):
 @containers_bp.route("/api/contexts/test/<int:context_id>", methods=["GET"])
 @admins_only
 def route_api_test_context(context_id):
+    import docker as _docker
+
     context = DockerContextModel.query.get(context_id)
     if not context:
         return jsonify(error="context not found"), 404
 
-    try:
-        import docker
-        import os
+    if not context.hostname:
+        return jsonify(error="no hostname configured for this context"), 400
 
-        old_context = os.environ.get("DOCKER_CONTEXT")
-        os.environ["DOCKER_CONTEXT"] = context.context_name
-        try:
-            client = docker.from_env()
-            client.ping()
-            return jsonify(success="context is reachable")
-        finally:
-            if old_context is not None:
-                os.environ["DOCKER_CONTEXT"] = old_context
-            else:
-                os.environ.pop("DOCKER_CONTEXT", None)
+    try:
+        if "@" in context.hostname:
+            url = f"ssh://{context.hostname}"
+        else:
+            url = f"ssh://root@{context.hostname}"
+
+        client = _docker.DockerClient(base_url=url)
+        client.ping()
+        client.close()
+        return jsonify(success="context is reachable")
     except Exception as e:
         return jsonify(error=f"context unreachable: {str(e)}"), 500
+
+
+@containers_bp.route("/api/pull", methods=["POST"])
+@admins_only
+def route_pull_image():
+    if not request.is_json:
+        return jsonify(error="invalid request"), 400
+
+    image = request.json.get("image")
+    if not image:
+        return jsonify(error="image is required"), 400
+
+    context_name = request.json.get("context_name")
+
+    container_manager = current_app.container_manager
+    try:
+        results = container_manager.pull_image(image, context_name)
+    except ContainerException as err:
+        return jsonify(error=str(err)), 500
+
+    return jsonify(results=results)
+
+
+@containers_bp.route("/api/settings", methods=["GET"])
+@admins_only
+def route_get_settings():
+    current_settings = {}
+    for key, default in DEFAULTS.items():
+        current_settings[key] = {
+            "value": get_setting(key),
+            "default": default,
+        }
+    return jsonify(settings=current_settings)
+
+
+@containers_bp.route("/api/settings", methods=["PUT"])
+@admins_only
+def route_update_settings():
+    if not request.is_json:
+        return jsonify(error="invalid request"), 400
+
+    changed = request.json
+    for key, value in changed.items():
+        if key not in DEFAULTS:
+            continue
+        set_setting(key, value)
+
+    container_manager = current_app.container_manager
+    container_manager.reload_settings()
+
+    return jsonify(success="settings updated")
