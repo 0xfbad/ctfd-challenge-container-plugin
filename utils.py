@@ -12,6 +12,7 @@ DEFAULTS = {
     "default_cpu_limit": 0.0,
     "thread_pool_size": 4,
     "max_concurrent_creates": 2,
+    "freshness_secret": "",
 }
 
 
