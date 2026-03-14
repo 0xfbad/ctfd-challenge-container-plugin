@@ -24,16 +24,6 @@ CTFd._internal.challenge.submit = function (preview) {
     });
 };
 
-function mergeQueryParams(parameters, queryParameters) {
-    if (parameters.$queryParameters) {
-        Object.keys(parameters.$queryParameters).forEach((paramName) => {
-            queryParameters[paramName] = parameters.$queryParameters[paramName];
-        });
-    }
-
-    return queryParameters;
-}
-
 function resetAlert() {
     const alert = document.getElementById("deployment-info");
     alert.innerHTML = "";
