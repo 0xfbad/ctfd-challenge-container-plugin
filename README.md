@@ -16,7 +16,7 @@ Clone this repo into CTFd's plugin directory, the folder name doesn't matter but
 
 ```bash
 cd CTFd/CTFd/plugins
-git clone <repo-url> challenge_containers
+git clone <repo-url>
 ```
 
 CTFd picks up plugins on startup so you'll need to restart after cloning
