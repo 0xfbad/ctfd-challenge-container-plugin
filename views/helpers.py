@@ -1,10 +1,8 @@
 import time
-import datetime
 import threading
 from flask import current_app, request
 from CTFd.models import db
 
-from . import containers_bp
 from ..models import ContainerInfoModel, ContainerChallengeModel, DockerContextModel
 from ..container_manager import ContainerException
 from ..utils import get_setting
@@ -330,13 +328,3 @@ def connect_type(chal_id):
         return {"error": "challenge not found"}, 400
 
     return {"status": "ok", "connect": challenge.ctype}
-
-
-@containers_bp.app_template_filter("format_time")
-def format_time_filter(unix_seconds):
-    dt = datetime.datetime.fromtimestamp(
-        unix_seconds,
-        tz=datetime.datetime.now(datetime.timezone.utc).astimezone().tzinfo,
-    )
-
-    return dt.strftime("%H:%M:%S %d/%m/%Y")
