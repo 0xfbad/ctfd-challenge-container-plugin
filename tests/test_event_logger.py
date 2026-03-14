@@ -99,6 +99,30 @@ def test_metadata_defaults_to_empty_dict():
     assert event["metadata"] == {}
 
 
+def test_level_after_username():
+    el = EventLogger()
+    event = el.log_event("t", "msg", user_id=1, username="alice", level="warning")
+    assert event["level"] == "warning"
+    assert event["username"] == "alice"
+
+
+def test_failing_listener_logs_warning(caplog):
+    import logging
+
+    el = EventLogger()
+
+    def bad_listener(e):
+        raise RuntimeError("boom")
+
+    el.add_listener(bad_listener)
+
+    with caplog.at_level(logging.WARNING):
+        el.log_event("t", "first")
+
+    assert any("event listener failed and was removed" in msg for msg in caplog.messages)
+    assert bad_listener not in el.listeners
+
+
 def test_concurrent_log_events():
     import threading
 

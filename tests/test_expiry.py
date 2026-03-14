@@ -1,5 +1,6 @@
 import time
 import threading
+from collections import defaultdict
 from unittest.mock import patch, MagicMock
 
 from container_manager import ContainerManager, ContainerException, _ThreadLocalClients
@@ -23,9 +24,10 @@ def make_manager():
     cm = object.__new__(ContainerManager)
     cm.settings = {}
     cm.app = MagicMock()
-    cm._context_configs = {"default": "__from_env__"}
-    cm.weighted_contexts = ["default"]
-    cm.context_index = 0
+    cm._context_configs = {"default": "unix:///var/run/docker.sock"}
+    cm._context_weights = {"default": 1}
+    cm._health = {"default": True}
+    cm._container_counts = defaultdict(int)
     cm._context_lock = threading.Lock()
     cm._config_generation = 0
     cm._pool = SynchronousPool()

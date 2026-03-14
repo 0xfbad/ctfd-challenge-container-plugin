@@ -1,11 +1,10 @@
 import threading
+from collections import defaultdict
 from unittest.mock import patch, MagicMock
 from container_manager import ContainerManager, ContainerException, _ThreadLocalClients
 
 
 class SynchronousPool:
-    """mock pool that runs functions in the calling thread"""
-
     def __init__(self, maxsize=4):
         self.size = maxsize
 
@@ -30,14 +29,15 @@ class SynchronousPool:
 
 def make_manager(contexts=None):
     if contexts is None:
-        contexts = {"default": "__from_env__"}
+        contexts = {"default": "unix:///var/run/docker.sock"}
 
     cm = object.__new__(ContainerManager)
     cm.settings = {}
     cm.app = MagicMock()
     cm._context_configs = dict(contexts)
-    cm.weighted_contexts = list(contexts.keys())
-    cm.context_index = 0
+    cm._context_weights = {name: 1 for name in contexts}
+    cm._health = {name: True for name in contexts}
+    cm._container_counts = defaultdict(int)
     cm._context_lock = threading.Lock()
     cm._config_generation = 0
     cm._pool = SynchronousPool()
@@ -103,7 +103,7 @@ def test_get_client_creates_new():
     cm = make_manager()
 
     mock_client = MagicMock()
-    with patch("container_manager.docker.from_env", return_value=mock_client):
+    with patch("container_manager.docker.DockerClient", return_value=mock_client):
         client = cm._get_client("default")
         assert client is mock_client
 
@@ -112,7 +112,7 @@ def test_get_client_caches():
     cm = make_manager()
 
     mock_client = MagicMock()
-    with patch("container_manager.docker.from_env", return_value=mock_client):
+    with patch("container_manager.docker.DockerClient", return_value=mock_client):
         c1 = cm._get_client("default")
         c2 = cm._get_client("default")
         assert c1 is c2
@@ -132,7 +132,7 @@ def test_clear_thread_local_client():
     cm = make_manager()
 
     mock_client = MagicMock()
-    with patch("container_manager.docker.from_env", return_value=mock_client):
+    with patch("container_manager.docker.DockerClient", return_value=mock_client):
         cm._get_client("default")
         assert "default" in cm._thread_local.clients
 
@@ -155,14 +155,14 @@ def test_generation_counter_invalidates_cache():
     mock_client_1 = MagicMock()
     mock_client_2 = MagicMock()
 
-    with patch("container_manager.docker.from_env", return_value=mock_client_1):
+    with patch("container_manager.docker.DockerClient", return_value=mock_client_1):
         c1 = cm._get_client("default")
         assert c1 is mock_client_1
 
     # bump generation, simulating a config reload
     cm._config_generation += 1
 
-    with patch("container_manager.docker.from_env", return_value=mock_client_2):
+    with patch("container_manager.docker.DockerClient", return_value=mock_client_2):
         c2 = cm._get_client("default")
         assert c2 is mock_client_2
         assert c2 is not c1
