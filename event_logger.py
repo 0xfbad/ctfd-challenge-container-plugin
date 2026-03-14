@@ -13,7 +13,7 @@ class EventLogger:
         self.lock = Lock()
         self.listeners = []
 
-    def log_event(self, event_type, message, level="info", user_id=None, username=None, metadata=None):
+    def log_event(self, event_type, message, user_id=None, username=None, level="info", metadata=None):
         event = {
             "timestamp": time.time(),
             "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -33,7 +33,8 @@ class EventLogger:
         for listener in listeners:
             try:
                 listener(event)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"event listener failed and was removed: {str(e)}")
                 failed.append(listener)
 
         if failed:
