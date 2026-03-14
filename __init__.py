@@ -1,3 +1,5 @@
+import socket
+import logging
 from flask import Flask
 from CTFd.plugins import register_plugin_assets_directory, register_admin_plugin_menu_bar
 from CTFd.plugins.challenges import CHALLENGE_CLASSES
@@ -6,11 +8,13 @@ import os
 from .challenges import ContainerChallenge
 from .models import ContainerSettingsModel
 from .utils import settings_to_dict, DEFAULTS
-from .container_manager import ContainerManager
-from .models import ContainerInfoModel
+from .container_manager import ContainerManager, LOCAL_SOCKET_PATH, LOCAL_CONTEXT_NAME
+from .models import ContainerInfoModel, DockerContextModel
 from .views import containers_bp
 from .flag_type import register as register_freshness_flag
 from .freshness import generate_secret
+
+logger = logging.getLogger(__name__)
 
 
 def _seed_defaults(app):
@@ -31,15 +35,47 @@ def _seed_defaults(app):
     db.session.commit()
 
 
+def _seed_local_context(app):
+    from CTFd.models import db
+
+    if DockerContextModel.query.count() > 0:
+        return
+
+    import docker as docker_lib
+
+    try:
+        client = docker_lib.DockerClient(base_url=f"unix://{LOCAL_SOCKET_PATH}")
+        client.ping()
+        client.close()
+    except Exception:
+        return
+
+    db.session.add(
+        DockerContextModel(
+            context_name=LOCAL_CONTEXT_NAME,
+            hostname=None,
+            pub_hostname=socket.gethostname(),
+            weight=1,
+            enabled=True,
+        )
+    )
+    db.session.commit()
+    logger.info("seeded local docker context")
+
+
 def _reconcile_containers(app, container_manager):
     from CTFd.models import db
 
     containers = ContainerInfoModel.query.all()
     removed = 0
+    kept = 0
 
     for container in containers:
         try:
-            if not container_manager.is_container_running(container.container_id, container.docker_context):
+            if container_manager.is_container_running(container.container_id, container.docker_context):
+                container_manager.reserve_slot(container.docker_context)
+                kept += 1
+            else:
                 db.session.delete(container)
                 removed += 1
         except Exception:
@@ -48,7 +84,9 @@ def _reconcile_containers(app, container_manager):
 
     if removed:
         db.session.commit()
-        print(f"reconciled {removed} stale container records on startup")
+
+    if removed or kept:
+        logger.info(f"reconciled containers on startup: {kept} recovered, {removed} stale records removed")
 
 
 def load(app: Flask):
@@ -62,6 +100,7 @@ def load(app: Flask):
 
     with app.app_context():
         _seed_defaults(app)
+        _seed_local_context(app)
 
     container_settings = settings_to_dict(ContainerSettingsModel.query.all())
     container_manager = ContainerManager(container_settings, app)
@@ -70,7 +109,7 @@ def load(app: Flask):
         try:
             _reconcile_containers(app, container_manager)
         except Exception as e:
-            print(f"container reconciliation failed: {e}")
+            logger.error(f"container reconciliation failed: {e}")
 
     app.container_manager = container_manager
 
