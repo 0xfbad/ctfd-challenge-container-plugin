@@ -1,5 +1,9 @@
 import queue
 import json
+import time
+from collections import defaultdict
+from statistics import median
+
 import docker
 from flask import request, render_template, current_app, jsonify, Response, stream_with_context
 from CTFd.utils.decorators import admins_only
@@ -8,7 +12,7 @@ from CTFd.models import db
 from . import containers_bp
 from .helpers import kill_container, get_hostname_for_context
 from ..utils import is_team_mode, get_setting, set_setting, DEFAULTS
-from ..models import ContainerInfoModel, DockerContextModel
+from ..models import ContainerInfoModel, ContainerHistoryModel, DockerContextModel
 from ..container_manager import ContainerException, LOCAL_CONTEXT_NAME, _resolve_endpoint
 from ..event_logger import event_logger
 
@@ -419,3 +423,230 @@ def route_update_settings():
     container_manager.reload_settings()
 
     return jsonify(success="settings updated")
+
+
+@containers_bp.route("/api/logs/<container_id>", methods=["GET"])
+@admins_only
+def route_get_container_logs(container_id):
+    container = ContainerInfoModel.query.filter_by(container_id=container_id).first()
+    if not container:
+        return jsonify(error="container not found"), 404
+
+    tail = request.args.get("tail", 200, type=int)
+    tail = max(1, min(tail, 1000))
+
+    container_manager = current_app.container_manager
+    try:
+        logs = container_manager.get_container_logs(container_id, container.docker_context, tail=tail)
+    except ContainerException as err:
+        return jsonify(error=str(err)), 500
+
+    return jsonify(logs=logs)
+
+
+def _range_cutoff():
+    range_param = request.args.get("range", "7d")
+    now = time.time()
+    ranges = {"24h": 86400, "7d": 604800, "30d": 2592000}
+    delta = ranges.get(range_param)
+    if delta:
+        return now - delta
+    return 0
+
+
+@containers_bp.route("/admin/stats", methods=["GET"])
+@admins_only
+def route_analytics_page():
+    return render_template("admin/analytics.html")
+
+
+@containers_bp.route("/api/analytics/activity", methods=["GET"])
+@admins_only
+def route_analytics_activity():
+    cutoff = _range_cutoff()
+    range_param = request.args.get("range", "7d")
+
+    query = ContainerHistoryModel.query
+    if cutoff > 0:
+        query = query.filter(ContainerHistoryModel.created_at >= cutoff)
+    rows = query.all()
+
+    # hourly buckets for 24h, daily for everything else
+    if range_param == "24h":
+        bucket_size = 3600
+    else:
+        bucket_size = 86400
+
+    create_buckets = defaultdict(int)
+    stop_buckets = defaultdict(int)
+
+    for row in rows:
+        bucket = int(row.created_at // bucket_size) * bucket_size
+        create_buckets[bucket] += 1
+        if row.stopped_at:
+            stop_bucket = int(row.stopped_at // bucket_size) * bucket_size
+            stop_buckets[stop_bucket] += 1
+
+    all_keys = sorted(set(create_buckets.keys()) | set(stop_buckets.keys()))
+    labels = [k for k in all_keys]
+    creates = [create_buckets.get(k, 0) for k in all_keys]
+    stops = [stop_buckets.get(k, 0) for k in all_keys]
+
+    return jsonify(labels=labels, creates=creates, stops=stops)
+
+
+@containers_bp.route("/api/analytics/top_users", methods=["GET"])
+@admins_only
+def route_analytics_top_users():
+    from CTFd.models import Users
+
+    cutoff = _range_cutoff()
+    now = time.time()
+
+    query = ContainerHistoryModel.query
+    if cutoff > 0:
+        query = query.filter(ContainerHistoryModel.created_at >= cutoff)
+    rows = query.all()
+
+    user_stats = defaultdict(lambda: {"total_seconds": 0, "container_count": 0, "challenges": set()})
+
+    for row in rows:
+        if not row.user_id:
+            continue
+        stats = user_stats[row.user_id]
+        end = row.stopped_at if row.stopped_at else now
+        stats["total_seconds"] += end - row.created_at
+        stats["container_count"] += 1
+        if row.challenge_id:
+            stats["challenges"].add(row.challenge_id)
+
+    result = []
+    for user_id, stats in user_stats.items():
+        user = Users.query.get(user_id)
+        username = user.name if user else f"user#{user_id}"
+        result.append(
+            {
+                "user_id": user_id,
+                "username": username,
+                "total_seconds": round(stats["total_seconds"], 1),
+                "container_count": stats["container_count"],
+                "unique_challenges": len(stats["challenges"]),
+            }
+        )
+
+    result.sort(key=lambda x: x["total_seconds"], reverse=True)
+    return jsonify(result[:20])
+
+
+@containers_bp.route("/api/analytics/challenges", methods=["GET"])
+@admins_only
+def route_analytics_challenges():
+    from CTFd.models import Challenges
+
+    cutoff = _range_cutoff()
+    now = time.time()
+
+    query = ContainerHistoryModel.query
+    if cutoff > 0:
+        query = query.filter(ContainerHistoryModel.created_at >= cutoff)
+    rows = query.all()
+
+    chal_stats = defaultdict(lambda: {"count": 0, "users": set(), "lifetimes": []})
+
+    for row in rows:
+        if not row.challenge_id:
+            continue
+        stats = chal_stats[row.challenge_id]
+        stats["count"] += 1
+        if row.user_id:
+            stats["users"].add(row.user_id)
+        end = row.stopped_at if row.stopped_at else now
+        stats["lifetimes"].append(end - row.created_at)
+
+    result = []
+    for chal_id, stats in chal_stats.items():
+        challenge = Challenges.query.get(chal_id)
+        name = challenge.name if challenge else f"challenge#{chal_id}"
+        unique_users = len(stats["users"])
+        avg_lifetime = sum(stats["lifetimes"]) / len(stats["lifetimes"]) if stats["lifetimes"] else 0
+        restarts_per_user = stats["count"] / unique_users if unique_users > 0 else 0
+
+        result.append(
+            {
+                "challenge_id": chal_id,
+                "name": name,
+                "container_count": stats["count"],
+                "unique_users": unique_users,
+                "avg_lifetime": round(avg_lifetime, 1),
+                "restarts_per_user": round(restarts_per_user, 2),
+            }
+        )
+
+    result.sort(key=lambda x: x["container_count"], reverse=True)
+    return jsonify(result)
+
+
+@containers_bp.route("/api/analytics/solve_times", methods=["GET"])
+@admins_only
+def route_analytics_solve_times():
+    from CTFd.models import Challenges
+
+    try:
+        from CTFd.models import Solves
+    except ImportError:
+        return jsonify([])
+
+    cutoff = _range_cutoff()
+
+    solve_query = Solves.query
+    if cutoff > 0:
+        solve_query = solve_query.filter(Solves.date >= cutoff)
+    solves = solve_query.all()
+
+    chal_times = defaultdict(lambda: {"times": [], "solve_count": 0})
+
+    for solve in solves:
+        solve_ts = solve.date.timestamp() if hasattr(solve.date, "timestamp") else float(solve.date)
+        user_id = solve.user_id
+        team_id = getattr(solve, "team_id", None)
+        challenge_id = solve.challenge_id
+
+        # find the most recent history row for this user/team + challenge created before the solve
+        history_query = ContainerHistoryModel.query.filter(
+            ContainerHistoryModel.challenge_id == challenge_id,
+            ContainerHistoryModel.created_at <= solve_ts,
+        )
+        if team_id:
+            history_query = history_query.filter(ContainerHistoryModel.team_id == team_id)
+        else:
+            history_query = history_query.filter(ContainerHistoryModel.user_id == user_id)
+
+        history = history_query.order_by(ContainerHistoryModel.created_at.desc()).first()
+        if not history:
+            continue
+
+        solve_time = solve_ts - history.created_at
+        stats = chal_times[challenge_id]
+        stats["times"].append(round(solve_time, 1))
+        stats["solve_count"] += 1
+
+    result = []
+    for chal_id, stats in chal_times.items():
+        challenge = Challenges.query.get(chal_id)
+        name = challenge.name if challenge else f"challenge#{chal_id}"
+        times = stats["times"]
+
+        result.append(
+            {
+                "challenge_id": chal_id,
+                "name": name,
+                "solve_count": stats["solve_count"],
+                "times": times,
+                "avg_time": round(sum(times) / len(times), 1) if times else 0,
+                "median_time": round(median(times), 1) if times else 0,
+                "fastest_time": round(min(times), 1) if times else 0,
+            }
+        )
+
+    result.sort(key=lambda x: x["solve_count"], reverse=True)
+    return jsonify(result)

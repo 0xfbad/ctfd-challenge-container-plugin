@@ -126,3 +126,4 @@ def load(app: Flask):
     app.register_blueprint(containers_bp)
 
     register_admin_plugin_menu_bar(title="Containers", route="/containers/dashboard")
+    register_admin_plugin_menu_bar(title="Container Stats", route="/containers/admin/stats")

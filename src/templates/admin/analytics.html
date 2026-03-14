@@ -1,0 +1,266 @@
+{% extends "admin/base.html" %}
+
+{% block content %}
+<style>
+	.chart-card {
+		margin-bottom: 24px;
+		border-radius: 8px;
+		box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+	}
+
+	.chart-card .card-header {
+		background-color: #f8f9fa;
+		border-bottom: 1px solid #dee2e6;
+		padding: 12px 16px;
+	}
+
+	.chart-card .card-title {
+		margin: 0;
+		font-size: 16px;
+		font-weight: 600;
+	}
+
+	.chart-container {
+		width: 100%;
+		height: 400px;
+	}
+
+	.range-selector {
+		margin-bottom: 20px;
+	}
+</style>
+
+<div class="jumbotron">
+	<div class="container">
+		<h1>Container Stats</h1>
+	</div>
+</div>
+
+<div class="container">
+	<div class="row range-selector">
+		<div class="col-md-3">
+			<select class="form-control" id="time-range" onchange="loadAllCharts()">
+				<option value="24h">Last 24 hours</option>
+				<option value="7d" selected>Last 7 days</option>
+				<option value="30d">Last 30 days</option>
+				<option value="all">All time</option>
+			</select>
+		</div>
+	</div>
+
+	<div class="row">
+		<div class="col-md-12">
+			<div class="card chart-card">
+				<div class="card-header">
+					<h3 class="card-title">Container Activity</h3>
+				</div>
+				<div class="card-body">
+					<div class="chart-container" id="activity-chart"></div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="row">
+		<div class="col-md-12">
+			<div class="card chart-card">
+				<div class="card-header">
+					<h3 class="card-title">Top Users by Container Time</h3>
+				</div>
+				<div class="card-body">
+					<div class="chart-container" id="users-chart"></div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="row">
+		<div class="col-md-12">
+			<div class="card chart-card">
+				<div class="card-header">
+					<h3 class="card-title">Challenge Statistics</h3>
+				</div>
+				<div class="card-body">
+					<div class="chart-container" id="challenges-chart"></div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="row">
+		<div class="col-md-12">
+			<div class="card chart-card">
+				<div class="card-header">
+					<h3 class="card-title">Solve Times</h3>
+				</div>
+				<div class="card-body">
+					<div class="chart-container" id="solve-chart"></div>
+				</div>
+			</div>
+		</div>
+	</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<script>
+	const charts = {};
+
+	function getRange() {
+		return document.getElementById('time-range').value;
+	}
+
+	function initChart(id) {
+		const el = document.getElementById(id);
+		if (charts[id]) {
+			charts[id].dispose();
+		}
+		charts[id] = echarts.init(el);
+		return charts[id];
+	}
+
+	function formatDuration(seconds) {
+		if (seconds < 60) return Math.round(seconds) + 's';
+		if (seconds < 3600) return Math.round(seconds / 60) + 'm';
+		return (seconds / 3600).toFixed(1) + 'h';
+	}
+
+	function loadActivityChart() {
+		fetch(`/containers/api/analytics/activity?range=${getRange()}`)
+			.then(r => r.json())
+			.then(data => {
+				const chart = initChart('activity-chart');
+				const range = getRange();
+				const labels = data.labels.map(ts => {
+					const d = new Date(ts * 1000);
+					if (range === '24h') {
+						return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+					}
+					return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+				});
+
+				chart.setOption({
+					tooltip: { trigger: 'axis' },
+					legend: { data: ['Creates', 'Stops'] },
+					toolbox: { feature: { saveAsImage: {} } },
+					dataZoom: [{ type: 'inside' }, { type: 'slider' }],
+					xAxis: { type: 'category', data: labels },
+					yAxis: { type: 'value' },
+					series: [
+						{ name: 'Creates', type: 'line', data: data.creates, smooth: true, itemStyle: { color: '#28a745' } },
+						{ name: 'Stops', type: 'line', data: data.stops, smooth: true, itemStyle: { color: '#dc3545' } }
+					]
+				});
+			});
+	}
+
+	function loadUsersChart() {
+		fetch(`/containers/api/analytics/top_users?range=${getRange()}`)
+			.then(r => r.json())
+			.then(data => {
+				const chart = initChart('users-chart');
+				const names = data.map(u => u.username);
+				const times = data.map(u => u.total_seconds);
+
+				chart.setOption({
+					tooltip: {
+						trigger: 'axis',
+						axisPointer: { type: 'shadow' },
+						formatter: function(params) {
+							const user = data[params[0].dataIndex];
+							return `${user.username}<br/>Time: ${formatDuration(user.total_seconds)}<br/>Containers: ${user.container_count}<br/>Challenges: ${user.unique_challenges}`;
+						}
+					},
+					toolbox: { feature: { saveAsImage: {} } },
+					grid: { left: '20%' },
+					xAxis: { type: 'value', axisLabel: { formatter: v => formatDuration(v) } },
+					yAxis: { type: 'category', data: names.reverse(), axisLabel: { width: 120, overflow: 'truncate' } },
+					series: [{ type: 'bar', data: times.reverse(), itemStyle: { color: '#007bff' } }]
+				});
+			});
+	}
+
+	function loadChallengesChart() {
+		fetch(`/containers/api/analytics/challenges?range=${getRange()}`)
+			.then(r => r.json())
+			.then(data => {
+				const chart = initChart('challenges-chart');
+				const names = data.map(c => c.name);
+
+				chart.setOption({
+					tooltip: {
+						trigger: 'axis',
+						axisPointer: { type: 'shadow' },
+						formatter: function(params) {
+							const chal = data[params[0].dataIndex];
+							return `${chal.name}<br/>Containers: ${chal.container_count}<br/>Users: ${chal.unique_users}<br/>Avg lifetime: ${formatDuration(chal.avg_lifetime)}<br/>Restarts/user: ${chal.restarts_per_user}`;
+						}
+					},
+					toolbox: { feature: { saveAsImage: {} } },
+					dataZoom: [{ type: 'inside' }, { type: 'slider' }],
+					xAxis: { type: 'category', data: names, axisLabel: { rotate: 30, overflow: 'truncate' } },
+					yAxis: [
+						{ type: 'value', name: 'Containers' },
+						{ type: 'value', name: 'Restarts/user', splitLine: { show: false } }
+					],
+					series: [
+						{ name: 'Containers', type: 'bar', data: data.map(c => c.container_count), itemStyle: { color: '#17a2b8' } },
+						{ name: 'Restarts/user', type: 'line', yAxisIndex: 1, data: data.map(c => c.restarts_per_user), itemStyle: { color: '#ffc107' } }
+					]
+				});
+			});
+	}
+
+	function loadSolveChart() {
+		fetch(`/containers/api/analytics/solve_times?range=${getRange()}`)
+			.then(r => r.json())
+			.then(data => {
+				const chart = initChart('solve-chart');
+				const names = data.map(c => c.name);
+
+				const scatterData = [];
+				data.forEach((chal, idx) => {
+					chal.times.forEach(t => {
+						scatterData.push([idx, t]);
+					});
+				});
+
+				chart.setOption({
+					tooltip: {
+						trigger: 'item',
+						formatter: function(params) {
+							if (params.seriesType === 'scatter') {
+								const chal = data[params.data[0]];
+								return `${chal.name}<br/>Solve time: ${formatDuration(params.data[1])}`;
+							}
+							const chal = data[params.dataIndex];
+							return `${chal.name}<br/>Avg: ${formatDuration(chal.avg_time)}<br/>Median: ${formatDuration(chal.median_time)}<br/>Fastest: ${formatDuration(chal.fastest_time)}<br/>Solves: ${chal.solve_count}`;
+						}
+					},
+					toolbox: { feature: { saveAsImage: {} } },
+					dataZoom: [{ type: 'inside' }, { type: 'slider' }],
+					xAxis: { type: 'category', data: names, axisLabel: { rotate: 30, overflow: 'truncate' } },
+					yAxis: { type: 'value', name: 'Seconds', axisLabel: { formatter: v => formatDuration(v) } },
+					series: [
+						{ name: 'Avg solve time', type: 'bar', data: data.map(c => c.avg_time), itemStyle: { color: '#6f42c1' } },
+						{ name: 'Individual solves', type: 'scatter', data: scatterData, symbolSize: 6, itemStyle: { color: '#fd7e14', opacity: 0.6 } }
+					]
+				});
+			});
+	}
+
+	function loadAllCharts() {
+		loadActivityChart();
+		loadUsersChart();
+		loadChallengesChart();
+		loadSolveChart();
+	}
+
+	window.addEventListener('resize', function() {
+		Object.values(charts).forEach(c => c.resize());
+	});
+
+	document.addEventListener('DOMContentLoaded', loadAllCharts);
+</script>
+{% endblock %}
