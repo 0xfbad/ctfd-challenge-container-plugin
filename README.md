@@ -207,8 +207,6 @@ Managed through the admin settings page, no config files needed
 | Key | Default | Description |
 |-----|---------|-------------|
 | max_containers_per_user | 4 | simultaneous container limit per user |
-| default_memory_mb | 0 | MB per container, 0 for unlimited |
-| default_cpu_limit | 0 | core limit as decimal, 0 for unlimited |
 | thread_pool_size | 4 | worker threads for Docker operations |
 | max_concurrent_creates | 2 | parallel container creation limit per host |
 | expiration_check_interval | 5 | seconds between expiry sweeps |
@@ -216,9 +214,7 @@ Managed through the admin settings page, no config files needed
 | rate_limit_interval | 10 | rate limit window in seconds |
 | freshness_secret | (auto-generated) | HMAC key for freshness tokens, clear to disable |
 
-Rate limit changes require a CTFd restart because the decorator values are evaluated at import time
-
-Per-challenge memory, CPU, and expiration settings override the defaults when configured on the challenge itself
+Rate limit changes require a CTFd restart because the decorator values are evaluated at import time. Memory, CPU, and expiration limits are configured per-challenge in the challenge settings
 
 ### Docker contexts
 
