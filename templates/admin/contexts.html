@@ -19,7 +19,9 @@
 				<thead>
 					<tr>
 						<th>Context Name</th>
-						<th>Hostname</th>
+						<th>Public Hostname</th>
+						<th>Weight</th>
+						<th>Connected</th>
 						<th>Status</th>
 						<th>Actions</th>
 					</tr>
@@ -28,7 +30,15 @@
 					{% for context in contexts %}
 					<tr data-context-id="{{ context.id }}">
 						<td>{{ context.context_name }}{% if context.context_name == 'local' %} <span class="badge badge-info">Local</span>{% endif %}</td>
-						<td>{{ context.hostname }}</td>
+						<td>{{ context.pub_hostname }}</td>
+						<td>{{ context.weight }}</td>
+						<td>
+							{% if context.context_name in connected_set %}
+							<span class="badge badge-success">Connected</span>
+							{% else %}
+							<span class="badge badge-danger">Disconnected</span>
+							{% endif %}
+						</td>
 						<td>
 							<span class="badge badge-{{ 'success' if context.enabled else 'secondary' }}">
 								{{ 'Enabled' if context.enabled else 'Disabled' }}
@@ -39,7 +49,8 @@
 								Test
 							</button>
 							<button class="btn btn-sm btn-warning edit-context-btn" data-context-id="{{ context.id }}"
-								data-hostname="{{ context.hostname }}" data-enabled="{{ context.enabled }}">
+								data-hostname="{{ context.hostname or '' }}" data-pub-hostname="{{ context.pub_hostname }}"
+								data-weight="{{ context.weight }}" data-enabled="{{ context.enabled }}">
 								Edit
 							</button>
 							{% if context.context_name != 'local' %}
@@ -76,11 +87,26 @@
 						</small>
 					</div>
 					<div class="form-group">
-						<label for="context-hostname">Public Hostname</label>
-						<input type="text" class="form-control" id="context-hostname" required
-							placeholder="e.g. ctf.example.com, server1.example.com">
+						<label for="context-hostname">SSH Hostname</label>
+						<input type="text" class="form-control" id="context-hostname"
+							placeholder="e.g. user@server1.example.com">
+						<small class="form-text text-muted">
+							SSH connection string for remote contexts (leave blank for local)
+						</small>
+					</div>
+					<div class="form-group">
+						<label for="context-pub-hostname">Public Hostname</label>
+						<input type="text" class="form-control" id="context-pub-hostname" required
+							placeholder="e.g. ctf.example.com">
 						<small class="form-text text-muted">
 							The hostname users will connect to for containers on this context
+						</small>
+					</div>
+					<div class="form-group">
+						<label for="context-weight">Weight</label>
+						<input type="number" class="form-control" id="context-weight" value="1" min="1">
+						<small class="form-text text-muted">
+							Higher weight means more containers will be scheduled here
 						</small>
 					</div>
 					<div class="form-group">
@@ -112,8 +138,17 @@
 				<form id="edit-context-form">
 					<input type="hidden" id="edit-context-id">
 					<div class="form-group">
-						<label for="edit-context-hostname">Public Hostname</label>
-						<input type="text" class="form-control" id="edit-context-hostname" required>
+						<label for="edit-context-hostname">SSH Hostname</label>
+						<input type="text" class="form-control" id="edit-context-hostname"
+							placeholder="e.g. user@server1.example.com">
+					</div>
+					<div class="form-group">
+						<label for="edit-context-pub-hostname">Public Hostname</label>
+						<input type="text" class="form-control" id="edit-context-pub-hostname" required>
+					</div>
+					<div class="form-group">
+						<label for="edit-context-weight">Weight</label>
+						<input type="number" class="form-control" id="edit-context-weight" value="1" min="1">
 					</div>
 					<div class="form-group">
 						<div class="custom-control custom-checkbox">
