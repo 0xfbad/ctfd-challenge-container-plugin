@@ -728,6 +728,37 @@ class ContainerManager:
                 continue
 
     @run_command
+    def get_container_logs(self, container_id: str, context_name: str | None = None, tail: int = 200) -> str:
+        def _logs(cid, ctx):
+            client = self._get_client(ctx)
+            try:
+                container = client.containers.get(cid)
+                output = container.logs(stdout=True, stderr=True, tail=tail)
+                if isinstance(output, bytes):
+                    return output.decode("utf-8", errors="replace")
+                return output
+            except docker.errors.NotFound:
+                return ""
+            except docker.errors.DockerException:
+                self._clear_thread_local_client(ctx)
+                raise
+
+        if context_name and context_name in self._context_configs:
+            try:
+                return self._submit(_logs, container_id, context_name)
+            except docker.errors.DockerException as e:
+                raise ContainerException(f"docker error: {e}")
+
+        for ctx in self._context_configs:
+            try:
+                result = self._submit(_logs, container_id, ctx)
+                if result is not None:
+                    return result
+            except (docker.errors.NotFound, docker.errors.DockerException):
+                continue
+        return ""
+
+    @run_command
     def pull_image(self, image: str, context_name: str | None = None) -> dict:
         def _pull(ctx):
             client = self._get_client(ctx)

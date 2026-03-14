@@ -170,6 +170,73 @@
 	.countdown-ok {
 		color: #28a745;
 	}
+
+	.log-modal-overlay {
+		position: fixed;
+		top: 0;
+		left: 0;
+		width: 100%;
+		height: 100%;
+		background: rgba(0, 0, 0, 0.6);
+		z-index: 2000;
+		display: none;
+		justify-content: center;
+		align-items: center;
+	}
+
+	.log-modal-overlay.show {
+		display: flex;
+	}
+
+	.log-modal {
+		background: #1e1e1e;
+		color: #d4d4d4;
+		border-radius: 8px;
+		width: 80%;
+		max-width: 900px;
+		max-height: 80vh;
+		display: flex;
+		flex-direction: column;
+		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+	}
+
+	.log-modal-header {
+		padding: 12px 16px;
+		border-bottom: 1px solid #333;
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+	}
+
+	.log-modal-header h4 {
+		margin: 0;
+		font-size: 14px;
+		color: #ccc;
+	}
+
+	.log-modal-close {
+		background: none;
+		border: none;
+		color: #ccc;
+		font-size: 20px;
+		cursor: pointer;
+		padding: 0 4px;
+	}
+
+	.log-modal-close:hover {
+		color: #fff;
+	}
+
+	.log-modal-body {
+		padding: 16px;
+		overflow-y: auto;
+		flex: 1;
+		font-family: 'Courier New', monospace;
+		font-size: 13px;
+		line-height: 1.5;
+		white-space: pre-wrap;
+		word-break: break-all;
+	}
 </style>
 
 <div class="jumbotron">
@@ -230,9 +297,12 @@
 									<td>{% if c.team %}<a href="/admin/teams/{{ c.team_id }}">{{ c.team.name }}</a>{% endif %}</td>
 									<td class="countdown-timer" data-expires="{{ c.expires }}">calculating...</td>
 									<td>
-										<button class="btn btn-danger btn-sm containers-kill-btn" onclick="killContainer('{{ c.container_id }}')">
-											<i class="fas fa-times"></i>
-										</button>
+										<button class="btn btn-secondary btn-sm" onclick="showContainerLogs('{{ c.container_id }}')" title="View logs">
+										<i class="fas fa-terminal"></i>
+									</button>
+									<button class="btn btn-danger btn-sm containers-kill-btn" onclick="killContainer('{{ c.container_id }}')">
+										<i class="fas fa-times"></i>
+									</button>
 									</td>
 								</tr>
 								{% endfor %}
@@ -260,6 +330,16 @@
 </div>
 
 <div class="connection-tooltip" id="connection-tooltip"></div>
+
+<div class="log-modal-overlay" id="log-modal-overlay" onclick="closeLogModal(event)">
+	<div class="log-modal">
+		<div class="log-modal-header">
+			<h4 id="log-modal-title">Container Logs</h4>
+			<button class="log-modal-close" onclick="closeLogModal()">&times;</button>
+		</div>
+		<div class="log-modal-body" id="log-modal-body">Loading...</div>
+	</div>
+</div>
 
 {% endblock %}
 
@@ -389,6 +469,9 @@
 				<td>${teamColumn}</td>
 				<td class="countdown-timer" data-expires="${container.expires}">calculating...</td>
 				<td>
+					<button class="btn btn-secondary btn-sm" onclick="showContainerLogs('${container.container_id}')" title="View logs">
+						<i class="fas fa-terminal"></i>
+					</button>
 					<button class="btn btn-danger btn-sm containers-kill-btn" onclick="killContainer('${container.container_id}')">
 						<i class="fas fa-times"></i>
 					</button>
@@ -586,6 +669,36 @@
 			}
 		})
 		.catch(error => console.error('Error:', error));
+	}
+
+	function showContainerLogs(containerId) {
+		const overlay = document.getElementById('log-modal-overlay');
+		const body = document.getElementById('log-modal-body');
+		const title = document.getElementById('log-modal-title');
+
+		title.textContent = `Logs: ${containerId.substring(0, 12)}`;
+		body.textContent = 'Loading...';
+		overlay.classList.add('show');
+
+		fetch(`/containers/api/logs/${containerId}`, {
+			headers: { 'CSRF-Token': init.csrfNonce }
+		})
+		.then(response => response.json())
+		.then(data => {
+			if (data.error) {
+				body.textContent = `Error: ${data.error}`;
+			} else {
+				body.textContent = data.logs || '(no output)';
+			}
+		})
+		.catch(error => {
+			body.textContent = `Error fetching logs: ${error}`;
+		});
+	}
+
+	function closeLogModal(event) {
+		if (event && event.target !== event.currentTarget) return;
+		document.getElementById('log-modal-overlay').classList.remove('show');
 	}
 
 	document.addEventListener('DOMContentLoaded', function() {
