@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import socket
 import time
 import json
 import os
@@ -26,7 +27,7 @@ except ImportError:
     _HAS_GEVENT = False
 
 CPU_QUOTA_BASE = 100000
-DEFAULT_CONTEXT_NAME = "default"
+LOCAL_CONTEXT_NAME = "local"
 
 
 class ContainerException(Exception):
@@ -172,21 +173,49 @@ class ContainerManager:
             print(f"could not query docker contexts (database may need migration): {e}")
             contexts = []
 
-        # validate default (local) context with a throwaway client
-        try:
-            client = docker.from_env()
-            client.ping()
-            client.close()
-            new_configs[DEFAULT_CONTEXT_NAME] = "__from_env__"
-            new_weights[DEFAULT_CONTEXT_NAME] = 1
-        except (
-            docker.errors.DockerException,
-            paramiko.ssh_exception.SSHException,
-            requests.exceptions.RequestException,
-        ) as e:
-            print(f"could not connect to default docker context: {e}")
+        # handle local docker context
+        local_ctx = DockerContextModel.query.filter_by(context_name=LOCAL_CONTEXT_NAME).first()
+
+        if local_ctx is None:
+            # first boot: auto-detect and create a DB row if the socket responds
+            try:
+                client = docker.from_env()
+                client.ping()
+                client.close()
+                local_ctx = DockerContextModel(
+                    context_name=LOCAL_CONTEXT_NAME,
+                    hostname=socket.gethostname(),
+                    enabled=True,
+                    weight=1,
+                )
+                db.session.add(local_ctx)
+                db.session.commit()
+                new_configs[LOCAL_CONTEXT_NAME] = "__from_env__"
+                new_weights[LOCAL_CONTEXT_NAME] = local_ctx.weight
+            except (
+                docker.errors.DockerException,
+                paramiko.ssh_exception.SSHException,
+                requests.exceptions.RequestException,
+            ) as e:
+                print(f"could not connect to local docker context: {e}")
+        elif local_ctx.enabled:
+            try:
+                client = docker.from_env()
+                client.ping()
+                client.close()
+                new_configs[LOCAL_CONTEXT_NAME] = "__from_env__"
+                new_weights[LOCAL_CONTEXT_NAME] = local_ctx.weight
+            except (
+                docker.errors.DockerException,
+                paramiko.ssh_exception.SSHException,
+                requests.exceptions.RequestException,
+            ) as e:
+                print(f"could not connect to local docker context: {e}")
 
         for context in contexts:
+            if context.context_name == LOCAL_CONTEXT_NAME:
+                continue
+
             try:
                 docker_endpoint = None
 
@@ -243,7 +272,7 @@ class ContainerManager:
             try:
                 with self.app.app_context():
                     for row in ContainerInfoModel.query.all():
-                        ctx = row.docker_context or DEFAULT_CONTEXT_NAME
+                        ctx = row.docker_context or LOCAL_CONTEXT_NAME
                         counts[ctx] = counts.get(ctx, 0) + 1
             except Exception:
                 pass
@@ -326,6 +355,18 @@ class ContainerManager:
         recovered = []
         for ctx in known_contexts:
             if ctx.context_name in self._context_configs:
+                continue
+
+            if ctx.context_name == LOCAL_CONTEXT_NAME:
+                try:
+                    client = docker.from_env()
+                    client.ping()
+                    client.close()
+                except Exception:
+                    continue
+
+                recovered.append((ctx.context_name, ctx.weight, "__from_env__"))
+                print(f"health check: recovered context '{ctx.context_name}'")
                 continue
 
             endpoint = None
