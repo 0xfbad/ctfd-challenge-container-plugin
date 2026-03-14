@@ -26,8 +26,6 @@ class ContainerInfoModel(db.Model):
     team_id = db.Column(db.Integer, db.ForeignKey("teams.id", ondelete="CASCADE"), nullable=True)
     user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
     port = db.Column(db.Integer)
-    ssh_username = db.Column(db.Text, nullable=True)
-    ssh_password = db.Column(db.Text, nullable=True)
     timestamp = db.Column(db.Integer)
     expires = db.Column(db.Integer)
     docker_context = db.Column(db.String(512), nullable=True)
