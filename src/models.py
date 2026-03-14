@@ -40,6 +40,19 @@ class ContainerSettingsModel(db.Model):
     value = db.Column(db.Text)
 
 
+class ContainerHistoryModel(db.Model):
+    __tablename__ = "container_history"
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    container_id = db.Column(db.String(512))
+    challenge_id = db.Column(db.Integer, db.ForeignKey("challenges.id", ondelete="SET NULL"), nullable=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    team_id = db.Column(db.Integer, db.ForeignKey("teams.id", ondelete="SET NULL"), nullable=True)
+    docker_context = db.Column(db.String(512), nullable=True)
+    created_at = db.Column(db.Float)
+    stopped_at = db.Column(db.Float, nullable=True)
+    reason = db.Column(db.String(32), nullable=True)
+
+
 class DockerContextModel(db.Model):
     __tablename__ = "docker_contexts"
     id = db.Column(db.Integer, primary_key=True)

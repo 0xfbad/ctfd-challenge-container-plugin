@@ -1,4 +1,5 @@
 import socket
+import time
 import logging
 from flask import Flask
 from CTFd.plugins import register_plugin_assets_directory, register_admin_plugin_menu_bar
@@ -9,7 +10,7 @@ from .challenges import ContainerChallenge
 from .models import ContainerSettingsModel
 from .utils import settings_to_dict, DEFAULTS
 from .container_manager import ContainerManager, LOCAL_SOCKET_PATH, LOCAL_CONTEXT_NAME
-from .models import ContainerInfoModel, DockerContextModel
+from .models import ContainerInfoModel, ContainerHistoryModel, DockerContextModel
 from .views import containers_bp
 from .flag_type import register as register_freshness_flag
 from .freshness import generate_secret
@@ -76,9 +77,17 @@ def _reconcile_containers(app, container_manager):
                 container_manager.reserve_slot(container.docker_context)
                 kept += 1
             else:
+                history = ContainerHistoryModel.query.filter_by(container_id=container.container_id).first()
+                if history:
+                    history.stopped_at = time.time()
+                    history.reason = "reconciled"
                 db.session.delete(container)
                 removed += 1
         except Exception:
+            history = ContainerHistoryModel.query.filter_by(container_id=container.container_id).first()
+            if history:
+                history.stopped_at = time.time()
+                history.reason = "reconciled"
             db.session.delete(container)
             removed += 1
 

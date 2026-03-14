@@ -17,7 +17,7 @@ import paramiko
 import requests
 
 from CTFd.models import db
-from .models import ContainerInfoModel, DockerContextModel
+from .models import ContainerInfoModel, ContainerHistoryModel, DockerContextModel
 
 try:
     from gevent.threadpool import ThreadPool as _GeventPool
@@ -432,6 +432,11 @@ class ContainerManager:
                     killed.append(container)
 
             for container in killed:
+                history = ContainerHistoryModel.query.filter_by(container_id=container.container_id).first()
+                if history:
+                    history.stopped_at = time.time()
+                    if not history.reason:
+                        history.reason = "expired"
                 db.session.delete(container)
             if killed:
                 db.session.commit()

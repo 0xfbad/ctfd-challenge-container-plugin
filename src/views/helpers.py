@@ -3,7 +3,7 @@ import threading
 from flask import current_app, request
 from CTFd.models import db
 
-from ..models import ContainerInfoModel, ContainerChallengeModel, DockerContextModel
+from ..models import ContainerInfoModel, ContainerChallengeModel, ContainerHistoryModel, DockerContextModel
 from ..container_manager import ContainerException
 from ..utils import get_setting
 from ..freshness import compute_token
@@ -82,6 +82,13 @@ def get_hostname_for_context(context_name):
         return "localhost"
 
 
+def record_history_stop(container_id, reason):
+    row = ContainerHistoryModel.query.filter_by(container_id=container_id).first()
+    if row:
+        row.stopped_at = time.time()
+        row.reason = reason
+
+
 def kill_container(container_id):
     container_manager = current_app.container_manager
     container = ContainerInfoModel.query.filter_by(container_id=container_id).first()
@@ -117,6 +124,7 @@ def kill_container(container_id):
                 message=f"container killed for {challenge_name}",
             )
 
+            record_history_stop(container_id, "stopped")
             db.session.delete(container)
             db.session.commit()
             return {"success": "container killed"}
@@ -266,6 +274,20 @@ def _create_container_inner(chal_id, xid, uid, is_team):
         except Exception:
             pass
         return {"error": "database error, container has been cleaned up"}, 500
+
+    history = ContainerHistoryModel(
+        container_id=created_container.id,
+        challenge_id=challenge.id,
+        user_id=uid,
+        team_id=xid if is_team else None,
+        docker_context=context_name,
+        created_at=time.time(),
+    )
+    db.session.add(history)
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
 
     user_id = new_container.user_id
     user_name = new_container.user.name if new_container.user else None
