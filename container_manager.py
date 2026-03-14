@@ -290,10 +290,6 @@ class ContainerManager:
         candidates.sort(key=lambda x: (-x[0], x[1]))
         return candidates[0][1]
 
-    def get_next_context(self):
-        with self._context_lock:
-            return self._pick_best_context()
-
     def select_and_reserve(self):
         with self._context_lock:
             name = self._pick_best_context()
