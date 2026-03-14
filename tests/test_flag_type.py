@@ -196,10 +196,16 @@ def test_anticheat_correct_flag_passes():
     mock_flags.query.filter_by.return_value.all.return_value = [mock_flag]
 
     with (
-        patch("challenges.get_setting", return_value=secret),
+        patch(
+            "challenges.get_setting",
+            side_effect=lambda k: {"freshness_secret": secret, "post_solve_expiry_seconds": 0}.get(k),
+        ),
         patch("challenges.get_current_user", return_value=user),
         patch("challenges.is_team_mode", return_value=False),
         patch("CTFd.models.Flags", mock_flags),
+        patch("challenges.ContainerInfoModel"),
+        patch("challenges.ContainerHistoryModel"),
+        patch("challenges.db"),
     ):
         result, message = ContainerChallenge.attempt(challenge, mock_request)
         assert result is True

@@ -9,6 +9,7 @@ DEFAULTS = {
     "thread_pool_size": 4,
     "max_concurrent_creates": 2,
     "freshness_secret": "",
+    "post_solve_expiry_seconds": 90,
 }
 
 USERS_MODE = "users"

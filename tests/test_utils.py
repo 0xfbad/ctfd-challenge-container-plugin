@@ -58,6 +58,7 @@ def test_defaults_dict_has_expected_keys():
         "thread_pool_size",
         "max_concurrent_creates",
         "freshness_secret",
+        "post_solve_expiry_seconds",
     }
     assert set(DEFAULTS.keys()) == expected
 

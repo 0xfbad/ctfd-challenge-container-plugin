@@ -1,16 +1,38 @@
 import os
+import time
 
 from CTFd.plugins.challenges import BaseChallenge
 from CTFd.models import db, Users, Teams
 from CTFd.utils.user import get_current_user
 
-from .models import ContainerChallengeModel
+from .models import ContainerChallengeModel, ContainerInfoModel, ContainerHistoryModel
 from .utils import get_setting, is_team_mode
 from .freshness import compute_token, render_flag, extract_token
 from .event_logger import event_logger
 
 _plugin_dir = os.path.basename(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _assets = f"/plugins/{_plugin_dir}/src/assets"
+
+
+def _shorten_after_solve(challenge_id, xid, team_mode):
+    expiry_seconds = get_setting("post_solve_expiry_seconds")
+    if not expiry_seconds:
+        return
+
+    filter_args = {"challenge_id": challenge_id}
+    filter_args["team_id" if team_mode else "user_id"] = xid
+    container = ContainerInfoModel.query.filter_by(**filter_args).first()
+
+    if not container or container.expires == 0:
+        return
+
+    container.expires = int(time.time()) + expiry_seconds
+    db.session.commit()
+
+    history = ContainerHistoryModel.query.filter_by(container_id=container.container_id).first()
+    if history:
+        history.reason = "solved"
+        db.session.commit()
 
 
 class ContainerChallenge(BaseChallenge):
@@ -101,6 +123,7 @@ class ContainerChallenge(BaseChallenge):
                 match = expected == submission
 
             if match:
+                _shorten_after_solve(challenge.id, xid, team_mode)
                 return True, "correct"
 
             submitted_token = extract_token(template, submission)
