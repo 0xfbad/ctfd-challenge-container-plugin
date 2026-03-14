@@ -283,7 +283,6 @@ window.ContainerFormUtils = (function () {
 		initImageSearch,
 		initSSHToggle,
 		initAdvancedSection,
-		formatImageName,
 	};
 
 })();
