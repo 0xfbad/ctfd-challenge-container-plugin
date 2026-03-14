@@ -98,6 +98,8 @@ def kill_container(container_id):
 
     if container:
         try:
+            container_manager.release_slot(container.docker_context)
+
             challenge_id = container.challenge_id
             challenge_name = container.challenge.name if container.challenge else None
             user_id = container.user_id
