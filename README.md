@@ -49,9 +49,9 @@ docker context create server1 --docker "host=ssh://user@server1.example.com"
 docker context create server2 --docker "host=ssh://user@server2.example.com"
 ```
 
-Then add them through the admin dashboard at `/containers/admin/contexts`, each context needs a name matching what you created above, a hostname (SSH connection target), an optional public hostname (what users see in connection strings, falls back to the SSH hostname if unset), and a weight for load balancing
+Then add them through the admin dashboard at `/containers/admin/contexts`, each context needs a name matching what you created above, a public hostname (what users see in connection strings, required), an optional SSH hostname (connection target, leave blank for local contexts), and a weight for load balancing
 
-The plugin auto-detects the local Docker socket on first boot and creates a "local" context in the database if it responds to a ping. This context is enabled by default and shows up in the admin contexts UI where you can disable it, change its hostname, or adjust its weight like any other context. If you delete it, it gets recreated on restart
+For single-server deployments you don't need to configure anything. On first boot with an empty contexts table the plugin checks if the local Docker socket at `/var/run/docker.sock` is reachable, and if so creates a `local` context automatically using the machine's hostname as the public address. If you delete it and restart CTFd it comes back
 
 ### Pre-pulling images
 
@@ -97,7 +97,9 @@ Each challenge has a configurable expiration in minutes (default 30, 0 means nev
 
 ## Load balancing
 
-The plugin uses least-connections scoring to distribute containers across Docker contexts. For each available context it calculates `weight / (active_count + 1)` where active_count comes from querying `ContainerInfoModel` for containers currently on that context. Highest score wins, ties broken alphabetically. A context with weight 2 at zero containers scores 2.0 while weight 1 at zero containers scores 1.0, so the heavier context gets picked first, but as it accumulates containers the score drops and lighter contexts start getting traffic
+The plugin uses least-connections scoring to distribute containers across Docker contexts. For each healthy context it calculates `weight / (active_count + 1)` where active_count is tracked in memory via `select_and_reserve` / `release_slot` calls rather than querying the database on every scheduling decision. Highest score wins, ties broken alphabetically. A context with weight 2 at zero containers scores 2.0 while weight 1 at zero containers scores 1.0, so the heavier context gets picked first, but as it accumulates containers the score drops and lighter contexts start getting traffic
+
+Context selection and slot reservation happen atomically under a lock so two concurrent requests can't race for the same slot. Slots get released when containers are killed (by users, admins, or the expiry job) and recovered on startup via reconciliation
 
 This is better than round-robin because it accounts for actual load, if containers have different lifetimes or some get killed early the balancer naturally routes to wherever has capacity rather than blindly cycling through contexts
 
@@ -152,26 +154,30 @@ When gevent is available (which it is in the default CTFd deployment) the thread
 
 The plugin uses APScheduler for background jobs. Under gunicorn with gevent it uses `GeventScheduler`, otherwise `BackgroundScheduler`. Two independent jobs run
 
-- Expiry check: every `expiration_check_interval` seconds (default 5), queries the database for containers past their expiration and kills them
-- Health check: every 30 seconds, pings each Docker context and removes unhealthy ones from the pool, then tries to reconnect previously removed contexts and adds them back if they respond
+- Expiry check: every `expiration_check_interval` seconds (default 5), queries the database for containers past their expiration, kills them, and releases their load balancer slots
+- Health check: every 30 seconds, pings each Docker context and flips health booleans, unhealthy contexts stay in the tracking dict and get re-enabled automatically when they start responding again
 
 Both jobs use `misfire_grace_time=30` and `coalesce=True` so if the scheduler falls behind it catches up without firing duplicate runs
 
 ## Context health
 
-Contexts get marked unhealthy when the connectivity test fails (local socket or SSH tunnel). Unhealthy contexts get removed from the scheduling pool so new containers don't get routed there. On the next health check pass (every 30 seconds) the plugin tries to reconnect any previously removed contexts. The local context reconnects via the Docker socket directly, remote contexts re-read the Docker context meta file or fall back to the DB hostname. Either way if the ping succeeds the context gets added back to the pool
+Contexts stay in the health tracking dict even when unreachable, their health boolean gets flipped to false instead of removing them from the pool entirely. The load balancer skips unhealthy contexts when picking where to schedule new containers. On the next health check pass (every 30 seconds) the plugin pings each context and flips the boolean back to true if it responds, automatically re-enabling it for scheduling without any manual intervention or config reload
+
+Health transitions get logged as `host_healthy` / `host_unhealthy` events so they show up in the admin event stream and in CTFd's logs
+
+Endpoint resolution follows a three-step fallback chain: first it checks `~/.docker/contexts/meta/{name}/meta.json` for a Docker context file, then falls back to `ssh://{hostname}` from the DB record, and finally tries the local Docker socket at `/var/run/docker.sock` if it exists. This means a context with no SSH hostname configured still works if you have a local Docker socket or a matching Docker context file
 
 If a user checks their container status while the host is unreachable they see a "host temporarily unreachable" message instead of having their container record deleted, so they don't lose their session if the host recovers
 
 ## Startup reconciliation
 
-On startup the plugin reconciles the database with Docker, querying all `ContainerInfoModel` rows and checking each against the Docker API to see if the container is still running. Records for containers that no longer exist get deleted so you don't accumulate stale rows after a CTFd restart or crash
+On startup the plugin reconciles the database with Docker, querying all `ContainerInfoModel` rows and checking each against the Docker API to see if the container is still running. Containers that are still alive get their load balancer slots reserved so the scheduler has accurate counts from the start. Records for containers that no longer exist get deleted so you don't accumulate stale rows after a CTFd restart or crash
 
 ## Event logging
 
 The event logger provides a thread-safe event stream for the admin dashboard. Each event has a type, message, level (info/warning/error), timestamp, human-readable datetime, optional user info, and a metadata dict for domain-specific fields like container_id, challenge_id, and team info. Events also get written to Python's logging module so they show up in CTFd's logs
 
-The admin dashboard gets a real-time SSE stream backed by a bounded queue (100 events) per listener, if a browser disconnects ungracefully and events pile up the oldest ones get dropped instead of growing memory forever. The event buffer holds up to 2000 events for the recent events API
+The admin dashboard gets a real-time SSE stream backed by a bounded queue (100 events) per listener, new connections receive the last 200 events immediately so the dashboard has history on load. If a browser disconnects ungracefully and events pile up the oldest ones get dropped instead of growing memory forever. The stream uses SSE comment keepalives (`": keepalive\n\n"`) every 30 seconds to detect dead connections. The event buffer holds up to 2000 events for the recent events API
 
 ## Configuration
 
@@ -216,7 +222,7 @@ Per-challenge memory, CPU, and expiration settings override the defaults when co
 
 ### Docker contexts
 
-Managed through the admin dashboard at `/containers/admin/contexts`. The local Docker socket context gets auto-created on first boot with the machine hostname and can be toggled on or off from the UI. Remote contexts need a name (matching a Docker context on the host), a hostname (SSH target), an optional public hostname (what users see in connection strings), a weight for load balancing, and an enabled flag. Add, edit, delete, and test connectivity all from the UI without restarting CTFd
+Managed through the admin dashboard at `/containers/admin/contexts`. Each context has a name (matching a docker context on the host or just a label), an optional SSH hostname, a public hostname (what users see in connection strings, required), a weight for load balancing, and an enabled flag. A `local` context is auto-seeded on first boot when the Docker socket is available, with `hostname=None` and `pub_hostname` set to the machine's hostname. The admin UI shows connection status per context and lets you add, edit, delete, test connectivity, and reload connections without restarting CTFd
 
 ## API endpoints
 
@@ -247,6 +253,7 @@ Managed through the admin dashboard at `/containers/admin/contexts`. The local D
 - `PUT /containers/api/contexts/update/<id>` update context settings
 - `DELETE /containers/api/contexts/delete/<id>` remove context
 - `GET /containers/api/contexts/test/<id>` test context connectivity
+- `POST /containers/api/contexts/reload` reconnect all contexts
 
 ### Events
 
@@ -270,4 +277,4 @@ Managed through the admin dashboard at `/containers/admin/contexts`. The local D
 
 **Containers piling up on one host**: the load balancer uses weighted least-connections scoring, check that your context weights are set appropriately in the admin UI, a context with weight 2 gets twice the score bonus compared to weight 1
 
-**Host went down during CTF**: the health check runs every 30 seconds and automatically removes unreachable contexts from the pool, when the host comes back the next health check recovers it, check CTFd logs for messages like "health check: removing unhealthy context" and "health check: recovered context"
+**Host went down during CTF**: the health check runs every 30 seconds and flips unhealthy contexts out of the scheduling pool, when the host comes back the next health check re-enables it automatically, check CTFd logs for `host_unhealthy` and `host_healthy` events or look at the admin event stream
