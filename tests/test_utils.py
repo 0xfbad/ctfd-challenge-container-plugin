@@ -55,8 +55,6 @@ def test_defaults_dict_has_expected_keys():
         "rate_limit_requests",
         "rate_limit_interval",
         "expiration_check_interval",
-        "default_memory_mb",
-        "default_cpu_limit",
         "thread_pool_size",
         "max_concurrent_creates",
         "freshness_secret",

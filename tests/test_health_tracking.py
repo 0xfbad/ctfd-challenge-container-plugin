@@ -33,19 +33,19 @@ def test_unhealthy_stays_in_health_dict():
     assert cm._health["a"] is True
 
 
-def test_get_next_context_skips_unhealthy():
+def test_select_skips_unhealthy():
     cm = make_manager({"a": 1, "b": 5})
     cm._health["b"] = False
 
     # even though b has higher weight, it's unhealthy so a is picked
-    assert cm.get_next_context() == "a"
+    assert cm.select_and_reserve() == "a"
 
 
 def test_flipping_health_re_enables_scheduling():
     cm = make_manager({"a": 1, "b": 5})
     cm._health["b"] = False
 
-    assert cm.get_next_context() == "a"
+    assert cm.select_and_reserve() == "a"
 
     cm._health["b"] = True
-    assert cm.get_next_context() == "b"
+    assert cm.select_and_reserve() == "b"

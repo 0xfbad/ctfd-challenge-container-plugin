@@ -26,55 +26,55 @@ def make_manager(context_weights, container_counts=None):
 
 def test_single_context():
     cm = make_manager({"default": 1})
-    assert cm.get_next_context() == "default"
+    assert cm.select_and_reserve() == "default"
 
 
 def test_empty_raises():
     cm = make_manager({})
     with pytest.raises(ContainerException, match="no healthy contexts"):
-        cm.get_next_context()
+        cm.select_and_reserve()
 
 
 def test_higher_weight_preferred():
     cm = make_manager({"a": 1, "b": 5})
-    assert cm.get_next_context() == "b"
+    assert cm.select_and_reserve() == "b"
 
 
 def test_least_connections_balancing():
     # weight 2 vs weight 1, both at 0 -> "a" wins (score 2 vs 1)
     cm = make_manager({"a": 2, "b": 1})
-    assert cm.get_next_context() == "a"
+    assert cm.select_and_reserve() == "a"
 
     # "a" has 1 container: score_a = 2/2 = 1, score_b = 1/1 = 1
     # tie broken alphabetically -> "a"
     cm = make_manager({"a": 2, "b": 1}, container_counts={"a": 1})
-    assert cm.get_next_context() == "a"
+    assert cm.select_and_reserve() == "a"
 
     # "a" has 2 containers: score_a = 2/3 = 0.67, score_b = 1/1 = 1
     cm = make_manager({"a": 2, "b": 1}, container_counts={"a": 2})
-    assert cm.get_next_context() == "b"
+    assert cm.select_and_reserve() == "b"
 
 
 def test_alphabetical_tiebreak():
     cm = make_manager({"zebra": 1, "alpha": 1})
-    assert cm.get_next_context() == "alpha"
+    assert cm.select_and_reserve() == "alpha"
 
 
 def test_load_distributes_evenly():
     cm = make_manager({"a": 1, "b": 1, "c": 1})
-    assert cm.get_next_context() == "a"
+    assert cm.select_and_reserve() == "a"
 
     cm = make_manager({"a": 1, "b": 1, "c": 1}, container_counts={"a": 1})
-    assert cm.get_next_context() == "b"
+    assert cm.select_and_reserve() == "b"
 
     cm = make_manager({"a": 1, "b": 1, "c": 1}, container_counts={"a": 1, "b": 1})
-    assert cm.get_next_context() == "c"
+    assert cm.select_and_reserve() == "c"
 
 
 def test_unhealthy_context_skipped():
     cm = make_manager({"a": 1, "b": 5})
     cm._health["b"] = False
-    assert cm.get_next_context() == "a"
+    assert cm.select_and_reserve() == "a"
 
 
 def test_all_unhealthy_raises():
@@ -82,7 +82,7 @@ def test_all_unhealthy_raises():
     cm._health["a"] = False
     cm._health["b"] = False
     with pytest.raises(ContainerException, match="no healthy contexts"):
-        cm.get_next_context()
+        cm.select_and_reserve()
 
 
 def test_select_and_reserve_increments():
@@ -114,7 +114,7 @@ def test_release_slot_no_negative():
     assert cm._container_counts["a"] == 0
 
 
-def test_concurrent_get_next_context():
+def test_concurrent_select_and_reserve():
     num_threads = 20
     cm = make_manager({"a": 2, "b": 3, "c": 1})
     barrier = threading.Barrier(num_threads + 1)
@@ -126,7 +126,7 @@ def test_concurrent_get_next_context():
     def worker():
         barrier.wait()
         try:
-            result = cm.get_next_context()
+            result = cm.select_and_reserve()
             with results_lock:
                 results.append(result)
         except Exception as e:
