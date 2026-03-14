@@ -8,8 +8,6 @@ DEFAULTS = {
     "rate_limit_requests": 500,
     "rate_limit_interval": 10,
     "expiration_check_interval": 5,
-    "default_memory_mb": 0,
-    "default_cpu_limit": 0.0,
     "thread_pool_size": 4,
     "max_concurrent_creates": 2,
     "freshness_secret": "",
