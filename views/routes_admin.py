@@ -8,57 +8,8 @@ from . import containers_bp
 from .helpers import kill_container, get_hostname_for_context
 from ..utils import is_team_mode, get_setting, set_setting, DEFAULTS
 from ..models import ContainerInfoModel, DockerContextModel
-from ..container_manager import ContainerException
+from ..container_manager import ContainerException, LOCAL_CONTEXT_NAME
 from ..event_logger import event_logger
-
-
-def get_contexts_with_default(container_manager):
-    contexts = DockerContextModel.query.all()
-    contexts_list = list(contexts)
-
-    if "default" in container_manager._context_configs and not any(c.context_name == "default" for c in contexts_list):
-
-        class DefaultContext:
-            id = None
-            context_name = "default"
-            hostname = None
-            weight = 1
-            enabled = True
-
-        contexts_list.insert(0, DefaultContext())
-
-    return contexts_list
-
-
-def get_contexts_data_with_default(container_manager):
-    contexts = DockerContextModel.query.all()
-    contexts_data = [
-        {
-            "id": ctx.id,
-            "context_name": ctx.context_name,
-            "hostname": ctx.hostname,
-            "pub_hostname": getattr(ctx, "pub_hostname", None),
-            "weight": ctx.weight,
-            "enabled": ctx.enabled,
-        }
-        for ctx in contexts
-    ]
-
-    if "default" in container_manager._context_configs and not any(
-        c["context_name"] == "default" for c in contexts_data
-    ):
-        contexts_data.insert(
-            0,
-            {
-                "id": None,
-                "context_name": "default",
-                "hostname": None,
-                "weight": 1,
-                "enabled": True,
-            },
-        )
-
-    return contexts_data
 
 
 @containers_bp.route("/dashboard", methods=["GET"])
@@ -250,9 +201,8 @@ def route_get_contexts():
 @containers_bp.route("/admin/contexts", methods=["GET"])
 @admins_only
 def route_list_contexts():
-    container_manager = current_app.container_manager
     try:
-        contexts = get_contexts_with_default(container_manager)
+        contexts = DockerContextModel.query.all()
     except Exception:
         contexts = []
 
@@ -262,8 +212,18 @@ def route_list_contexts():
 @containers_bp.route("/api/contexts/list", methods=["GET"])
 @admins_only
 def route_api_list_contexts():
-    container_manager = current_app.container_manager
-    contexts_data = get_contexts_data_with_default(container_manager)
+    contexts = DockerContextModel.query.all()
+    contexts_data = [
+        {
+            "id": ctx.id,
+            "context_name": ctx.context_name,
+            "hostname": ctx.hostname,
+            "pub_hostname": getattr(ctx, "pub_hostname", None),
+            "weight": ctx.weight,
+            "enabled": ctx.enabled,
+        }
+        for ctx in contexts
+    ]
     return jsonify(contexts=contexts_data)
 
 
@@ -371,16 +331,20 @@ def route_api_test_context(context_id):
     if not context:
         return jsonify(error="context not found"), 404
 
-    if not context.hostname:
-        return jsonify(error="no hostname configured for this context"), 400
-
     try:
-        if "@" in context.hostname:
-            url = f"ssh://{context.hostname}"
+        if context.context_name == LOCAL_CONTEXT_NAME:
+            client = _docker.from_env()
         else:
-            url = f"ssh://root@{context.hostname}"
+            if not context.hostname:
+                return jsonify(error="no hostname configured for this context"), 400
 
-        client = _docker.DockerClient(base_url=url)
+            if "@" in context.hostname:
+                url = f"ssh://{context.hostname}"
+            else:
+                url = f"ssh://root@{context.hostname}"
+
+            client = _docker.DockerClient(base_url=url)
+
         client.ping()
         client.close()
         return jsonify(success="context is reachable")
