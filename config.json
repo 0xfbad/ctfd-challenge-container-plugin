@@ -1,4 +1,4 @@
 {
 	"name": "Challenge Containers",
-	"config": "plugins/individualized-containers/templates/admin/plugin_config.html"
+	"config": "plugins/individualized-containers/src/templates/admin/plugin_config.html"
 }

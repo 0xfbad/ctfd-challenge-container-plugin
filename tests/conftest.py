@@ -126,23 +126,23 @@ _sqlalchemy_orm = sys.modules["sqlalchemy.orm"]
 _sqlalchemy_orm.relationship = MagicMock()
 sys.modules["sqlalchemy"].orm = _sqlalchemy_orm
 
-# register repo root as a package so relative imports resolve
-repo_root = Path(__file__).resolve().parent.parent
-repo_root_str = str(repo_root)
+# register src/ as a package so relative imports resolve
+src_dir = Path(__file__).resolve().parent.parent / "src"
+src_dir_str = str(src_dir)
 
 PKG = "_cc_plugin"
 
 pkg = types.ModuleType(PKG)
-pkg.__path__ = [repo_root_str]
+pkg.__path__ = [src_dir_str]
 pkg.__package__ = PKG
-pkg.__file__ = str(repo_root / "__init__.py")
+pkg.__file__ = str(src_dir / "__init__.py")
 sys.modules[PKG] = pkg
 
 
 def _load_module(name, filepath=None):
     full = f"{PKG}.{name}"
     if filepath is None:
-        filepath = repo_root / f"{name}.py"
+        filepath = src_dir / f"{name}.py"
     spec = importlib.util.spec_from_file_location(full, filepath)
     mod = importlib.util.module_from_spec(spec)
     mod.__package__ = PKG
@@ -154,7 +154,7 @@ def _load_module(name, filepath=None):
 
 
 def _load_subpackage(name):
-    subpkg_dir = repo_root / name
+    subpkg_dir = src_dir / name
     full = f"{PKG}.{name}"
 
     init_file = subpkg_dir / "__init__.py"

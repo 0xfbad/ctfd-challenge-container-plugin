@@ -15,7 +15,8 @@ DEFAULTS = {
 
 
 def get_settings_path():
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+    plugin_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(plugin_root, "settings.json")
 
 
 settings = json.load(open(get_settings_path()))
