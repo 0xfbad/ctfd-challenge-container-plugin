@@ -27,15 +27,14 @@
 				<tbody id="contexts-table-body">
 					{% for context in contexts %}
 					<tr data-context-id="{{ context.id }}">
-						<td>{{ context.context_name }}{% if context.context_name == 'default' %} <span class="badge badge-info">Auto-detected</span>{% endif %}</td>
-						<td>{{ context.hostname if context.hostname else 'Auto-detected from request' }}</td>
+						<td>{{ context.context_name }}{% if context.context_name == 'local' %} <span class="badge badge-info">Local</span>{% endif %}</td>
+						<td>{{ context.hostname }}</td>
 						<td>
 							<span class="badge badge-{{ 'success' if context.enabled else 'secondary' }}">
 								{{ 'Enabled' if context.enabled else 'Disabled' }}
 							</span>
 						</td>
 						<td>
-							{% if context.id %}
 							<button class="btn btn-sm btn-info test-context-btn" data-context-id="{{ context.id }}">
 								Test
 							</button>
@@ -43,11 +42,10 @@
 								data-hostname="{{ context.hostname }}" data-enabled="{{ context.enabled }}">
 								Edit
 							</button>
+							{% if context.context_name != 'local' %}
 							<button class="btn btn-sm btn-danger delete-context-btn" data-context-id="{{ context.id }}">
 								Delete
 							</button>
-							{% else %}
-							<span class="text-muted">Default context (cannot be edited)</span>
 							{% endif %}
 						</td>
 					</tr>
