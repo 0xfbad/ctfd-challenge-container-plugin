@@ -62,7 +62,7 @@ def build_connection_response(status, challenge, container, context_name):
 
 
 def get_hostname_for_context(context_name):
-    if not context_name or context_name == "default":
+    if not context_name:
         try:
             return request.host.split(":")[0]
         except Exception:
