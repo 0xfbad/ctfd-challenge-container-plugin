@@ -47,6 +47,6 @@ class DockerContextModel(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     context_name = db.Column(db.String(512), unique=True, nullable=False)
     hostname = db.Column(db.String(512), nullable=True)
-    pub_hostname = db.Column(db.String(512), nullable=True)
+    pub_hostname = db.Column(db.String(512), nullable=False)
     weight = db.Column(db.Integer, default=1)
     enabled = db.Column(db.Boolean, default=True)
