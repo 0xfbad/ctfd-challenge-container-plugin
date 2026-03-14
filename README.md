@@ -69,7 +69,7 @@ Pass `context_name` in the body to pull to a specific context only
 
 ### Database
 
-The plugin creates its tables automatically on first load, no manual migration needed. It creates `docker_contexts` for the context pool, `container_challenges` for challenge definitions, `container_info` for active container metadata, and `container_settings` for plugin configuration
+The plugin creates its tables automatically on first load, no manual migration needed. It creates `docker_contexts` for the context pool, `container_challenges` for challenge definitions, `container_info` for active container metadata, `container_settings` for plugin configuration, and `container_history` for permanent lifecycle records
 
 ## Container lifecycle
 
@@ -94,6 +94,18 @@ User clicks "Stop Instance" or admin force-kills from the dashboard. Plugin kill
 ### Expiration
 
 Each challenge has a configurable expiration in minutes (default 30, 0 means never expire). An APScheduler job runs on a configurable interval (default 5s) to query the database for containers past their expiration timestamp and kills them. Users can renew their session from the UI which resets the timer to the challenge's configured duration
+
+### Post-solve auto-expiry
+
+When a player submits a correct flag the plugin shortens their running container's expiration to 90 seconds from now. This frees resources quickly after a solve without killing the container instantly, giving the player a moment to see the result. The delay is configurable via the `post_solve_expiry_seconds` setting, set it to 0 to disable. Containers with no expiration (`expires = 0`) are left alone
+
+### Container history
+
+`ContainerInfoModel` rows get deleted when containers stop, so there's no way to look at usage patterns after the fact. The `ContainerHistoryModel` table persists lifecycle data permanently. A row is inserted on every container create with the container ID, challenge, user/team, docker context, and creation timestamp. When the container ends the row gets updated with a `stopped_at` timestamp and a reason
+
+Reasons track how the container ended: `stopped` (user or admin killed it), `expired` (expiry job), `purged` (admin purge all), `reconciled` (stale record cleaned up on startup), or `solved` (post-solve auto-expiry). The solved reason gets set when the player submits a correct flag and the actual `stopped_at` timestamp gets filled in later when the expiry job kills it
+
+Foreign keys to challenges, users, and teams use `ON DELETE SET NULL` so history survives if those records get deleted
 
 ## Load balancing
 
@@ -179,6 +191,16 @@ The event logger provides a thread-safe event stream for the admin dashboard. Ea
 
 The admin dashboard gets a real-time SSE stream backed by a bounded queue (100 events) per listener, new connections receive the last 200 events immediately so the dashboard has history on load. If a browser disconnects ungracefully and events pile up the oldest ones get dropped instead of growing memory forever. The stream uses SSE comment keepalives (`": keepalive\n\n"`) every 30 seconds to detect dead connections. The event buffer holds up to 2000 events for the recent events API
 
+## Container log viewer
+
+The admin dashboard has a logs button (terminal icon) on each running container row. Clicking it opens a modal that fetches the last 200 lines of stdout/stderr from the container via the Docker API. The tail count is configurable via the `?tail=N` query parameter on the API endpoint (max 1000). Useful for debugging challenge images without shelling into the Docker host
+
+## Analytics dashboard
+
+The Container Stats page (`/containers/admin/stats`, linked from the admin plugin menu) provides four ECharts visualizations built from `ContainerHistoryModel` data. All charts accept a time range selector (24h, 7d, 30d, all time)
+
+The activity chart shows container creates and stops over time, bucketed hourly for the 24h view and daily for longer ranges. The top users chart ranks users by total container time with container count and unique challenge count in tooltips. The challenge stats chart shows containers per challenge with a restart rate overlay (containers per unique user, useful for spotting challenges that crash frequently). The solve times chart cross-references CTFd's `Solves` table with container history to compute how long each player took from container creation to flag submission, displayed as average bars with individual solve times as scatter points
+
 ## Configuration
 
 ### Challenge settings
@@ -213,6 +235,7 @@ Managed through the admin settings page, no config files needed
 | rate_limit_requests | 500 | max requests per rate limit interval |
 | rate_limit_interval | 10 | rate limit window in seconds |
 | freshness_secret | (auto-generated) | HMAC key for freshness tokens, clear to disable |
+| post_solve_expiry_seconds | 90 | seconds until container expires after a correct solve, 0 to disable |
 
 Rate limit changes require a CTFd restart because the decorator values are evaluated at import time. Memory, CPU, and expiration limits are configured per-challenge in the challenge settings
 
@@ -239,6 +262,17 @@ Managed through the admin dashboard at `/containers/admin/contexts`. Each contex
 - `POST /containers/api/pull` pre-pull image to contexts
 - `GET /containers/api/images` list images across all contexts
 - `GET /containers/api/images/<context>` list images for a specific context
+- `GET /containers/api/logs/<container_id>` fetch container stdout/stderr (optional `?tail=N`)
+
+### Analytics
+
+- `GET /containers/admin/stats` analytics dashboard page
+- `GET /containers/api/analytics/activity` container creates/stops over time
+- `GET /containers/api/analytics/top_users` top 20 users by total container time
+- `GET /containers/api/analytics/challenges` per-challenge container stats
+- `GET /containers/api/analytics/solve_times` time-to-solve per challenge
+
+All analytics endpoints accept `?range=24h|7d|30d|all` (default `7d`)
 
 ### Contexts
 
