@@ -18,6 +18,8 @@ document.addEventListener('DOMContentLoaded', function() {
 	saveContextBtn.addEventListener('click', async function() {
 		const contextName = document.getElementById('context-name').value;
 		const hostname = document.getElementById('context-hostname').value;
+		const pubHostname = document.getElementById('context-pub-hostname').value;
+		const weight = parseInt(document.getElementById('context-weight').value) || 1;
 		const enabled = document.getElementById('context-enabled').checked;
 
 		if (!contextName) {
@@ -25,8 +27,8 @@ document.addEventListener('DOMContentLoaded', function() {
 			return;
 		}
 
-		if (!hostname) {
-			alert('Hostname is required');
+		if (!pubHostname) {
+			alert('Public hostname is required');
 			return;
 		}
 
@@ -40,8 +42,9 @@ document.addEventListener('DOMContentLoaded', function() {
 				},
 				body: JSON.stringify({
 					context_name: contextName,
-					hostname: hostname,
-					weight: 1,
+					hostname: hostname || null,
+					pub_hostname: pubHostname,
+					weight: weight,
 					enabled: enabled
 				})
 			});
@@ -64,10 +67,14 @@ document.addEventListener('DOMContentLoaded', function() {
 		btn.addEventListener('click', function() {
 			const contextId = this.dataset.contextId;
 			const hostname = this.dataset.hostname;
+			const pubHostname = this.dataset.pubHostname;
+			const weight = this.dataset.weight;
 			const enabled = this.dataset.enabled === 'True';
 
 			document.getElementById('edit-context-id').value = contextId;
 			document.getElementById('edit-context-hostname').value = hostname;
+			document.getElementById('edit-context-pub-hostname').value = pubHostname;
+			document.getElementById('edit-context-weight').value = weight;
 			document.getElementById('edit-context-enabled').checked = enabled;
 
 			$('#editContextModal').modal('show');
@@ -77,10 +84,12 @@ document.addEventListener('DOMContentLoaded', function() {
 	updateContextBtn.addEventListener('click', async function() {
 		const contextId = document.getElementById('edit-context-id').value;
 		const hostname = document.getElementById('edit-context-hostname').value;
+		const pubHostname = document.getElementById('edit-context-pub-hostname').value;
+		const weight = parseInt(document.getElementById('edit-context-weight').value) || 1;
 		const enabled = document.getElementById('edit-context-enabled').checked;
 
-		if (!hostname) {
-			alert('Hostname is required');
+		if (!pubHostname) {
+			alert('Public hostname is required');
 			return;
 		}
 
@@ -93,8 +102,9 @@ document.addEventListener('DOMContentLoaded', function() {
 					'CSRF-Token': init.csrfNonce
 				},
 				body: JSON.stringify({
-					hostname: hostname,
-					weight: 1,
+					hostname: hostname || null,
+					pub_hostname: pubHostname,
+					weight: weight,
 					enabled: enabled
 				})
 			});
