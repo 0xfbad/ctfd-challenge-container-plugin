@@ -1,24 +1,32 @@
-import json
+import os
 
 from CTFd.plugins.challenges import BaseChallenge
 from CTFd.models import db, Users, Teams
 from CTFd.utils.user import get_current_user
 
 from .models import ContainerChallengeModel
-from .utils import get_settings_path, get_setting, is_team_mode
+from .utils import get_setting, is_team_mode
 from .freshness import compute_token, render_flag, extract_token
 from .event_logger import event_logger
 
-with open(get_settings_path(), "r") as f:
-    settings = json.load(f)
+_plugin_dir = os.path.basename(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_assets = f"/plugins/{_plugin_dir}/src/assets"
 
 
 class ContainerChallenge(BaseChallenge):
-    id = settings["plugin-info"]["id"]
-    name = settings["plugin-info"]["name"]
-    templates = settings["plugin-info"]["templates"]
-    scripts = settings["plugin-info"]["scripts"]
-    route = settings["plugin-info"]["route"]
+    id = "container"
+    name = "container"
+    templates = {
+        "create": f"{_assets}/create.html",
+        "update": f"{_assets}/update.html",
+        "view": f"{_assets}/view.html",
+    }
+    scripts = {
+        "create": f"{_assets}/create.js",
+        "update": f"{_assets}/update.js",
+        "view": f"{_assets}/view.js",
+    }
+    route = f"{_assets}/"
 
     challenge_model = ContainerChallengeModel
 

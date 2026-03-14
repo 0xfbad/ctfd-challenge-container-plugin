@@ -1,5 +1,3 @@
-import os
-import json
 from CTFd.utils import get_config
 
 
@@ -13,16 +11,8 @@ DEFAULTS = {
     "freshness_secret": "",
 }
 
-
-def get_settings_path():
-    plugin_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(plugin_root, "settings.json")
-
-
-settings = json.load(open(get_settings_path()))
-
-USERS_MODE = settings["modes"]["USERS_MODE"]
-TEAMS_MODE = settings["modes"]["TEAMS_MODE"]
+USERS_MODE = "users"
+TEAMS_MODE = "teams"
 
 
 def get_setting(key, default=None):
