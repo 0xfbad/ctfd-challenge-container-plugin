@@ -51,7 +51,7 @@ docker context create server2 --docker "host=ssh://user@server2.example.com"
 
 Then add them through the admin dashboard at `/containers/admin/contexts`, each context needs a name matching what you created above, a hostname (SSH connection target), an optional public hostname (what users see in connection strings, falls back to the SSH hostname if unset), and a weight for load balancing
 
-The plugin also validates the local Docker socket on startup and adds it as a "default" context automatically if it responds to a ping
+The plugin auto-detects the local Docker socket on first boot and creates a "local" context in the database if it responds to a ping. This context is enabled by default and shows up in the admin contexts UI where you can disable it, change its hostname, or adjust its weight like any other context. If you delete it, it gets recreated on restart
 
 ### Pre-pulling images
 
@@ -159,7 +159,7 @@ Both jobs use `misfire_grace_time=30` and `coalesce=True` so if the scheduler fa
 
 ## Context health
 
-Contexts get marked unhealthy when the connectivity test fails (SSH tunnel or Docker daemon ping). Unhealthy contexts get removed from the scheduling pool so new containers don't get routed there. On the next health check pass (every 30 seconds) the plugin tries to reconnect any previously removed contexts by re-reading the Docker context meta file or falling back to the DB hostname, pinging, and adding them back to the pool if they respond
+Contexts get marked unhealthy when the connectivity test fails (local socket or SSH tunnel). Unhealthy contexts get removed from the scheduling pool so new containers don't get routed there. On the next health check pass (every 30 seconds) the plugin tries to reconnect any previously removed contexts. The local context reconnects via the Docker socket directly, remote contexts re-read the Docker context meta file or fall back to the DB hostname. Either way if the ping succeeds the context gets added back to the pool
 
 If a user checks their container status while the host is unreachable they see a "host temporarily unreachable" message instead of having their container record deleted, so they don't lose their session if the host recovers
 
@@ -216,7 +216,7 @@ Per-challenge memory, CPU, and expiration settings override the defaults when co
 
 ### Docker contexts
 
-Managed through the admin dashboard at `/containers/admin/contexts`, each context has a name (matching a Docker context on the host), a hostname (SSH target), an optional public hostname (what users see in connection strings), a weight for load balancing, and an enabled flag. Add, edit, delete, and test connectivity all from the UI without restarting CTFd
+Managed through the admin dashboard at `/containers/admin/contexts`. The local Docker socket context gets auto-created on first boot with the machine hostname and can be toggled on or off from the UI. Remote contexts need a name (matching a Docker context on the host), a hostname (SSH target), an optional public hostname (what users see in connection strings), a weight for load balancing, and an enabled flag. Add, edit, delete, and test connectivity all from the UI without restarting CTFd
 
 ## API endpoints
 
