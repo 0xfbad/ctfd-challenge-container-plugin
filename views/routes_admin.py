@@ -1,5 +1,6 @@
 import queue
 import json
+import docker
 from flask import request, render_template, current_app, jsonify, Response, stream_with_context
 from CTFd.utils.decorators import admins_only
 from CTFd.models import db
@@ -8,7 +9,7 @@ from . import containers_bp
 from .helpers import kill_container, get_hostname_for_context
 from ..utils import is_team_mode, get_setting, set_setting, DEFAULTS
 from ..models import ContainerInfoModel, DockerContextModel
-from ..container_manager import ContainerException, LOCAL_CONTEXT_NAME
+from ..container_manager import ContainerException, LOCAL_CONTEXT_NAME, _resolve_endpoint
 from ..event_logger import event_logger
 
 
@@ -109,7 +110,6 @@ def route_events_stream():
             try:
                 q.put_nowait(event)
             except queue.Full:
-                # drop oldest event to make room
                 try:
                     q.get_nowait()
                 except queue.Empty:
@@ -121,22 +121,30 @@ def route_events_stream():
 
         event_logger.add_listener(listener)
 
-        yield f"data: {json.dumps({'type': 'connected'})}\n\n"
-
         try:
+            recent_events = event_logger.get_recent_events(limit=200)
+            for event in recent_events:
+                yield f"data: {json.dumps(event)}\n\n"
+
             while True:
                 try:
                     event_data = q.get(timeout=30)
                     yield f"data: {json.dumps(event_data)}\n\n"
                 except queue.Empty:
-                    yield f"data: {json.dumps({'type': 'ping'})}\n\n"
-        except GeneratorExit:
+                    yield ": keepalive\n\n"
+
+        finally:
             event_logger.remove_listener(listener)
 
-    response = Response(stream_with_context(event_stream()), content_type="text/event-stream")
-    response.headers["Cache-Control"] = "no-cache"
-    response.headers["X-Accel-Buffering"] = "no"
-    return response
+    return Response(
+        stream_with_context(event_stream()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @containers_bp.route("/api/kill", methods=["POST"])
@@ -201,26 +209,35 @@ def route_get_contexts():
 @containers_bp.route("/admin/contexts", methods=["GET"])
 @admins_only
 def route_list_contexts():
+    container_manager = current_app.container_manager
+
     try:
         contexts = DockerContextModel.query.all()
     except Exception:
         contexts = []
 
-    return render_template("admin/contexts.html", contexts=contexts)
+    connected_set = set(container_manager.get_connected_contexts())
+
+    return render_template("admin/contexts.html", contexts=contexts, connected_set=connected_set)
 
 
 @containers_bp.route("/api/contexts/list", methods=["GET"])
 @admins_only
 def route_api_list_contexts():
+    container_manager = current_app.container_manager
+    connected = set(container_manager.get_connected_contexts())
+
     contexts = DockerContextModel.query.all()
     contexts_data = [
         {
             "id": ctx.id,
             "context_name": ctx.context_name,
             "hostname": ctx.hostname,
-            "pub_hostname": getattr(ctx, "pub_hostname", None),
+            "pub_hostname": ctx.pub_hostname,
             "weight": ctx.weight,
             "enabled": ctx.enabled,
+            "connected": ctx.context_name in connected,
+            "is_local": ctx.context_name == LOCAL_CONTEXT_NAME,
         }
         for ctx in contexts
     ]
@@ -242,8 +259,8 @@ def route_api_add_context():
     if not context_name:
         return jsonify(error="context_name is required"), 400
 
-    if not hostname:
-        return jsonify(error="hostname is required"), 400
+    if not pub_hostname:
+        return jsonify(error="pub_hostname is required"), 400
 
     existing = DockerContextModel.query.filter_by(context_name=context_name).first()
     if existing:
@@ -257,7 +274,7 @@ def route_api_add_context():
         return jsonify(error="weight must be an integer"), 400
 
     new_context = DockerContextModel(
-        context_name=context_name, hostname=hostname, pub_hostname=pub_hostname, weight=weight, enabled=enabled
+        context_name=context_name, hostname=hostname or None, pub_hostname=pub_hostname, weight=weight, enabled=enabled
     )
     db.session.add(new_context)
     db.session.commit()
@@ -279,12 +296,12 @@ def route_api_update_context(context_id):
         return jsonify(error="context not found"), 404
 
     if "hostname" in request.json:
-        if not request.json["hostname"]:
-            return jsonify(error="hostname cannot be empty"), 400
-        context.hostname = request.json["hostname"]
+        context.hostname = request.json["hostname"] or None
 
     if "pub_hostname" in request.json:
-        context.pub_hostname = request.json["pub_hostname"] or None
+        if not request.json["pub_hostname"]:
+            return jsonify(error="pub_hostname cannot be empty"), 400
+        context.pub_hostname = request.json["pub_hostname"]
 
     if "weight" in request.json:
         try:
@@ -325,31 +342,32 @@ def route_api_delete_context(context_id):
 @containers_bp.route("/api/contexts/test/<int:context_id>", methods=["GET"])
 @admins_only
 def route_api_test_context(context_id):
-    import docker as _docker
-
     context = DockerContextModel.query.get(context_id)
     if not context:
         return jsonify(error="context not found"), 404
 
+    endpoint = _resolve_endpoint(context.context_name, context.hostname)
+    if not endpoint:
+        return jsonify(error="no endpoint could be resolved for this context"), 400
+
     try:
-        if context.context_name == LOCAL_CONTEXT_NAME:
-            client = _docker.from_env()
-        else:
-            if not context.hostname:
-                return jsonify(error="no hostname configured for this context"), 400
-
-            if "@" in context.hostname:
-                url = f"ssh://{context.hostname}"
-            else:
-                url = f"ssh://root@{context.hostname}"
-
-            client = _docker.DockerClient(base_url=url)
-
+        client = docker.DockerClient(base_url=endpoint)
         client.ping()
         client.close()
         return jsonify(success="context is reachable")
     except Exception as e:
         return jsonify(error=f"context unreachable: {str(e)}"), 500
+
+
+@containers_bp.route("/api/contexts/reload", methods=["POST"])
+@admins_only
+def route_api_reload_contexts():
+    container_manager = current_app.container_manager
+    try:
+        container_manager.load_docker_contexts()
+        return jsonify(success="contexts reloaded")
+    except Exception as e:
+        return jsonify(error=str(e)), 500
 
 
 @containers_bp.route("/api/pull", methods=["POST"])
