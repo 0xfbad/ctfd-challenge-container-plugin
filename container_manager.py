@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import atexit
-import socket
 import time
 import json
+import logging
 import os
 import threading
+from collections import defaultdict
 from typing import Any
 
 from flask import Flask
@@ -26,8 +27,34 @@ try:
 except ImportError:
     _HAS_GEVENT = False
 
+logger = logging.getLogger(__name__)
+
 CPU_QUOTA_BASE = 100000
 LOCAL_CONTEXT_NAME = "local"
+LOCAL_SOCKET_PATH = "/var/run/docker.sock"
+
+
+def _resolve_endpoint(context_name, hostname):
+    context_file = os.path.expanduser(f"~/.docker/contexts/meta/{context_name}/meta.json")
+    if os.path.exists(context_file):
+        try:
+            with open(context_file, "r") as f:
+                meta = json.load(f)
+                endpoint = meta.get("Endpoints", {}).get("docker", {}).get("Host")
+                if endpoint:
+                    return endpoint
+        except Exception as e:
+            logger.warning(f"could not read context meta for '{context_name}': {e}")
+
+    if hostname:
+        if "@" in hostname:
+            return f"ssh://{hostname}"
+        return f"ssh://root@{hostname}"
+
+    if os.path.exists(LOCAL_SOCKET_PATH):
+        return f"unix://{LOCAL_SOCKET_PATH}"
+
+    return None
 
 
 class ContainerException(Exception):
@@ -52,6 +79,8 @@ class ContainerManager:
         self.app = app
         self._context_configs = {}
         self._context_weights = {}
+        self._health = {}
+        self._container_counts = defaultdict(int)
         self._thread_local = _ThreadLocalClients()
         self._context_lock = threading.Lock()
         self._config_generation = 0
@@ -63,7 +92,7 @@ class ContainerManager:
         try:
             self.initialize_connection()
         except ContainerException:
-            print("docker could not initialize or connect")
+            logger.error("docker could not initialize or connect")
 
     def _init_pool(self):
         from .utils import get_setting
@@ -114,11 +143,7 @@ class ContainerManager:
         if not url:
             raise ContainerException(f"docker context '{context_name}' not available")
 
-        if url == "__from_env__":
-            client = docker.from_env()
-        else:
-            client = docker.DockerClient(base_url=url)
-
+        client = docker.DockerClient(base_url=url)
         clients[context_name] = client
         return client
 
@@ -164,128 +189,125 @@ class ContainerManager:
             self.setup_expiration_scheduler()
 
     def load_docker_contexts(self):
+        from .event_logger import event_logger
+
         new_configs = {}
         new_weights = {}
+        new_health = {}
+        events = []
 
         try:
             contexts = DockerContextModel.query.filter_by(enabled=True).all()
         except Exception as e:
-            print(f"could not query docker contexts (database may need migration): {e}")
+            logger.error(f"could not query docker contexts (database may need migration): {e}")
             contexts = []
 
-        # handle local docker context
-        local_ctx = DockerContextModel.query.filter_by(context_name=LOCAL_CONTEXT_NAME).first()
-
-        if local_ctx is None:
-            # first boot: auto-detect and create a DB row if the socket responds
-            try:
-                client = docker.from_env()
-                client.ping()
-                client.close()
-                local_ctx = DockerContextModel(
-                    context_name=LOCAL_CONTEXT_NAME,
-                    hostname=socket.gethostname(),
-                    enabled=True,
-                    weight=1,
-                )
-                db.session.add(local_ctx)
-                db.session.commit()
-                new_configs[LOCAL_CONTEXT_NAME] = "__from_env__"
-                new_weights[LOCAL_CONTEXT_NAME] = local_ctx.weight
-            except (
-                docker.errors.DockerException,
-                paramiko.ssh_exception.SSHException,
-                requests.exceptions.RequestException,
-            ) as e:
-                print(f"could not connect to local docker context: {e}")
-        elif local_ctx.enabled:
-            try:
-                client = docker.from_env()
-                client.ping()
-                client.close()
-                new_configs[LOCAL_CONTEXT_NAME] = "__from_env__"
-                new_weights[LOCAL_CONTEXT_NAME] = local_ctx.weight
-            except (
-                docker.errors.DockerException,
-                paramiko.ssh_exception.SSHException,
-                requests.exceptions.RequestException,
-            ) as e:
-                print(f"could not connect to local docker context: {e}")
-
         for context in contexts:
-            if context.context_name == LOCAL_CONTEXT_NAME:
+            endpoint = _resolve_endpoint(context.context_name, context.hostname)
+            if not endpoint:
+                logger.warning(f"no endpoint for context '{context.context_name}', skipping")
+                new_health[context.context_name] = False
+                new_weights[context.context_name] = context.weight
+                events.append(
+                    (
+                        "host_unhealthy",
+                        f"context {context.context_name} marked unhealthy: no endpoint",
+                        "warning",
+                        {"context_name": context.context_name, "reason": "no endpoint"},
+                    )
+                )
                 continue
 
             try:
-                docker_endpoint = None
-
-                context_file = os.path.expanduser(f"~/.docker/contexts/meta/{context.context_name}/meta.json")
-
-                if os.path.exists(context_file):
-                    try:
-                        with open(context_file, "r") as f:
-                            context_meta = json.load(f)
-                            docker_endpoint = context_meta.get("Endpoints", {}).get("docker", {}).get("Host")
-                    except Exception as e:
-                        print(f"could not read context meta file: {e}")
-
-                if not docker_endpoint:
-                    if context.hostname:
-                        if "@" in context.hostname:
-                            docker_endpoint = f"ssh://{context.hostname}"
-                        else:
-                            docker_endpoint = f"ssh://root@{context.hostname}"
-                    else:
-                        print(f"no hostname configured for context '{context.context_name}', skipping")
-                        continue
-
-                # validate with a throwaway client, then store only the URL
-                client = docker.DockerClient(base_url=docker_endpoint)
+                client = docker.DockerClient(base_url=endpoint)
                 client.ping()
                 client.close()
-                new_configs[context.context_name] = docker_endpoint
+                new_configs[context.context_name] = endpoint
                 new_weights[context.context_name] = context.weight
+                new_health[context.context_name] = True
+                events.append(
+                    (
+                        "host_healthy",
+                        f"context {context.context_name} is healthy",
+                        "info",
+                        {"context_name": context.context_name},
+                    )
+                )
             except (
                 docker.errors.DockerException,
                 paramiko.ssh_exception.SSHException,
                 requests.exceptions.RequestException,
             ) as e:
-                print(f"could not connect to docker context '{context.context_name}': {e}")
+                logger.error(f"could not connect to context '{context.context_name}': {e}")
+                new_health[context.context_name] = False
+                new_weights[context.context_name] = context.weight
+                events.append(
+                    (
+                        "host_unhealthy",
+                        f"context {context.context_name} marked unhealthy: connection failed",
+                        "warning",
+                        {"context_name": context.context_name, "reason": "connection failed"},
+                    )
+                )
 
-        if not new_configs:
-            print("no docker contexts available, containers will not work until contexts are configured")
+        known = {ctx.context_name for ctx in contexts}
 
         with self._context_lock:
             self._context_configs = new_configs
             self._context_weights = new_weights
+            self._health = new_health
             self._config_generation += 1
+
+            for name in list(self._container_counts.keys()):
+                if name not in known:
+                    del self._container_counts[name]
+            for name in known:
+                if name not in self._container_counts:
+                    self._container_counts[name] = 0
 
         self._init_semaphores()
 
+        for event_type, message, level, metadata in events:
+            event_logger.log_event(event_type, message, level=level, metadata=metadata)
+
+        healthy_count = sum(1 for h in new_health.values() if h)
+        logger.info(f"loaded {len(contexts)} contexts, {healthy_count} healthy")
+
+    def _pick_best_context(self):
+        # caller must hold self._context_lock
+        candidates = []
+        for name, healthy in self._health.items():
+            if not healthy:
+                continue
+            count = self._container_counts[name]
+            weight = self._context_weights.get(name, 1)
+            score = weight / (count + 1)
+            candidates.append((score, name))
+
+        if not candidates:
+            raise ContainerException("no healthy contexts available")
+
+        candidates.sort(key=lambda x: (-x[0], x[1]))
+        return candidates[0][1]
+
     def get_next_context(self):
         with self._context_lock:
-            if not self._context_configs:
-                raise ContainerException("no docker contexts available")
+            return self._pick_best_context()
 
-            # least-connections scoring: weight / (active_count + 1)
-            counts = {}
-            try:
-                with self.app.app_context():
-                    for row in ContainerInfoModel.query.all():
-                        ctx = row.docker_context or LOCAL_CONTEXT_NAME
-                        counts[ctx] = counts.get(ctx, 0) + 1
-            except Exception:
-                pass
+    def select_and_reserve(self):
+        with self._context_lock:
+            name = self._pick_best_context()
+            self._container_counts[name] += 1
+            return name
 
-            candidates = []
-            for ctx_name in self._context_configs:
-                weight = self._context_weights.get(ctx_name, 1)
-                count = counts.get(ctx_name, 0)
-                score = weight / (count + 1)
-                candidates.append((score, ctx_name))
+    def reserve_slot(self, context_name):
+        with self._context_lock:
+            self._container_counts[context_name] += 1
 
-            candidates.sort(key=lambda x: (-x[0], x[1]))
-            return candidates[0][1]
+    def release_slot(self, context_name):
+        with self._context_lock:
+            if self._container_counts[context_name] > 0:
+                self._container_counts[context_name] -= 1
 
     def setup_expiration_scheduler(self):
         from .utils import get_setting
@@ -319,99 +341,47 @@ class ContainerManager:
         atexit.register(lambda: self.expiration_scheduler.shutdown())
 
     def _health_check(self):
-        removed = []
+        from .event_logger import event_logger
 
-        for ctx_name, url in list(self._context_configs.items()):
-            try:
-                if url == "__from_env__":
-                    client = docker.from_env()
-                else:
-                    client = docker.DockerClient(base_url=url)
-                client.ping()
-                client.close()
-            except Exception:
-                removed.append(ctx_name)
+        with self._context_lock:
+            names = list(self._health.keys())
 
-        if removed:
-            with self._context_lock:
-                for ctx_name in removed:
-                    print(f"health check: removing unhealthy context '{ctx_name}'")
-                    self._context_configs.pop(ctx_name, None)
-                    self._context_weights.pop(ctx_name, None)
-                    self._semaphores.pop(ctx_name, None)
+        for ctx_name in names:
+            url = self._context_configs.get(ctx_name)
+            reachable = False
 
-                self._config_generation += 1
-
-        # recovery pass: try to reconnect contexts that were previously removed
-        self._recover_contexts()
-
-    def _recover_contexts(self):
-        try:
-            with self.app.app_context():
-                known_contexts = DockerContextModel.query.filter_by(enabled=True).all()
-        except Exception:
-            return
-
-        recovered = []
-        for ctx in known_contexts:
-            if ctx.context_name in self._context_configs:
-                continue
-
-            if ctx.context_name == LOCAL_CONTEXT_NAME:
+            if url:
                 try:
-                    client = docker.from_env()
+                    client = docker.DockerClient(base_url=url)
                     client.ping()
                     client.close()
-                except Exception:
-                    continue
-
-                recovered.append((ctx.context_name, ctx.weight, "__from_env__"))
-                print(f"health check: recovered context '{ctx.context_name}'")
-                continue
-
-            endpoint = None
-            context_file = os.path.expanduser(f"~/.docker/contexts/meta/{ctx.context_name}/meta.json")
-            if os.path.exists(context_file):
-                try:
-                    with open(context_file, "r") as f:
-                        context_meta = json.load(f)
-                        endpoint = context_meta.get("Endpoints", {}).get("docker", {}).get("Host")
+                    reachable = True
                 except Exception:
                     pass
 
-            if not endpoint:
-                if ctx.hostname:
-                    endpoint = f"ssh://{ctx.hostname}" if "@" in ctx.hostname else f"ssh://root@{ctx.hostname}"
-                else:
-                    continue
+            with self._context_lock:
+                was_healthy = self._health.get(ctx_name)
 
-            try:
-                client = docker.DockerClient(base_url=endpoint)
-                client.ping()
-                client.close()
-            except Exception:
-                continue
-
-            recovered.append((ctx.context_name, ctx.weight, endpoint))
-            print(f"health check: recovered context '{ctx.context_name}'")
-
-        if not recovered:
-            return
-
-        from .utils import get_setting
-
-        limit = get_setting("max_concurrent_creates", 2)
-
-        with self._context_lock:
-            for ctx_name, weight, endpoint in recovered:
-                self._context_configs[ctx_name] = endpoint
-                self._context_weights[ctx_name] = weight
-                if _HAS_GEVENT:
-                    self._semaphores[ctx_name] = _GeventSemaphore(limit)
-                else:
-                    self._semaphores[ctx_name] = threading.BoundedSemaphore(limit)
-
-            self._config_generation += 1
+            if reachable and not was_healthy:
+                with self._context_lock:
+                    self._health[ctx_name] = True
+                logger.info(f"health_check: context {ctx_name} recovered")
+                event_logger.log_event(
+                    "host_healthy",
+                    f"context {ctx_name} marked healthy",
+                    level="info",
+                    metadata={"context_name": ctx_name},
+                )
+            elif not reachable and was_healthy:
+                with self._context_lock:
+                    self._health[ctx_name] = False
+                logger.warning(f"health_check: context {ctx_name} unreachable")
+                event_logger.log_event(
+                    "host_unhealthy",
+                    f"context {ctx_name} marked unhealthy",
+                    level="warning",
+                    metadata={"context_name": ctx_name},
+                )
 
     def run_command(func: Any) -> Any:
         def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
@@ -444,8 +414,10 @@ class ContainerManager:
                     try:
                         self.kill_container(container.container_id, container.docker_context)
                     except ContainerException:
-                        print("[container expiry job] docker is not initialized, please check your settings")
+                        logger.warning("expiry job: docker is not initialized, please check your settings")
                         continue
+
+                    self.release_slot(container.docker_context)
 
                     event_logger.log_event(
                         "expired",
@@ -589,10 +561,14 @@ class ContainerManager:
             if context_name not in self._context_configs:
                 raise ContainerException(f"docker context '{context_name}' not available")
 
+            self.reserve_slot(context_name)
             self._acquire_semaphore(context_name)
             try:
                 return self._submit(_do_create, context_name)
-            except docker.errors.DockerException as e:
+            except (docker.errors.ImageNotFound, docker.errors.DockerException) as e:
+                self.release_slot(context_name)
+                if isinstance(e, docker.errors.ImageNotFound):
+                    raise ContainerException("docker image not found")
                 raise ContainerException(f"failed to create container: {e}")
             finally:
                 self._release_semaphore(context_name)
@@ -601,22 +577,29 @@ class ContainerManager:
             last_error = None
 
             while len(tried_contexts) < len(self._context_configs):
-                selected_context = self.get_next_context()
+                try:
+                    selected_context = self.select_and_reserve()
+                except ContainerException:
+                    break
 
                 if selected_context in tried_contexts:
+                    self.release_slot(selected_context)
                     continue
 
                 tried_contexts.add(selected_context)
 
                 if selected_context not in self._context_configs:
+                    self.release_slot(selected_context)
                     continue
 
                 self._acquire_semaphore(selected_context)
                 try:
                     return self._submit(_do_create, selected_context)
                 except docker.errors.ImageNotFound:
+                    self.release_slot(selected_context)
                     raise ContainerException("docker image not found")
                 except docker.errors.DockerException as e:
+                    self.release_slot(selected_context)
                     last_error = e
                     continue
                 finally:
@@ -783,6 +766,9 @@ class ContainerManager:
             except Exception:
                 continue
         return False
+
+    def get_connected_contexts(self):
+        return list(self._context_configs.keys())
 
     def reload_settings(self):
         from .utils import get_setting
