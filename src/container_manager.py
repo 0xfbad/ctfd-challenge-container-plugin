@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import sys
 import time
 import json
 import logging
@@ -306,6 +307,17 @@ class ContainerManager:
                 self._container_counts[context_name] -= 1
 
     def setup_expiration_scheduler(self):
+        # scheduler threads are non-daemon and keep the process alive after
+        # CLI commands (flask db upgrade, etc.) finish. only start when serving.
+        _serving = (
+            "gunicorn" in sys.modules
+            or os.environ.get("WERKZEUG_RUN_MAIN")
+            or (len(sys.argv) > 1 and sys.argv[1] == "run")
+        )
+        if not _serving:
+            logger.info("scheduler skipped (CLI mode)")
+            return
+
         from .utils import get_setting
 
         expiration_check_interval = get_setting("expiration_check_interval", 5)
