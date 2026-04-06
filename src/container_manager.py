@@ -15,7 +15,7 @@ import docker
 
 from CTFd.models import db
 from .models import ContainerInfoModel, ContainerHistoryModel
-from .docker_host_manager import DockerHostManager, LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH
+from .docker_host_manager import DockerHostManager
 from .orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)

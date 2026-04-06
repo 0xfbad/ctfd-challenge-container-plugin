@@ -17,7 +17,13 @@ from ..utils import is_team_mode, get_setting, set_setting, DEFAULTS
 from ..models import ContainerInfoModel, ContainerHistoryModel, DockerContextModel, ContainerChallengeModel
 from ..container_manager import ContainerException
 import os
-from ..docker_host_manager import LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH, _resolve_endpoint, discover_contexts, ping_endpoint
+from ..docker_host_manager import (
+    LOCAL_CONTEXT_NAME,
+    LOCAL_SOCKET_PATH,
+    _resolve_endpoint,
+    discover_contexts,
+    ping_endpoint,
+)
 from ..event_logger import event_logger
 
 logger = logging.getLogger(__name__)
@@ -250,18 +256,20 @@ def route_api_list_contexts():
     contexts_data = []
     for ctx in contexts:
         info = orch_status.get(ctx.context_name, {})
-        contexts_data.append({
-            "id": ctx.id,
-            "context_name": ctx.context_name,
-            "hostname": ctx.hostname,
-            "pub_hostname": ctx.pub_hostname,
-            "weight": ctx.weight,
-            "enabled": ctx.enabled,
-            "connected": ctx.context_name in connected,
-            "healthy": info.get("healthy", False),
-            "active_containers": info.get("active_containers", 0),
-            "is_local": ctx.context_name == LOCAL_CONTEXT_NAME,
-        })
+        contexts_data.append(
+            {
+                "id": ctx.id,
+                "context_name": ctx.context_name,
+                "hostname": ctx.hostname,
+                "pub_hostname": ctx.pub_hostname,
+                "weight": ctx.weight,
+                "enabled": ctx.enabled,
+                "connected": ctx.context_name in connected,
+                "healthy": info.get("healthy", False),
+                "active_containers": info.get("active_containers", 0),
+                "is_local": ctx.context_name == LOCAL_CONTEXT_NAME,
+            }
+        )
 
     return jsonify(contexts=contexts_data, docker_socket=docker_socket)
 
@@ -407,13 +415,16 @@ def route_api_discover_contexts():
             else:
                 suggested = ""
 
-            available.append({
-                "name": ctx["name"],
-                "endpoint": ctx["endpoint"],
-                "suggested_hostname": suggested,
-            })
+            available.append(
+                {
+                    "name": ctx["name"],
+                    "endpoint": ctx["endpoint"],
+                    "suggested_hostname": suggested,
+                }
+            )
 
         if available:
+
             def _ping(ctx):
                 ctx["reachable"] = ping_endpoint(ctx["endpoint"])
                 return ctx

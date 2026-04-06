@@ -41,12 +41,14 @@ class Orchestrator:
             if is_connected:
                 events.append(("host_healthy", f"context {name} is healthy", "info", {"context_name": name}))
             else:
-                events.append((
-                    "host_unhealthy",
-                    f"context {name} marked unhealthy: connection failed",
-                    "warning",
-                    {"context_name": name, "reason": "connection failed"},
-                ))
+                events.append(
+                    (
+                        "host_unhealthy",
+                        f"context {name} marked unhealthy: connection failed",
+                        "warning",
+                        {"context_name": name, "reason": "connection failed"},
+                    )
+                )
 
         known = {ctx.context_name for ctx in contexts}
 
@@ -146,11 +148,13 @@ class Orchestrator:
         with self.lock:
             status = []
             for name in self.health:
-                status.append({
-                    "context_name": name,
-                    "pub_hostname": self.host_manager.get_pub_hostname(name),
-                    "active_containers": self.container_counts.get(name, 0),
-                    "healthy": self.health[name],
-                    "weight": self.weights.get(name, 1),
-                })
+                status.append(
+                    {
+                        "context_name": name,
+                        "pub_hostname": self.host_manager.get_pub_hostname(name),
+                        "active_containers": self.container_counts.get(name, 0),
+                        "healthy": self.health[name],
+                        "weight": self.weights.get(name, 1),
+                    }
+                )
             return status
