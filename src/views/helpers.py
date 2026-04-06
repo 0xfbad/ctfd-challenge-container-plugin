@@ -32,7 +32,17 @@ def _get_create_lock(chal_id, xid, is_team):
 def sanitize_container_error(err):
     """strip internal details from container errors shown to users"""
     msg = str(err)
-    if any(p in msg.lower() for p in ("failed to", "docker error", "not connected", "no docker context", "no healthy context", "not available")):
+    if any(
+        p in msg.lower()
+        for p in (
+            "failed to",
+            "docker error",
+            "not connected",
+            "no docker context",
+            "no healthy context",
+            "not available",
+        )
+    ):
         logger.error(f"container error (sanitized): {msg}")
         return "a server error occurred, please try again"
     return msg
