@@ -3,6 +3,8 @@ import json
 import time
 from collections import defaultdict
 from statistics import median
+import logging
+import threading
 
 import docker
 from flask import request, render_template, current_app, jsonify, Response, stream_with_context
@@ -15,6 +17,13 @@ from ..utils import is_team_mode, get_setting, set_setting, DEFAULTS
 from ..models import ContainerInfoModel, ContainerHistoryModel, DockerContextModel
 from ..container_manager import ContainerException, LOCAL_CONTEXT_NAME, _resolve_endpoint
 from ..event_logger import event_logger
+
+logger = logging.getLogger(__name__)
+
+_MAX_ANALYTICS_ROWS = 50000
+_MAX_SSE_CONNECTIONS = 10
+_sse_connection_count = 0
+_sse_connection_lock = threading.Lock()
 
 
 @containers_bp.route("/dashboard", methods=["GET"])
@@ -107,7 +116,15 @@ def route_get_recent_events():
 @containers_bp.route("/api/events/stream", methods=["GET"])
 @admins_only
 def route_events_stream():
+    global _sse_connection_count
+
+    with _sse_connection_lock:
+        if _sse_connection_count >= _MAX_SSE_CONNECTIONS:
+            return jsonify(error="too many event stream connections"), 429
+        _sse_connection_count += 1
+
     def event_stream():
+        global _sse_connection_count
         q = queue.Queue(maxsize=100)
 
         def listener(event):
@@ -139,6 +156,8 @@ def route_events_stream():
 
         finally:
             event_logger.remove_listener(listener)
+            with _sse_connection_lock:
+                _sse_connection_count -= 1
 
     return Response(
         stream_with_context(event_stream()),
@@ -469,7 +488,7 @@ def route_analytics_activity():
     query = ContainerHistoryModel.query
     if cutoff > 0:
         query = query.filter(ContainerHistoryModel.created_at >= cutoff)
-    rows = query.all()
+    rows = query.order_by(ContainerHistoryModel.created_at.desc()).limit(_MAX_ANALYTICS_ROWS).all()
 
     # hourly buckets for 24h, daily for everything else
     if range_param == "24h":
@@ -506,7 +525,7 @@ def route_analytics_top_users():
     query = ContainerHistoryModel.query
     if cutoff > 0:
         query = query.filter(ContainerHistoryModel.created_at >= cutoff)
-    rows = query.all()
+    rows = query.order_by(ContainerHistoryModel.created_at.desc()).limit(_MAX_ANALYTICS_ROWS).all()
 
     user_stats = defaultdict(lambda: {"total_seconds": 0, "container_count": 0, "challenges": set()})
 
@@ -549,7 +568,7 @@ def route_analytics_challenges():
     query = ContainerHistoryModel.query
     if cutoff > 0:
         query = query.filter(ContainerHistoryModel.created_at >= cutoff)
-    rows = query.all()
+    rows = query.order_by(ContainerHistoryModel.created_at.desc()).limit(_MAX_ANALYTICS_ROWS).all()
 
     chal_stats = defaultdict(lambda: {"count": 0, "users": set(), "lifetimes": []})
 
@@ -601,7 +620,7 @@ def route_analytics_solve_times():
     solve_query = Solves.query
     if cutoff > 0:
         solve_query = solve_query.filter(Solves.date >= cutoff)
-    solves = solve_query.all()
+    solves = solve_query.order_by(Solves.date.desc()).limit(_MAX_ANALYTICS_ROWS).all()
 
     chal_times = defaultdict(lambda: {"times": [], "solve_count": 0})
 

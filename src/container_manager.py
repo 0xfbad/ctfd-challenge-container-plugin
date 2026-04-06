@@ -527,6 +527,9 @@ class ContainerManager:
         if volumes:
             try:
                 volumes_dict = json.loads(volumes)
+                for host_path in volumes_dict:
+                    if "docker.sock" in os.path.normpath(host_path):
+                        raise ContainerException("mounting the docker socket is not allowed")
                 kwargs["volumes"] = volumes_dict
             except json.decoder.JSONDecodeError:
                 raise ContainerException("volumes json string is invalid")

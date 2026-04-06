@@ -452,27 +452,36 @@
 	}
 
 	function createContainerRow(container) {
-		const teamColumn = container.team ? `<a href="/admin/teams/${container.team_id}">${container.team}</a>` : '';
-		const connectionData = `data-hostname="${container.hostname}" data-port="${container.port}" data-connect-type="${container.connect_type}" data-ssh-username="${container.ssh_username || ''}" data-ssh-password="${container.ssh_password || ''}"`;
+		const safeUser = escapeHtml(container.user || '');
+		const safeChallenge = escapeHtml(container.challenge || '');
+		const safeTeam = container.team ? escapeHtml(container.team) : '';
+		const teamColumn = safeTeam ? `<a href="/admin/teams/${container.team_id}">${safeTeam}</a>` : '';
+		const cid = escapeAttr(container.container_id);
+		// container IDs are hex strings from docker, strip anything else for JS context
+		const cidJs = container.container_id.replace(/[^a-f0-9]/gi, '');
 
 		return `
-			<tr data-container-id="${container.container_id}" data-expires="${container.expires}">
+			<tr data-container-id="${cid}" data-expires="${container.expires}">
 				<td>
 					<span class="container-id-link"
-						data-container-id="${container.container_id}"
-						${connectionData}>
-						${container.container_id.substring(0, 12)}
+						data-container-id="${cid}"
+						data-hostname="${escapeAttr(container.hostname)}"
+						data-port="${container.port}"
+						data-connect-type="${escapeAttr(container.connect_type)}"
+						data-ssh-username="${escapeAttr(container.ssh_username || '')}"
+						data-ssh-password="${escapeAttr(container.ssh_password || '')}">
+						${escapeHtml(container.container_id.substring(0, 12))}
 					</span>
 				</td>
-				<td><a href="/admin/challenges/${container.challenge_id}">${container.challenge}</a></td>
-				<td><a href="/admin/users/${container.user_id}">${container.user}</a></td>
+				<td><a href="/admin/challenges/${container.challenge_id}">${safeChallenge}</a></td>
+				<td><a href="/admin/users/${container.user_id}">${safeUser}</a></td>
 				<td>${teamColumn}</td>
 				<td class="countdown-timer" data-expires="${container.expires}">calculating...</td>
 				<td>
-					<button class="btn btn-secondary btn-sm" onclick="showContainerLogs('${container.container_id}')" title="View logs">
+					<button class="btn btn-secondary btn-sm" onclick="showContainerLogs('${cidJs}')" title="View logs">
 						<i class="fas fa-terminal"></i>
 					</button>
-					<button class="btn btn-danger btn-sm containers-kill-btn" onclick="killContainer('${container.container_id}')">
+					<button class="btn btn-danger btn-sm containers-kill-btn" onclick="killContainer('${cidJs}')">
 						<i class="fas fa-times"></i>
 					</button>
 				</td>
@@ -509,6 +518,11 @@
 		const div = document.createElement('div');
 		div.textContent = text;
 		return div.innerHTML;
+	}
+
+	function escapeAttr(text) {
+		if (text == null) return '';
+		return String(text).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 	}
 
 	function createEventElement(event) {

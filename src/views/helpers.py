@@ -1,4 +1,5 @@
 import time
+import logging
 import threading
 from flask import current_app, request
 from CTFd.models import db
@@ -9,16 +10,32 @@ from ..utils import get_setting
 from ..freshness import compute_token
 from ..event_logger import event_logger
 
+logger = logging.getLogger(__name__)
+
 _create_locks_guard = threading.Lock()
 _create_locks: dict[tuple, threading.Lock] = {}
+_MAX_CREATE_LOCKS = 1000
 
 
 def _get_create_lock(chal_id, xid, is_team):
     key = (chal_id, "team" if is_team else "user", xid)
     with _create_locks_guard:
         if key not in _create_locks:
+            if len(_create_locks) > _MAX_CREATE_LOCKS:
+                stale = [k for k, v in _create_locks.items() if not v.locked()]
+                for k in stale:
+                    del _create_locks[k]
             _create_locks[key] = threading.Lock()
         return _create_locks[key]
+
+
+def sanitize_container_error(err):
+    """strip internal details from container errors shown to users"""
+    msg = str(err)
+    if any(p in msg.lower() for p in ("failed to", "docker error", "not connected", "no docker context", "no healthy context", "not available")):
+        logger.error(f"container error (sanitized): {msg}")
+        return "a server error occurred, please try again"
+    return msg
 
 
 def log_container_event(
@@ -99,7 +116,8 @@ def kill_container(container_id):
     except ContainerException:
         return {"error": "docker is not initialized, please check your settings"}
     except Exception as e:
-        return {"error": f"failed to kill container: {str(e)}"}
+        logger.error(f"failed to kill container {container_id}: {e}")
+        return {"error": "failed to stop container, please try again"}
 
     if container:
         try:
@@ -129,7 +147,8 @@ def kill_container(container_id):
             db.session.commit()
             return {"success": "container killed"}
         except Exception as e:
-            return {"error": f"failed to log event or delete container: {str(e)}"}
+            logger.error(f"failed to clean up container {container_id}: {e}")
+            return {"error": "failed to stop container, please try again"}
     else:
         return {"error": "container not found"}
 
@@ -220,7 +239,8 @@ def _create_container_inner(chal_id, xid, uid, is_team):
                 db.session.delete(running_container)
                 db.session.commit()
         except ContainerException as err:
-            return {"error": str(err)}, 500
+            logger.error(f"container status check failed: {err}")
+            return {"error": "a server error occurred, please try again"}, 500
 
     extra_env = None
     freshness_secret = get_setting("freshness_secret")
@@ -243,7 +263,7 @@ def _create_container_inner(chal_id, xid, uid, is_team):
             extra_env=extra_env,
         )
     except ContainerException as err:
-        return {"error": str(err)}
+        return {"error": sanitize_container_error(err)}
 
     port = container_manager.get_container_port(created_container.id, context_name)
 

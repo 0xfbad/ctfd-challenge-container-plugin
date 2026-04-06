@@ -14,6 +14,7 @@ from .helpers import (
     create_container,
     renew_container,
     kill_container,
+    sanitize_container_error,
 )
 from ..utils import is_team_mode, DEFAULTS
 from ..container_manager import ContainerException
@@ -21,8 +22,10 @@ from ..models import ContainerInfoModel
 
 # rate limit values are evaluated at import time (before app context),
 # so we use hardcoded defaults here, changes require a restart
-_RATE_LIMIT = DEFAULTS["rate_limit_requests"]
-_RATE_INTERVAL = DEFAULTS["rate_limit_interval"]
+_RL_VIEW = DEFAULTS["rate_limit_requests"]
+_RL_VIEW_INTERVAL = DEFAULTS["rate_limit_interval"]
+_RL_MUTATE = 10
+_RL_MUTATE_INTERVAL = 60
 
 
 def validate_request(required_fields):
@@ -34,6 +37,12 @@ def validate_request(required_fields):
     for field in required_fields:
         if not request.json.get(field):
             return {"error": f"no {field} specified"}, 400, None
+
+    if "chal_id" in required_fields:
+        try:
+            int(request.json["chal_id"])
+        except (TypeError, ValueError):
+            return {"error": "invalid challenge id"}, 400, None
 
     if not user:
         return {"error": "user not found"}, 400, None
@@ -50,14 +59,14 @@ def validate_request(required_fields):
 @require_verified_emails
 @ratelimit(
     method="GET",
-    limit=_RATE_LIMIT,
-    interval=_RATE_INTERVAL,
+    limit=_RL_VIEW,
+    interval=_RL_VIEW_INTERVAL,
 )
 def get_connect_type_route(challenge_id):
     try:
         return connect_type(challenge_id)
     except ContainerException as err:
-        return {"error": str(err)}, 500
+        return {"error": sanitize_container_error(err)}, 500
 
 
 @containers_bp.route("/api/view_info", methods=["POST"])
@@ -66,22 +75,22 @@ def get_connect_type_route(challenge_id):
 @require_verified_emails
 @ratelimit(
     method="POST",
-    limit=_RATE_LIMIT,
-    interval=_RATE_INTERVAL,
+    limit=_RL_VIEW,
+    interval=_RL_VIEW_INTERVAL,
 )
 def route_view_info():
     error_response, status_code, user = validate_request(["chal_id"])
     if error_response:
         return error_response, status_code
 
-    chal_id = request.json.get("chal_id")
+    chal_id = int(request.json["chal_id"])
     try:
         if is_team_mode():
             return view_container_info(chal_id, user.team.id, True)
         else:
             return view_container_info(chal_id, user.id, False)
     except ContainerException as err:
-        return {"error": str(err)}, 500
+        return {"error": sanitize_container_error(err)}, 500
 
 
 @containers_bp.route("/api/request", methods=["POST"])
@@ -90,22 +99,22 @@ def route_view_info():
 @require_verified_emails
 @ratelimit(
     method="POST",
-    limit=_RATE_LIMIT,
-    interval=_RATE_INTERVAL,
+    limit=_RL_MUTATE,
+    interval=_RL_MUTATE_INTERVAL,
 )
 def route_request_container():
     error_response, status_code, user = validate_request(["chal_id"])
     if error_response:
         return error_response, status_code
 
-    chal_id = request.json.get("chal_id")
+    chal_id = int(request.json["chal_id"])
     try:
         if is_team_mode():
             return create_container(chal_id, user.team.id, user.id, True)
         else:
             return create_container(chal_id, user.id, user.id, False)
     except ContainerException as err:
-        return {"error": str(err)}, 500
+        return {"error": sanitize_container_error(err)}, 500
 
 
 @containers_bp.route("/api/renew", methods=["POST"])
@@ -114,22 +123,22 @@ def route_request_container():
 @require_verified_emails
 @ratelimit(
     method="POST",
-    limit=_RATE_LIMIT,
-    interval=_RATE_INTERVAL,
+    limit=_RL_MUTATE,
+    interval=_RL_MUTATE_INTERVAL,
 )
 def route_renew_container_route():
     error_response, status_code, user = validate_request(["chal_id"])
     if error_response:
         return error_response, status_code
 
-    chal_id = request.json.get("chal_id")
+    chal_id = int(request.json["chal_id"])
     try:
         if is_team_mode():
             return renew_container(chal_id, user.team.id, True)
         else:
             return renew_container(chal_id, user.id, False)
     except ContainerException as err:
-        return {"error": str(err)}, 500
+        return {"error": sanitize_container_error(err)}, 500
 
 
 @containers_bp.route("/api/stop", methods=["POST"])
@@ -138,15 +147,15 @@ def route_renew_container_route():
 @require_verified_emails
 @ratelimit(
     method="POST",
-    limit=_RATE_LIMIT,
-    interval=_RATE_INTERVAL,
+    limit=_RL_MUTATE,
+    interval=_RL_MUTATE_INTERVAL,
 )
 def route_stop_container():
     error_response, status_code, user = validate_request(["chal_id"])
     if error_response:
         return error_response, status_code
 
-    chal_id = request.json.get("chal_id")
+    chal_id = int(request.json["chal_id"])
 
     if is_team_mode():
         running_container = ContainerInfoModel.query.filter_by(challenge_id=chal_id, team_id=user.team.id).first()

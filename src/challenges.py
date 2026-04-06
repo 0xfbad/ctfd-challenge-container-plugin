@@ -1,5 +1,6 @@
 import os
 import time
+import threading
 
 from CTFd.plugins.challenges import BaseChallenge
 from CTFd.models import db, Users, Teams
@@ -9,6 +10,38 @@ from .models import ContainerChallengeModel, ContainerInfoModel, ContainerHistor
 from .utils import get_setting, is_team_mode
 from .freshness import compute_token, render_flag, extract_token
 from .event_logger import event_logger
+
+_token_map_lock = threading.Lock()
+_token_map_cache = {}
+
+
+def _find_token_owner(secret, challenge_id, submitted_token, exclude_xid, team_mode):
+    """cached O(1) lookup of which entity owns a freshness token"""
+    entity_class = Teams if team_mode else Users
+    cache_key = (secret, challenge_id, team_mode)
+    current_count = entity_class.query.count()
+
+    with _token_map_lock:
+        cached = _token_map_cache.get(cache_key)
+        if cached and cached[0] == current_count:
+            match = cached[1].get(submitted_token)
+            if match and match[0] != exclude_xid:
+                return match
+            return None
+
+    token_map = {}
+    for entity in entity_class.query.all():
+        token = compute_token(secret, challenge_id, entity.id)
+        token_map[token] = (entity.id, getattr(entity, "name", f"id={entity.id}"))
+
+    with _token_map_lock:
+        _token_map_cache[cache_key] = (current_count, token_map)
+
+    match = token_map.get(submitted_token)
+    if match and match[0] != exclude_xid:
+        return match
+    return None
+
 
 _plugin_dir = os.path.basename(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _assets = f"/plugins/{_plugin_dir}/src/assets"
@@ -130,28 +163,22 @@ class ContainerChallenge(BaseChallenge):
             if submitted_token is None:
                 continue
 
-            entities = Teams.query.all() if team_mode else Users.query.all()
-            for entity in entities:
-                other_xid = entity.id
-                if other_xid == xid:
-                    continue
-
-                other_token = compute_token(secret, challenge.id, other_xid)
-                if submitted_token == other_token:
-                    identifier = getattr(entity, "name", f"id={other_xid}")
-                    event_logger.log_event(
-                        "flag_sharing",
-                        f"user '{user.name}' submitted a flag belonging to '{identifier}' on challenge '{challenge.name}'",
-                        user_id=user.id,
-                        username=user.name,
-                        level="warning",
-                        metadata={
-                            "challenge_id": challenge.id,
-                            "challenge_name": challenge.name,
-                            "source_entity": identifier,
-                        },
-                    )
-                    return False, "this flag belongs to another participant. this attempt has been logged."
+            owner = _find_token_owner(secret, challenge.id, submitted_token, xid, team_mode)
+            if owner:
+                identifier = owner[1]
+                event_logger.log_event(
+                    "flag_sharing",
+                    f"user '{user.name}' submitted a flag belonging to '{identifier}' on challenge '{challenge.name}'",
+                    user_id=user.id,
+                    username=user.name,
+                    level="warning",
+                    metadata={
+                        "challenge_id": challenge.id,
+                        "challenge_name": challenge.name,
+                        "source_entity": identifier,
+                    },
+                )
+                return False, "this flag belongs to another participant. this attempt has been logged."
 
         return False, "incorrect"
 
