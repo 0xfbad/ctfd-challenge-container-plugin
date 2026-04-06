@@ -884,7 +884,7 @@
 						axisPointer: { type: 'shadow' },
 						formatter: function(params) {
 							const user = data[params[0].dataIndex];
-							return `${user.username}<br/>Time: ${formatDuration(user.total_seconds)}<br/>Containers: ${user.container_count}<br/>Challenges: ${user.unique_challenges}`;
+							return `${escapeHtml(user.username)}<br/>Time: ${formatDuration(user.total_seconds)}<br/>Containers: ${user.container_count}<br/>Challenges: ${user.unique_challenges}`;
 						}
 					},
 					toolbox: { feature: { saveAsImage: {} } },
@@ -909,7 +909,7 @@
 						axisPointer: { type: 'shadow' },
 						formatter: function(params) {
 							const chal = data[params[0].dataIndex];
-							return `${chal.name}<br/>Containers: ${chal.container_count}<br/>Users: ${chal.unique_users}<br/>Avg lifetime: ${formatDuration(chal.avg_lifetime)}<br/>Restarts/user: ${chal.restarts_per_user}`;
+							return `${escapeHtml(chal.name)}<br/>Containers: ${chal.container_count}<br/>Users: ${chal.unique_users}<br/>Avg lifetime: ${formatDuration(chal.avg_lifetime)}<br/>Restarts/user: ${chal.restarts_per_user}`;
 						}
 					},
 					toolbox: { feature: { saveAsImage: {} } },
@@ -947,10 +947,10 @@
 						formatter: function(params) {
 							if (params.seriesType === 'scatter') {
 								const chal = data[params.data[0]];
-								return `${chal.name}<br/>Solve time: ${formatDuration(params.data[1])}`;
+								return `${escapeHtml(chal.name)}<br/>Solve time: ${formatDuration(params.data[1])}`;
 							}
 							const chal = data[params.dataIndex];
-							return `${chal.name}<br/>Avg: ${formatDuration(chal.avg_time)}<br/>Median: ${formatDuration(chal.median_time)}<br/>Fastest: ${formatDuration(chal.fastest_time)}<br/>Solves: ${chal.solve_count}`;
+							return `${escapeHtml(chal.name)}<br/>Avg: ${formatDuration(chal.avg_time)}<br/>Median: ${formatDuration(chal.median_time)}<br/>Fastest: ${formatDuration(chal.fastest_time)}<br/>Solves: ${chal.solve_count}`;
 						}
 					},
 					toolbox: { feature: { saveAsImage: {} } },
