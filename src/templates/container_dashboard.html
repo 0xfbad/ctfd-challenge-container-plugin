@@ -40,72 +40,51 @@
 		margin-bottom: 0;
 	}
 
+	.table-sm td, .table-sm th {
+		padding: .4rem .5rem;
+	}
+
 	.table tbody tr,
 	.table tbody tr:hover {
 		cursor: default;
 	}
 
-	.event-feed {
+	.log-wrap {
 		max-height: 400px;
 		overflow-y: auto;
-		padding: 15px;
 	}
 
-	.event-item {
-		padding: 10px;
-		border-bottom: 1px solid #eee;
-		display: flex;
-		align-items: center;
-		gap: 10px;
+	.log-wrap thead th {
+		position: sticky;
+		top: 0;
+		background: white;
+		z-index: 1;
 	}
 
-	.event-item:last-child {
-		border-bottom: none;
-	}
-
-	.event-item:hover {
-		background-color: #f8f9fa;
-	}
-
-	.event-badge {
-		display: inline-block;
-		padding: 4px 10px;
-		border-radius: 4px;
-		font-size: 12px;
-		font-weight: 600;
-		min-width: 70px;
-		text-align: center;
-	}
-
-	.event-created {
-		background-color: #d4edda;
-		color: #155724;
-	}
-
-	.event-killed {
-		background-color: #f8d7da;
-		color: #721c24;
-	}
-
-	.event-expired {
-		background-color: #fff3cd;
-		color: #856404;
-	}
-
-	.event-renewed {
-		background-color: #d1ecf1;
-		color: #0c5460;
-	}
-
-	.event-time {
-		font-size: 12px;
+	.log-time {
+		white-space: nowrap;
 		color: #6c757d;
-		min-width: 80px;
 	}
 
-	.event-message {
-		flex: 1;
+	.log-user a {
+		color: #337ab7;
+		font-weight: 600;
+		text-decoration: none;
 	}
+
+	.log-user a:hover { text-decoration: underline; }
+
+	.log-detail {
+		color: #6c757d;
+	}
+
+	.badge-evt-created { background-color: #d4edda; color: #155724; }
+	.badge-evt-killed { background-color: #f8d7da; color: #721c24; }
+	.badge-evt-expired { background-color: #fff3cd; color: #856404; }
+	.badge-evt-renewed { background-color: #d1ecf1; color: #0c5460; }
+	.badge-evt-host-up { background-color: #d4edda; color: #155724; }
+	.badge-evt-host-down { background-color: #f8d7da; color: #721c24; }
+	.badge-evt-flag-share { background-color: #fff3cd; color: #856404; }
 
 	.containers-kill-btn {
 		padding: 5px 10px;
@@ -250,7 +229,7 @@
 
 <div class="jumbotron">
 	<div class="container">
-		<h1>Challenge Containers</h1>
+		<h1>Challenge Containers Dashboard</h1>
 	</div>
 </div>
 
@@ -276,15 +255,15 @@
 				</div>
 				<div class="card-body">
 					<div class="table-responsive">
-						<table class="table table-striped">
+						<table class="table table-striped table-sm border">
 							<thead>
 								<tr>
-									<th>Container ID</th>
-									<th>Challenge</th>
-									<th>User</th>
-									<th>Team</th>
-									<th>Time Remaining</th>
-									<th>Actions</th>
+									<th><b>Container ID</b></th>
+									<th><b>Challenge</b></th>
+									<th><b>User</b></th>
+									<th><b>Team</b></th>
+									<th><b>Time Remaining</b></th>
+									<th><b>Actions</b></th>
 								</tr>
 							</thead>
 							<tbody id="container-table-body">
@@ -329,9 +308,23 @@
 				<div class="card-header">
 					<h3 class="card-title">Activity</h3>
 				</div>
-				<div class="card-body p-0">
-					<div class="event-feed" id="event-feed">
-						<div class="text-center text-muted py-3" id="event-feed-empty">No activity</div>
+				<div class="card-body">
+					<div class="table-responsive log-wrap">
+						<table class="table table-striped table-sm border">
+							<thead>
+								<tr>
+									<th><b>Time</b></th>
+									<th><b>User</b></th>
+									<th><b>Event</b></th>
+									<th><b>Details</b></th>
+								</tr>
+							</thead>
+							<tbody id="event-feed">
+								<tr id="event-feed-empty">
+									<td colspan="4" class="text-center text-muted py-3">No activity yet</td>
+								</tr>
+							</tbody>
+						</table>
 					</div>
 				</div>
 			</div>
@@ -588,7 +581,7 @@
 	function updateContainersTable(containers) {
 		const tbody = document.getElementById('container-table-body');
 		if (!containers || containers.length === 0) {
-			tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No active containers</td></tr>';
+			tbody.innerHTML = '<tr><td colspan="6" class="text-center">No active containers</td></tr>';
 			return;
 		}
 		tbody.innerHTML = containers.map(createContainerRow).join('');
@@ -616,64 +609,75 @@
 		return String(text).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 	}
 
-	function createEventElement(event) {
-		const eventDiv = document.createElement('div');
-		eventDiv.className = 'event-item';
+	const EVENT_LABELS = {
+		'created': 'Created',
+		'killed': 'Killed',
+		'expired': 'Expired',
+		'renewed': 'Renewed',
+		'host_healthy': 'Host Up',
+		'host_unhealthy': 'Host Down',
+		'flag_sharing': 'Flag Share',
+	};
 
-		let message = '';
-		if (event.type === 'created') {
-			message = 'Container created';
-		} else if (event.type === 'killed') {
-			message = 'Container killed';
-		} else if (event.type === 'expired') {
-			message = 'Container expired';
-		} else if (event.type === 'renewed') {
-			message = 'Container renewed';
-		}
+	const EVENT_BADGE_CLASS = {
+		'created': 'badge-evt-created',
+		'killed': 'badge-evt-killed',
+		'expired': 'badge-evt-expired',
+		'renewed': 'badge-evt-renewed',
+		'host_healthy': 'badge-evt-host-up',
+		'host_unhealthy': 'badge-evt-host-down',
+		'flag_sharing': 'badge-evt-flag-share',
+	};
 
-		if (event.challenge) {
-			if (event.challenge_id) {
-				message += ` for <a href="/admin/challenges/${event.challenge_id}">${escapeHtml(event.challenge)}</a>`;
-			} else {
-				message += ` for ${escapeHtml(event.challenge)}`;
+	function formatEventDetails(event) {
+		const m = event.metadata || {};
+		switch (event.type) {
+			case 'host_healthy':
+			case 'host_unhealthy':
+				return m.context_name ? escapeHtml(m.context_name) : '';
+			case 'flag_sharing':
+				return m.source_entity ? 'flag from ' + escapeHtml(m.source_entity) : '';
+			default: {
+				const parts = [];
+				if (m.challenge_name) {
+					parts.push(m.challenge_id
+						? '<a href="/admin/challenges/' + m.challenge_id + '">' + escapeHtml(m.challenge_name) + '</a>'
+						: escapeHtml(m.challenge_name));
+				}
+				if (m.team_name) {
+					parts.push(m.team_id
+						? '<a href="/admin/teams/' + m.team_id + '">' + escapeHtml(m.team_name) + '</a>'
+						: escapeHtml(m.team_name));
+				}
+				return parts.join(' / ');
 			}
 		}
-
-		if (event.user) {
-			if (event.user_id) {
-				message += ` by <a href="/admin/users/${event.user_id}">${escapeHtml(event.user)}</a>`;
-			} else {
-				message += ` by ${escapeHtml(event.user)}`;
-			}
-		}
-
-		if (event.team) {
-			if (event.team_id) {
-				message += ` (<a href="/admin/teams/${event.team_id}">${escapeHtml(event.team)}</a>)`;
-			} else {
-				message += ` (${escapeHtml(event.team)})`;
-			}
-		}
-
-		eventDiv.innerHTML = `
-			<span class="event-time">${formatTimestamp(event.timestamp)}</span>
-			<span class="event-badge event-${event.type}">${event.type.toUpperCase()}</span>
-			<span class="event-message">${message}</span>
-		`;
-		return eventDiv;
 	}
 
-	function prependEventToFeed(event) {
+	function addEventToFeed(event) {
 		const feed = document.getElementById('event-feed');
 		const empty = document.getElementById('event-feed-empty');
 		if (empty) empty.remove();
-		const eventElement = createEventElement(event);
-		feed.insertBefore(eventElement, feed.firstChild);
 
-		const events = feed.children;
-		if (events.length > 50) {
-			feed.removeChild(events[events.length - 1]);
+		const row = document.createElement('tr');
+		const badgeClass = EVENT_BADGE_CLASS[event.type] || 'badge-secondary';
+		const label = EVENT_LABELS[event.type] || event.type;
+		const details = formatEventDetails(event);
+
+		row.innerHTML =
+			'<td class="log-time">' + escapeHtml(formatTimestamp(event.timestamp)) + '</td>' +
+			'<td class="log-user">' + (event.username ? '<a href="/admin/users/' + event.user_id + '">' + escapeHtml(event.username) + '</a>' : '') + '</td>' +
+			'<td><span class="badge ' + badgeClass + '">' + escapeHtml(label) + '</span></td>' +
+			'<td class="log-detail">' + details + '</td>';
+
+		feed.insertBefore(row, feed.firstChild);
+
+		while (feed.children.length > 50) {
+			feed.removeChild(feed.lastChild);
 		}
+
+		const wrapper = feed.closest('.log-wrap');
+		if (wrapper) wrapper.scrollTop = 0;
 	}
 
 	function loadRecentEvents() {
@@ -683,12 +687,10 @@
 				const feed = document.getElementById('event-feed');
 				feed.innerHTML = '';
 				if (!data.events || data.events.length === 0) {
-					feed.innerHTML = '<div class="text-center text-muted py-3">No activity</div>';
+					feed.innerHTML = '<tr id="event-feed-empty"><td colspan="4" class="text-center text-muted py-3">No activity yet</td></tr>';
 					return;
 				}
-				data.events.reverse().forEach(event => {
-					feed.appendChild(createEventElement(event));
-				});
+				data.events.forEach(event => addEventToFeed(event));
 			})
 			.catch(error => console.error('Error loading events:', error));
 	}
@@ -704,7 +706,7 @@
 			try {
 				const event = JSON.parse(e.data);
 				if (event.type !== 'ping' && event.type !== 'connected') {
-					prependEventToFeed(event);
+					addEventToFeed(event);
 				}
 			} catch (error) {
 				console.error('Error parsing event:', error);

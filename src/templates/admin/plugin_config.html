@@ -43,12 +43,12 @@
 						data-key="thread_pool_size" min="1" max="32">
 				</div>
 				<div class="form-group">
-					<label for="setting-max_concurrent_creates">Max concurrent creates per context <span class="cfg-help" data-tip="Limits how many containers can be created at the same time on a single server. Prevents overload when many players start challenges at once. Increase if your servers have resources to spare.">?</span></label>
+					<label for="setting-max_concurrent_creates">Concurrent creates <span class="cfg-help" data-tip="Limits how many containers can be created at the same time on a single server. Prevents overload when many players start challenges at once. Increase if your servers have resources to spare.">?</span></label>
 					<input type="number" class="form-control setting-input" id="setting-max_concurrent_creates"
 						data-key="max_concurrent_creates" min="1" max="32">
 				</div>
 				<div class="form-group">
-					<label for="setting-expiration_check_interval">Expiration check interval (seconds) <span class="cfg-help" data-tip="How often the system checks for containers past their time limit. Lower means expired containers get cleaned up faster but uses slightly more resources.">?</span></label>
+					<label for="setting-expiration_check_interval">Check interval (s) <span class="cfg-help" data-tip="How often the system checks for expired containers, in seconds. Lower means expired containers get cleaned up faster but uses slightly more resources.">?</span></label>
 					<input type="number" class="form-control setting-input" id="setting-expiration_check_interval"
 						data-key="expiration_check_interval" min="1">
 				</div>
@@ -151,7 +151,7 @@
 
 <div class="row">
 	<div class="col-md-12">
-		<table class="table table-striped">
+		<table class="table table-striped table-sm border">
 			<thead>
 				<tr>
 					<th>Context Name</th>
