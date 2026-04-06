@@ -49,15 +49,15 @@ docker context create server1 --docker "host=ssh://user@server1.example.com"
 docker context create server2 --docker "host=ssh://user@server2.example.com"
 ```
 
-Then add them through the admin dashboard at `/containers/admin/contexts`, each context needs a name matching what you created above, a public hostname (what users see in connection strings, required), an optional SSH hostname (connection target, leave blank for local contexts), and a weight for load balancing
+Then import them from the admin config page at `/admin/config` under the Challenge Containers section, click "Import Contexts" and the plugin scans for contexts on the host, shows reachability, and lets you set a public hostname before importing. Weight and enabled can be changed after
 
 For single-server deployments you don't need to configure anything. On first boot with an empty contexts table the plugin checks if the local Docker socket at `/var/run/docker.sock` is reachable, and if so creates a `local` context automatically using the machine's hostname as the public address. If you delete it and restart CTFd it comes back
 
 ### Pre-pulling images
 
-Images need to be on the Docker host before a challenge can use them. The admin settings page has a pre-pull section where you type an image name and hit Pull, it sends the pull to all configured contexts and shows you the result per host
+Images need to be on the Docker host before a challenge can use them. The config page has an Image Availability section that shows a matrix of which challenge images exist on which contexts, with pull buttons for anything missing
 
-You can also do this via the API if you want to script it
+You can also bulk-pull via the API
 
 ```bash
 curl -X POST /containers/api/pull \
@@ -156,15 +156,23 @@ Container creation is serialized per challenge+team (or challenge+user in user m
 
 The per-context creation semaphore (default limit 2) is a separate concern, it limits how many containers can be created simultaneously on a single Docker host so a burst of users hitting start on different challenges doesn't overwhelm the daemon with parallel SSH connections
 
+## Architecture
+
+Docker integration is split into three files that mirror the remote-desktop plugin's layout
+
+- `DockerHostManager` owns Docker operations: thread-local client caching, endpoint resolution, container run/kill/check, image listing, per-context semaphores
+- `Orchestrator` owns scheduling: weighted scoring, health booleans, slot counts. References the host manager for pings but never creates containers directly
+- `ContainerManager` composes the two and adds the multi-context fallback loop (try pinned context or fall through healthy ones), the expiration scheduler, and the public API that routes call
+
 ## Thread safety
 
-Thread-local Docker clients use a generation counter that gets bumped whenever context configs change, so stale connections from old configs get dropped and recreated transparently across all threads without needing to reach into each thread's local storage. The context config map and weights are protected by `_context_lock`, the lock is only held during the final swap of computed state, not during slow I/O like Docker pings
+Thread-local Docker clients use a generation counter that gets bumped whenever context configs change, so stale connections get dropped and recreated transparently. The host manager and orchestrator each have their own lock, both only held during the final state swap, not during I/O like Docker pings
 
-When gevent is available (which it is in the default CTFd deployment) the thread pool uses `gevent.threadpool.ThreadPool` and semaphores use `gevent.lock.BoundedSemaphore` so everything cooperates with the event loop properly. Falls back to `ThreadPoolExecutor` and `threading.BoundedSemaphore` otherwise
+Uses `threading.BoundedSemaphore` and `threading.Lock` directly, gunicorn's gevent workers monkey-patch the threading module so these cooperate with the event loop without explicit gevent imports
 
 ## Scheduling
 
-The plugin uses APScheduler for background jobs. Under gunicorn with gevent it uses `GeventScheduler`, otherwise `BackgroundScheduler`. Two independent jobs run
+The plugin uses APScheduler with `BackgroundScheduler` for background jobs. Two independent jobs run
 
 - Expiry check: every `expiration_check_interval` seconds (default 5), queries the database for containers past their expiration, kills them, and releases their load balancer slots
 - Health check: every 30 seconds, pings each Docker context and flips health booleans, unhealthy contexts stay in the tracking dict and get re-enabled automatically when they start responding again
@@ -177,7 +185,7 @@ Contexts stay in the health tracking dict even when unreachable, their health bo
 
 Health transitions get logged as `host_healthy` / `host_unhealthy` events so they show up in the admin event stream and in CTFd's logs
 
-Endpoint resolution follows a three-step fallback chain: first it checks `~/.docker/contexts/meta/{name}/meta.json` for a Docker context file, then falls back to `ssh://{hostname}` from the DB record, and finally tries the local Docker socket at `/var/run/docker.sock` if it exists. This means a context with no SSH hostname configured still works if you have a local Docker socket or a matching Docker context file
+Endpoint resolution has a fallback chain: scan `~/.docker/contexts/meta/` matching by the `Name` field in each `meta.json` (Docker names these dirs by SHA256 hash, not context name, so you have to scan), then try `ssh://{hostname}` from the DB, then the local socket. A context with no SSH hostname still works if there's a matching Docker context file or a local socket
 
 If a user checks their container status while the host is unreachable they see a "host temporarily unreachable" message instead of having their container record deleted, so they don't lose their session if the host recovers
 
@@ -241,7 +249,7 @@ Rate limit changes require a CTFd restart because the decorator values are evalu
 
 ### Docker contexts
 
-Managed through the admin dashboard at `/containers/admin/contexts`. Each context has a name (matching a docker context on the host or just a label), an optional SSH hostname, a public hostname (what users see in connection strings, required), a weight for load balancing, and an enabled flag. A `local` context is auto-seeded on first boot when the Docker socket is available, with `hostname=None` and `pub_hostname` set to the machine's hostname. The admin UI shows connection status per context and lets you add, edit, delete, test connectivity, and reload connections without restarting CTFd
+Managed through the admin config page at `/admin/config`. Contexts get imported from Docker's context metadata on the host via the Import button, each one has a name matching a Docker context, an optional SSH hostname, a public hostname (what users see, required), a weight, and an enabled flag. A `local` context is auto-seeded on first boot when the Docker socket is available. The table shows status (UP/DOWN/DEGRADED/DISABLED) and active container counts per host. Reload reconnects all contexts without restarting CTFd
 
 ## API endpoints
 
@@ -276,14 +284,15 @@ All analytics endpoints accept `?range=24h|7d|30d|all` (default `7d`)
 
 ### Contexts
 
-- `GET /containers/admin/contexts` admin UI for managing contexts
 - `GET /containers/api/contexts` list active context names
-- `GET /containers/api/contexts/list` list all contexts with details
-- `POST /containers/api/contexts/add` add new context
+- `GET /containers/api/contexts/list` all contexts with health, container counts, socket status
+- `GET /containers/api/contexts/discover` scan host for importable Docker contexts
+- `POST /containers/api/contexts/add` import a context
 - `PUT /containers/api/contexts/update/<id>` update context settings
 - `DELETE /containers/api/contexts/delete/<id>` remove context
 - `GET /containers/api/contexts/test/<id>` test context connectivity
 - `POST /containers/api/contexts/reload` reconnect all contexts
+- `GET /containers/api/images/matrix` which challenge images exist on which contexts
 
 ### Events
 
@@ -301,7 +310,7 @@ All analytics endpoints accept `?range=24h|7d|30d|all` (default `7d`)
 
 **Containers on wrong host**: each challenge can be pinned to a specific Docker context in the challenge settings, if it's unset the load balancer picks automatically based on least-connections scoring
 
-**Images not found**: images must exist on the challenge's assigned context before users can start instances, use the pre-pull feature in plugin settings to push images to all contexts before the CTF starts
+**Images not found**: images must exist on the challenge's assigned context before users can start instances, use the Image Availability scan on the config page to see what's where and pull what's missing. For private images you'll need to `docker save` / `docker load` onto each host or push to a private registry the hosts can reach
 
 **Containers not expiring**: check that `expiration_minutes` is set to non-zero for the challenge, `expires = 0` means never expire which is intentional, verify the scheduler is running by checking CTFd logs for expiry job messages
 
