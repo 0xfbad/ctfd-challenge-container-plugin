@@ -8,9 +8,9 @@
 <div class="container">
 	<div class="row mb-3">
 		<div class="col-md-12">
-			<button type="button" class="btn btn-primary" id="add-context-btn">
-				Add Docker Context
-			</button>
+			<button type="button" class="btn btn-primary" id="add-context-btn">Add Context</button>
+			<button type="button" class="btn btn-outline-primary ml-2" id="import-contexts-btn">Import from Host</button>
+			<button type="button" class="btn btn-outline-secondary ml-2" id="reload-contexts-btn">Reload</button>
 		</div>
 	</div>
 	<div class="row">
@@ -27,42 +27,26 @@
 					</tr>
 				</thead>
 				<tbody id="contexts-table-body">
-					{% for context in contexts %}
-					<tr data-context-id="{{ context.id }}">
-						<td>{{ context.context_name }}{% if context.context_name == 'local' %} <span class="badge badge-info">Local</span>{% endif %}</td>
-						<td>{{ context.pub_hostname }}</td>
-						<td>{{ context.weight }}</td>
-						<td>
-							{% if context.context_name in connected_set %}
-							<span class="badge badge-success">Connected</span>
-							{% else %}
-							<span class="badge badge-danger">Disconnected</span>
-							{% endif %}
-						</td>
-						<td>
-							<span class="badge badge-{{ 'success' if context.enabled else 'secondary' }}">
-								{{ 'Enabled' if context.enabled else 'Disabled' }}
-							</span>
-						</td>
-						<td>
-							<button class="btn btn-sm btn-info test-context-btn" data-context-id="{{ context.id }}">
-								Test
-							</button>
-							<button class="btn btn-sm btn-warning edit-context-btn" data-context-id="{{ context.id }}"
-								data-hostname="{{ context.hostname or '' }}" data-pub-hostname="{{ context.pub_hostname }}"
-								data-weight="{{ context.weight }}" data-enabled="{{ context.enabled }}">
-								Edit
-							</button>
-							{% if context.context_name != 'local' %}
-							<button class="btn btn-sm btn-danger delete-context-btn" data-context-id="{{ context.id }}">
-								Delete
-							</button>
-							{% endif %}
-						</td>
-					</tr>
-					{% endfor %}
+					<tr><td colspan="6" class="text-center text-muted">Loading...</td></tr>
 				</tbody>
 			</table>
+		</div>
+	</div>
+
+	<hr class="my-4">
+
+	<div class="row mb-3">
+		<div class="col-md-12">
+			<h4 class="d-inline">Image Availability</h4>
+			<button type="button" class="btn btn-sm btn-outline-primary ml-3" id="scan-images-btn">Scan</button>
+			<small class="text-muted ml-2" id="scan-status"></small>
+		</div>
+	</div>
+	<div class="row">
+		<div class="col-md-12">
+			<div id="image-matrix-container">
+				<p class="text-muted">Click Scan to check which challenge images are available on each context</p>
+			</div>
 		</div>
 	</div>
 </div>
@@ -72,9 +56,7 @@
 		<div class="modal-content">
 			<div class="modal-header">
 				<h5 class="modal-title">Add Docker Context</h5>
-				<button type="button" class="close" data-dismiss="modal">
-					<span>&times;</span>
-				</button>
+				<button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
 			</div>
 			<div class="modal-body">
 				<form id="add-context-form">
@@ -83,7 +65,7 @@
 						<input type="text" class="form-control" id="context-name" required
 							placeholder="e.g. default, server1, server2">
 						<small class="form-text text-muted">
-							This should match a docker context name configured on your system
+							Should match a docker context name configured on your system
 						</small>
 					</div>
 					<div class="form-group">
@@ -130,9 +112,7 @@
 		<div class="modal-content">
 			<div class="modal-header">
 				<h5 class="modal-title">Edit Docker Context</h5>
-				<button type="button" class="close" data-dismiss="modal">
-					<span>&times;</span>
-				</button>
+				<button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
 			</div>
 			<div class="modal-body">
 				<form id="edit-context-form">
@@ -161,6 +141,31 @@
 			<div class="modal-footer">
 				<button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
 				<button type="button" class="btn btn-primary" id="update-context-btn">Update Context</button>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div class="modal fade" id="importContextsModal" tabindex="-1" role="dialog">
+	<div class="modal-dialog modal-lg" role="document">
+		<div class="modal-content">
+			<div class="modal-header">
+				<h5 class="modal-title">Import Docker Contexts</h5>
+				<button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
+			</div>
+			<div class="modal-body">
+				<p class="text-muted small mb-3">Docker contexts detected from <code>~/.docker/contexts</code> on this host. Set the public hostname for each context you want to import.</p>
+				<div id="discover-loading" class="text-center py-3">
+					<i class="fas fa-spinner fa-spin"></i> Scanning for contexts...
+				</div>
+				<div id="discover-list" style="display:none;"></div>
+				<div id="discover-empty" style="display:none;" class="text-center text-muted py-3">
+					No new Docker contexts found on this host
+					<br><small>Make sure <code>~/.docker</code> is mounted and contexts are created with <code>docker context create</code></small>
+				</div>
+			</div>
+			<div class="modal-footer">
+				<button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
 			</div>
 		</div>
 	</div>

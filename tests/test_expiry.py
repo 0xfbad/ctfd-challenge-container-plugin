@@ -1,38 +1,16 @@
 import time
-import threading
-from collections import defaultdict
 from unittest.mock import patch, MagicMock
 
-from container_manager import ContainerManager, ContainerException, _ThreadLocalClients
-
-
-class SynchronousPool:
-    def __init__(self, maxsize=4):
-        self.size = maxsize
-
-    def submit(self, fn, *args, **kwargs):
-        result = fn(*args, **kwargs)
-
-        class FakeFuture:
-            def result(self):
-                return result
-
-        return FakeFuture()
+from container_manager import ContainerManager, ContainerException
 
 
 def make_manager():
     cm = object.__new__(ContainerManager)
     cm.settings = {}
     cm.app = MagicMock()
-    cm._context_configs = {"default": "unix:///var/run/docker.sock"}
-    cm._context_weights = {"default": 1}
-    cm._health = {"default": True}
-    cm._container_counts = defaultdict(int)
-    cm._context_lock = threading.Lock()
-    cm._config_generation = 0
-    cm._pool = SynchronousPool()
-    cm._semaphores = {}
-    cm._thread_local = _ThreadLocalClients()
+    cm.host_manager = MagicMock()
+    cm.host_manager.has_contexts.return_value = True
+    cm.orchestrator = MagicMock()
     return cm
 
 
@@ -61,12 +39,10 @@ def test_kill_failure_skips_db_delete():
     with patch("container_manager.ContainerInfoModel") as mock_model, patch("container_manager.db") as mock_db:
         mock_model.query.all.return_value = [expired_container]
 
-        # kill_container raises, simulating docker unreachable
         cm.kill_container = MagicMock(side_effect=ContainerException("docker down"))
 
         cm.kill_expired_containers(mock_app)
 
-        # DB row should NOT have been deleted since kill failed
         mock_db.session.delete.assert_not_called()
         mock_db.session.commit.assert_not_called()
 
@@ -74,7 +50,6 @@ def test_kill_failure_skips_db_delete():
 def test_expires_zero_never_expired():
     cm = make_manager()
 
-    # expires=0 means "no expiration"
     never_expire = _make_container("abc", 0)
 
     mock_app = MagicMock()

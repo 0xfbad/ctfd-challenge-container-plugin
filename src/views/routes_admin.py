@@ -14,8 +14,10 @@ from CTFd.models import db
 from . import containers_bp
 from .helpers import kill_container, get_hostname_for_context
 from ..utils import is_team_mode, get_setting, set_setting, DEFAULTS
-from ..models import ContainerInfoModel, ContainerHistoryModel, DockerContextModel
-from ..container_manager import ContainerException, LOCAL_CONTEXT_NAME, _resolve_endpoint
+from ..models import ContainerInfoModel, ContainerHistoryModel, DockerContextModel, ContainerChallengeModel
+from ..container_manager import ContainerException
+import os
+from ..docker_host_manager import LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH, _resolve_endpoint, discover_contexts, ping_endpoint
 from ..event_logger import event_logger
 
 logger = logging.getLogger(__name__)
@@ -225,23 +227,14 @@ def route_get_images_for_context(context_name):
 @admins_only
 def route_get_contexts():
     container_manager = current_app.container_manager
-    contexts = list(container_manager._context_configs.keys())
+    contexts = container_manager.get_connected_contexts()
     return jsonify(contexts=contexts)
 
 
 @containers_bp.route("/admin/contexts", methods=["GET"])
 @admins_only
 def route_list_contexts():
-    container_manager = current_app.container_manager
-
-    try:
-        contexts = DockerContextModel.query.all()
-    except Exception:
-        contexts = []
-
-    connected_set = set(container_manager.get_connected_contexts())
-
-    return render_template("admin/contexts.html", contexts=contexts, connected_set=connected_set)
+    return render_template("admin/contexts.html")
 
 
 @containers_bp.route("/api/contexts/list", methods=["GET"])
@@ -249,10 +242,15 @@ def route_list_contexts():
 def route_api_list_contexts():
     container_manager = current_app.container_manager
     connected = set(container_manager.get_connected_contexts())
+    orch_status = {s["context_name"]: s for s in container_manager.orchestrator.get_status()}
+
+    docker_socket = os.path.exists(LOCAL_SOCKET_PATH)
 
     contexts = DockerContextModel.query.all()
-    contexts_data = [
-        {
+    contexts_data = []
+    for ctx in contexts:
+        info = orch_status.get(ctx.context_name, {})
+        contexts_data.append({
             "id": ctx.id,
             "context_name": ctx.context_name,
             "hostname": ctx.hostname,
@@ -260,11 +258,12 @@ def route_api_list_contexts():
             "weight": ctx.weight,
             "enabled": ctx.enabled,
             "connected": ctx.context_name in connected,
+            "healthy": info.get("healthy", False),
+            "active_containers": info.get("active_containers", 0),
             "is_local": ctx.context_name == LOCAL_CONTEXT_NAME,
-        }
-        for ctx in contexts
-    ]
-    return jsonify(contexts=contexts_data)
+        })
+
+    return jsonify(contexts=contexts_data, docker_socket=docker_socket)
 
 
 @containers_bp.route("/api/contexts/add", methods=["POST"])
@@ -380,6 +379,95 @@ def route_api_test_context(context_id):
         return jsonify(success="context is reachable")
     except Exception as e:
         return jsonify(error=f"context unreachable: {str(e)}"), 500
+
+
+@containers_bp.route("/api/contexts/discover", methods=["GET"])
+@admins_only
+def route_api_discover_contexts():
+    import socket as _socket
+    from concurrent.futures import ThreadPoolExecutor
+
+    try:
+        found = discover_contexts()
+        existing = {ctx.context_name for ctx in DockerContextModel.query.all()}
+
+        available = []
+        for ctx in found:
+            if ctx["name"] in existing:
+                continue
+
+            ep = ctx["endpoint"]
+            if ep.startswith("unix://"):
+                suggested = _socket.gethostname()
+            elif "://" in ep:
+                stripped = ep.split("://", 1)[-1]
+                if "@" in stripped:
+                    stripped = stripped.split("@", 1)[-1]
+                suggested = stripped.split(":")[0].split("/")[0]
+            else:
+                suggested = ""
+
+            available.append({
+                "name": ctx["name"],
+                "endpoint": ctx["endpoint"],
+                "suggested_hostname": suggested,
+            })
+
+        if available:
+            def _ping(ctx):
+                ctx["reachable"] = ping_endpoint(ctx["endpoint"])
+                return ctx
+
+            with ThreadPoolExecutor(max_workers=min(len(available), 8)) as pool:
+                list(pool.map(_ping, available))
+
+        return jsonify(contexts=available)
+    except Exception as e:
+        logger.error(f"error discovering contexts: {e}")
+        return jsonify(error=str(e)), 500
+
+
+@containers_bp.route("/api/images/matrix", methods=["GET"])
+@admins_only
+def route_api_images_matrix():
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    container_manager = current_app.container_manager
+
+    challenges = ContainerChallengeModel.query.all()
+    challenge_images = sorted({c.image for c in challenges if c.image})
+
+    if not challenge_images:
+        return jsonify(images=[], contexts=[], matrix={})
+
+    connected = container_manager.get_connected_contexts()
+    if not connected:
+        return jsonify(images=challenge_images, contexts=[], matrix={})
+
+    # list images on each context in parallel (one API call per context)
+    def _list(ctx_name):
+        return ctx_name, set(container_manager.host_manager.get_images(ctx_name))
+
+    context_images = {}
+    with ThreadPoolExecutor(max_workers=min(len(connected), 8)) as pool:
+        futures = {pool.submit(_list, ctx): ctx for ctx in connected}
+        for future in as_completed(futures, timeout=15):
+            try:
+                ctx_name, tags = future.result()
+                context_images[ctx_name] = tags
+            except Exception:
+                context_images[futures[future]] = set()
+
+    # build matrix with tag normalization (bare name -> name:latest)
+    matrix = {}
+    for img in challenge_images:
+        normalized = img if ":" in img else f"{img}:latest"
+        matrix[img] = {}
+        for ctx in connected:
+            tags = context_images.get(ctx, set())
+            matrix[img][ctx] = normalized in tags or img in tags
+
+    return jsonify(images=challenge_images, contexts=connected, matrix=matrix)
 
 
 @containers_bp.route("/api/contexts/reload", methods=["POST"])

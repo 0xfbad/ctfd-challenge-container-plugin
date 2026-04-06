@@ -1,38 +1,16 @@
 import time
-import threading
-from collections import defaultdict
 from unittest.mock import patch, MagicMock
 
-from container_manager import ContainerManager, _ThreadLocalClients
-
-
-class SynchronousPool:
-    def __init__(self, maxsize=4):
-        self.size = maxsize
-
-    def submit(self, fn, *args, **kwargs):
-        result = fn(*args, **kwargs)
-
-        class FakeFuture:
-            def result(self):
-                return result
-
-        return FakeFuture()
+from container_manager import ContainerManager
 
 
 def make_manager():
     cm = object.__new__(ContainerManager)
     cm.settings = {}
     cm.app = MagicMock()
-    cm._context_configs = {"default": "unix:///var/run/docker.sock"}
-    cm._context_weights = {"default": 1}
-    cm._health = {"default": True}
-    cm._container_counts = defaultdict(int)
-    cm._context_lock = threading.Lock()
-    cm._config_generation = 0
-    cm._pool = SynchronousPool()
-    cm._semaphores = {}
-    cm._thread_local = _ThreadLocalClients()
+    cm.host_manager = MagicMock()
+    cm.host_manager.has_contexts.return_value = True
+    cm.orchestrator = MagicMock()
     return cm
 
 

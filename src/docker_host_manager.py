@@ -1,0 +1,307 @@
+import os
+import json
+import time
+import threading
+import logging
+
+import docker
+import paramiko
+
+logger = logging.getLogger(__name__)
+
+LOCAL_CONTEXT_NAME = "local"
+LOCAL_SOCKET_PATH = "/var/run/docker.sock"
+
+
+def _scan_context_meta(context_name=None):
+    """Read docker context metadata from ~/.docker/contexts/meta/.
+    Docker stores context dirs by sha256 hash, not by name,
+    so we scan all entries and match on the Name field."""
+    contexts_dir = os.path.expanduser("~/.docker/contexts/meta")
+    if not os.path.isdir(contexts_dir):
+        return None if context_name else []
+
+    results = []
+    for entry in os.listdir(contexts_dir):
+        meta_path = os.path.join(contexts_dir, entry, "meta.json")
+        if not os.path.isfile(meta_path):
+            continue
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            if context_name:
+                if meta.get("Name") == context_name:
+                    return meta
+            else:
+                results.append(meta)
+        except Exception:
+            continue
+
+    return None if context_name else results
+
+
+def _resolve_endpoint(context_name, hostname):
+    meta = _scan_context_meta(context_name)
+    if meta:
+        endpoint = meta.get("Endpoints", {}).get("docker", {}).get("Host")
+        if endpoint:
+            return endpoint
+
+    if hostname:
+        if "@" in hostname:
+            return f"ssh://{hostname}"
+        return f"ssh://root@{hostname}"
+
+    if os.path.exists(LOCAL_SOCKET_PATH):
+        return f"unix://{LOCAL_SOCKET_PATH}"
+
+    return None
+
+
+def discover_contexts():
+    """Scan the host for available docker contexts."""
+    discovered = []
+    for meta in _scan_context_meta():
+        name = meta.get("Name", "")
+        endpoint = meta.get("Endpoints", {}).get("docker", {}).get("Host", "")
+        if name:
+            discovered.append({"name": name, "endpoint": endpoint})
+
+    if not any(d["name"] == LOCAL_CONTEXT_NAME for d in discovered):
+        if os.path.exists(LOCAL_SOCKET_PATH):
+            discovered.append({"name": LOCAL_CONTEXT_NAME, "endpoint": f"unix://{LOCAL_SOCKET_PATH}"})
+
+    return discovered
+
+
+def ping_endpoint(endpoint, timeout=3):
+    """Quick connectivity check for a docker endpoint."""
+    try:
+        client = docker.DockerClient(base_url=endpoint, timeout=timeout)
+        client.ping()
+        client.close()
+        return True
+    except Exception:
+        return False
+
+
+class _ThreadLocalClients(threading.local):
+    def __init__(self):
+        super().__init__()
+        self.clients = {}
+        self.generation = -1
+
+
+class DockerHostManager:
+    def __init__(self):
+        self._context_configs = {}
+        self._pub_hostnames = {}
+        self._thread_local = _ThreadLocalClients()
+        self._config_generation = 0
+        self._lock = threading.Lock()
+        self._semaphores = {}
+
+    def _get_client(self, context_name):
+        tl = self._thread_local
+
+        if tl.generation != self._config_generation:
+            tl.clients = {}
+            tl.generation = self._config_generation
+
+        clients = tl.clients
+        if context_name in clients:
+            return clients[context_name]
+
+        url = self._context_configs.get(context_name)
+        if not url:
+            raise Exception(f"no client for context '{context_name}'")
+
+        client = docker.DockerClient(base_url=url)
+        clients[context_name] = client
+        return client
+
+    def _clear_thread_local_client(self, context_name):
+        self._thread_local.clients.pop(context_name, None)
+
+    def _init_semaphores(self, limit):
+        new_semaphores = {}
+        for ctx_name in self._context_configs:
+            new_semaphores[ctx_name] = threading.BoundedSemaphore(limit)
+        self._semaphores = new_semaphores
+
+    def acquire_semaphore(self, context_name, timeout=30):
+        sem = self._semaphores.get(context_name)
+        if sem is None:
+            return True
+        acquired = sem.acquire(blocking=True, timeout=timeout)
+        if not acquired:
+            raise Exception("server busy, please try again shortly")
+        return True
+
+    def release_semaphore(self, context_name):
+        sem = self._semaphores.get(context_name)
+        if sem is not None:
+            try:
+                sem.release()
+            except ValueError:
+                pass
+
+    def load_contexts(self, contexts, max_concurrent_creates=2):
+        """(Re)connect all enabled contexts. contexts is a list of
+        DockerContextModel rows."""
+        new_configs = {}
+        new_pub_hostnames = {}
+
+        for ctx in contexts:
+            endpoint = _resolve_endpoint(ctx.context_name, ctx.hostname)
+            if not endpoint:
+                logger.warning(f"no endpoint for context '{ctx.context_name}', skipping")
+                continue
+
+            try:
+                client = docker.DockerClient(base_url=endpoint)
+                client.ping()
+                client.close()
+                new_configs[ctx.context_name] = endpoint
+                new_pub_hostnames[ctx.context_name] = ctx.pub_hostname
+                logger.info(f"connected to context '{ctx.context_name}' at {endpoint}")
+            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
+                logger.error(f"could not connect to context '{ctx.context_name}': {e}")
+
+        with self._lock:
+            self._context_configs = new_configs
+            self._pub_hostnames = new_pub_hostnames
+            self._config_generation += 1
+
+        self._init_semaphores(max_concurrent_creates)
+
+    def get_pub_hostname(self, context_name):
+        return self._pub_hostnames.get(context_name)
+
+    def get_connected_contexts(self):
+        return list(self._context_configs.keys())
+
+    def has_contexts(self):
+        return bool(self._context_configs)
+
+    def ping(self, context_name):
+        try:
+            client = self._get_client(context_name)
+            client.ping()
+            return True
+        except Exception:
+            self._clear_thread_local_client(context_name)
+            return False
+
+    def is_container_running(self, context_name, container_id):
+        try:
+            client = self._get_client(context_name)
+            container = client.containers.get(container_id)
+            return container.status == "running"
+        except docker.errors.NotFound:
+            return False
+        except docker.errors.DockerException:
+            self._clear_thread_local_client(context_name)
+            raise
+
+    def get_container_port(self, context_name, container_id):
+        try:
+            client = self._get_client(context_name)
+            container = client.containers.get(container_id)
+            ports = container.attrs["NetworkSettings"]["Ports"]
+            for port_mappings in ports.values():
+                if port_mappings:
+                    return port_mappings[0]["HostPort"]
+        except (KeyError, IndexError, docker.errors.NotFound):
+            return None
+        except docker.errors.DockerException:
+            self._clear_thread_local_client(context_name)
+            raise
+        return None
+
+    def get_running_container_ids(self, context_name):
+        try:
+            client = self._get_client(context_name)
+            containers = client.containers.list(filters={"status": "running"})
+            return {c.id for c in containers}
+        except docker.errors.DockerException:
+            self._clear_thread_local_client(context_name)
+            return set()
+
+    def run_container(self, context_name, image, port, command, environment, **kwargs):
+        """Create and start a container on the specified context."""
+        client = self._get_client(context_name)
+        try:
+            container = client.containers.run(
+                image,
+                ports={str(port): None},
+                command=command,
+                detach=True,
+                auto_remove=True,
+                cap_drop=["ALL"],
+                security_opt=["no-new-privileges:true"],
+                pids_limit=256,
+                environment=environment,
+                **kwargs,
+            )
+            return container
+        except docker.errors.DockerException:
+            self._clear_thread_local_client(context_name)
+            raise
+
+    def kill_container(self, context_name, container_id):
+        try:
+            client = self._get_client(context_name)
+            container = client.containers.get(container_id)
+            container.kill()
+            return True
+        except docker.errors.NotFound:
+            return False
+        except docker.errors.DockerException:
+            self._clear_thread_local_client(context_name)
+            raise
+
+    def get_container_logs(self, context_name, container_id, tail=200):
+        try:
+            client = self._get_client(context_name)
+            container = client.containers.get(container_id)
+            output = container.logs(stdout=True, stderr=True, tail=tail)
+            if isinstance(output, bytes):
+                return output.decode("utf-8", errors="replace")
+            return output
+        except docker.errors.NotFound:
+            return ""
+        except docker.errors.DockerException:
+            self._clear_thread_local_client(context_name)
+            raise
+
+    def get_images(self, context_name):
+        try:
+            client = self._get_client(context_name)
+            images = client.images.list()
+            tags = []
+            for image in images:
+                for tag in image.tags:
+                    if tag:
+                        tags.append(tag)
+            return sorted(tags)
+        except docker.errors.DockerException:
+            self._clear_thread_local_client(context_name)
+            return []
+
+    def pull_image(self, context_name, image):
+        client = self._get_client(context_name)
+        try:
+            client.images.pull(image)
+            return "ok"
+        except docker.errors.DockerException:
+            self._clear_thread_local_client(context_name)
+            raise
+
+    def check_image(self, context_name, image):
+        try:
+            client = self._get_client(context_name)
+            client.images.get(image)
+            return True
+        except Exception:
+            return False

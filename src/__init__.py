@@ -9,7 +9,8 @@ import os
 from .challenges import ContainerChallenge
 from .models import ContainerSettingsModel
 from .utils import settings_to_dict, DEFAULTS
-from .container_manager import ContainerManager, LOCAL_SOCKET_PATH, LOCAL_CONTEXT_NAME
+from .container_manager import ContainerManager
+from .docker_host_manager import LOCAL_SOCKET_PATH, LOCAL_CONTEXT_NAME
 from .models import ContainerInfoModel, ContainerHistoryModel, DockerContextModel
 from .views import containers_bp
 from .flag_type import register as register_freshness_flag
