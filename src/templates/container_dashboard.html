@@ -331,6 +331,7 @@
 				</div>
 				<div class="card-body p-0">
 					<div class="event-feed" id="event-feed">
+						<div class="text-center text-muted py-3" id="event-feed-empty">No activity</div>
 					</div>
 				</div>
 			</div>
@@ -586,6 +587,10 @@
 
 	function updateContainersTable(containers) {
 		const tbody = document.getElementById('container-table-body');
+		if (!containers || containers.length === 0) {
+			tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No active containers</td></tr>';
+			return;
+		}
 		tbody.innerHTML = containers.map(createContainerRow).join('');
 		attachTooltipListeners();
 		startCountdowns();
@@ -660,6 +665,8 @@
 
 	function prependEventToFeed(event) {
 		const feed = document.getElementById('event-feed');
+		const empty = document.getElementById('event-feed-empty');
+		if (empty) empty.remove();
 		const eventElement = createEventElement(event);
 		feed.insertBefore(eventElement, feed.firstChild);
 
@@ -675,6 +682,10 @@
 			.then(data => {
 				const feed = document.getElementById('event-feed');
 				feed.innerHTML = '';
+				if (!data.events || data.events.length === 0) {
+					feed.innerHTML = '<div class="text-center text-muted py-3">No activity</div>';
+					return;
+				}
 				data.events.reverse().forEach(event => {
 					feed.appendChild(createEventElement(event));
 				});
