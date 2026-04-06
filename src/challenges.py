@@ -12,7 +12,7 @@ from .freshness import compute_token, render_flag, extract_token
 from .event_logger import event_logger
 
 _token_map_lock = threading.Lock()
-_token_map_cache = {}
+_token_map_cache: dict[tuple, tuple] = {}
 
 
 def _find_token_owner(secret, challenge_id, submitted_token, exclude_xid, team_mode):
