@@ -337,22 +337,17 @@
 		</div>
 	</div>
 
-	<div class="row mt-3 range-selector">
-		<div class="col-md-3">
-			<select class="form-control" id="time-range" onchange="loadAllCharts()">
-				<option value="24h">Last 24 hours</option>
-				<option value="7d" selected>Last 7 days</option>
-				<option value="30d">Last 30 days</option>
-				<option value="all">All time</option>
-			</select>
-		</div>
-	</div>
-
 	<div class="row">
 		<div class="col-md-12">
 			<div class="card">
 				<div class="card-header">
 					<h3 class="card-title">Container Activity</h3>
+					<select class="form-control form-control-sm" id="time-range" style="width: auto;" onchange="loadAllCharts()">
+						<option value="24h">Last 24 hours</option>
+						<option value="7d" selected>Last 7 days</option>
+						<option value="30d">Last 30 days</option>
+						<option value="all">All time</option>
+					</select>
 				</div>
 				<div class="card-body">
 					<div class="chart-container" id="activity-chart"></div>
