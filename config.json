@@ -1,4 +1,5 @@
 {
     "name": "Challenge Containers",
-    "route": "/containers/dashboard"
+    "route": "/containers/dashboard",
+    "config": "container_config.html"
 }

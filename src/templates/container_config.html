@@ -1,0 +1,168 @@
+<form id="cc-settings-form" autocomplete="off" class="w-100">
+    <div class="row">
+        <div class="col-md-6">
+            <h5>Container Limits</h5>
+            <div class="form-group">
+                <label for="cc-setting-max_containers_per_user">Max containers per user</label>
+                <input type="number" class="form-control cc-setting-input" id="cc-setting-max_containers_per_user"
+                    data-key="max_containers_per_user" min="1">
+            </div>
+        </div>
+
+        <div class="col-md-6">
+            <h5>Image Management</h5>
+            <div class="form-group">
+                <label for="cc-pull-image-name">Pre-pull image to all contexts</label>
+                <div class="input-group">
+                    <input type="text" class="form-control" id="cc-pull-image-name"
+                        placeholder="e.g. nginx:latest">
+                    <div class="input-group-append">
+                        <button type="button" class="btn btn-outline-primary" id="cc-pull-image-btn">Pull</button>
+                    </div>
+                </div>
+                <small class="form-text text-muted" id="cc-pull-image-status"></small>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col-md-6">
+            <h5>Performance</h5>
+            <div class="form-group">
+                <label for="cc-setting-thread_pool_size">Thread pool size</label>
+                <input type="number" class="form-control cc-setting-input" id="cc-setting-thread_pool_size"
+                    data-key="thread_pool_size" min="1" max="32">
+            </div>
+            <div class="form-group">
+                <label for="cc-setting-max_concurrent_creates">Max concurrent creates per context</label>
+                <input type="number" class="form-control cc-setting-input" id="cc-setting-max_concurrent_creates"
+                    data-key="max_concurrent_creates" min="1" max="32">
+            </div>
+            <div class="form-group">
+                <label for="cc-setting-expiration_check_interval">Expiration check interval (seconds)</label>
+                <input type="number" class="form-control cc-setting-input" id="cc-setting-expiration_check_interval"
+                    data-key="expiration_check_interval" min="1">
+            </div>
+        </div>
+
+        <div class="col-md-6">
+            <h5>Rate Limiting <span class="badge badge-warning">restart required</span></h5>
+            <div class="form-group">
+                <label for="cc-setting-rate_limit_requests">Requests per interval</label>
+                <input type="number" class="form-control cc-setting-input" id="cc-setting-rate_limit_requests"
+                    data-key="rate_limit_requests" min="1">
+            </div>
+            <div class="form-group">
+                <label for="cc-setting-rate_limit_interval">Interval (seconds)</label>
+                <input type="number" class="form-control cc-setting-input" id="cc-setting-rate_limit_interval"
+                    data-key="rate_limit_interval" min="1">
+            </div>
+        </div>
+    </div>
+
+    <button type="button" class="btn btn-md btn-primary float-right" id="cc-save-btn">Update</button>
+    <span id="cc-settings-status" class="float-right mr-2" style="line-height: 38px;"></span>
+</form>
+
+<script>
+(function() {
+    function loadCcSettings() {
+        fetch('/containers/api/settings')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                var settings = data.settings;
+                document.querySelectorAll('.cc-setting-input').forEach(function(input) {
+                    var key = input.dataset.key;
+                    if (settings[key]) {
+                        input.value = settings[key].value;
+                        input.placeholder = settings[key].default;
+                    }
+                });
+            })
+            .catch(function(err) { console.error('failed to load container settings:', err); });
+    }
+
+    document.getElementById('cc-save-btn').addEventListener('click', function() {
+        var payload = {};
+        var status = document.getElementById('cc-settings-status');
+        document.querySelectorAll('.cc-setting-input').forEach(function(input) {
+            var key = input.dataset.key;
+            if (input.value !== '') {
+                payload[key] = input.type === 'number' ? Number(input.value) : input.value;
+            }
+        });
+
+        fetch('/containers/api/settings', {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'CSRF-Token': init.csrfNonce
+            },
+            body: JSON.stringify(payload)
+        })
+        .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+        .then(function(res) {
+            if (res.ok) {
+                status.textContent = 'Saved';
+                status.className = 'float-right mr-2 text-success';
+            } else {
+                status.textContent = 'Error: ' + (res.data.error || 'unknown');
+                status.className = 'float-right mr-2 text-danger';
+            }
+            setTimeout(function() { status.textContent = ''; }, 3000);
+        })
+        .catch(function(err) {
+            status.textContent = 'Error: ' + err.message;
+            status.className = 'float-right mr-2 text-danger';
+        });
+    });
+
+    var pullBtn = document.getElementById('cc-pull-image-btn');
+    if (pullBtn) {
+        pullBtn.addEventListener('click', function() {
+            var image = document.getElementById('cc-pull-image-name').value.trim();
+            var pullStatus = document.getElementById('cc-pull-image-status');
+            if (!image) {
+                pullStatus.textContent = 'Enter an image name';
+                pullStatus.className = 'form-text text-danger';
+                return;
+            }
+
+            pullBtn.disabled = true;
+            pullStatus.textContent = 'Pulling...';
+            pullStatus.className = 'form-text text-info';
+
+            fetch('/containers/api/pull', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'CSRF-Token': init.csrfNonce
+                },
+                body: JSON.stringify({ image: image })
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.results) {
+                    var summary = Object.entries(data.results)
+                        .map(function(e) { return e[0] + ': ' + e[1]; })
+                        .join(', ');
+                    pullStatus.textContent = summary;
+                    pullStatus.className = 'form-text text-success';
+                } else {
+                    pullStatus.textContent = 'Error: ' + (data.error || 'unknown');
+                    pullStatus.className = 'form-text text-danger';
+                }
+            })
+            .catch(function(err) {
+                pullStatus.textContent = 'Error: ' + err.message;
+                pullStatus.className = 'form-text text-danger';
+            })
+            .then(function() { pullBtn.disabled = false; });
+        });
+    }
+
+    loadCcSettings();
+})();
+</script>

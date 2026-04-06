@@ -125,5 +125,10 @@ def load(app: Flask):
 
     app.register_blueprint(containers_bp)
 
-    register_admin_plugin_menu_bar(title="Containers", route="/containers/dashboard")
-    register_admin_plugin_menu_bar(title="Container Stats", route="/containers/admin/stats")
+    register_admin_plugin_menu_bar(title="Challenge Containers", route="/containers/dashboard")
+
+    # register config template in the DictLoader so {% include %} on
+    # /admin/config can find it without hardcoding the plugin folder name
+    config_tpl = os.path.join(os.path.dirname(__file__), "templates", "container_config.html")
+    with open(config_tpl) as f:
+        app.overridden_templates["container_config.html"] = f.read()
