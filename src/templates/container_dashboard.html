@@ -3,6 +3,62 @@
 {% block content %}
 
 <style>
+	.cfg-help {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 14px;
+		height: 14px;
+		border-radius: 50%;
+		border: 1px solid #adb5bd;
+		color: #adb5bd;
+		background: none;
+		font-size: 10px;
+		font-weight: 600;
+		cursor: help;
+		position: relative;
+		vertical-align: middle;
+		margin-bottom: 2px;
+		margin-left: 3px;
+		line-height: 1;
+	}
+
+	.cfg-help:hover {
+		border-color: #6c757d;
+		color: #6c757d;
+	}
+
+	.cfg-help:hover::after {
+		content: attr(data-tip);
+		position: absolute;
+		bottom: calc(100% + 8px);
+		left: 50%;
+		transform: translateX(-50%);
+		background: #343a40;
+		color: #f8f9fa;
+		padding: 8px 10px;
+		border-radius: 4px;
+		font-size: 12px;
+		font-weight: 400;
+		line-height: 1.4;
+		width: 240px;
+		white-space: normal;
+		z-index: 1000;
+		pointer-events: none;
+	}
+
+	.cfg-help:hover::before {
+		content: '';
+		position: absolute;
+		bottom: calc(100% + 2px);
+		left: 50%;
+		transform: translateX(-50%);
+		border: 5px solid transparent;
+		border-top-color: #343a40;
+		z-index: 1000;
+		pointer-events: none;
+	}
+
 	.card {
 		margin-bottom: 20px;
 		border-radius: 8px;
@@ -248,7 +304,7 @@
 		<div class="col-md-12">
 			<div class="card">
 				<div class="card-header">
-					<h3 class="card-title">Active Containers</h3>
+					<h3 class="card-title">Active Containers <span class="cfg-help" data-tip="Every container running right now across all Docker contexts. Hover a container ID to see its connection command. If a container looks stuck, check its logs before killing it.">?</span></h3>
 					<button class="btn btn-danger" id="container-purge-btn" onclick="purgeContainers()">
 						<i class="fas fa-trash"></i> Purge All
 					</button>
@@ -306,7 +362,7 @@
 		<div class="col-md-12">
 			<div class="card">
 				<div class="card-header">
-					<h3 class="card-title">Activity</h3>
+					<h3 class="card-title">Activity <span class="cfg-help" data-tip="Real-time feed of container lifecycle events. Watch for patterns like repeated kills/creates on the same challenge (might indicate a broken image) or flag sharing alerts.">?</span></h3>
 				</div>
 				<div class="card-body">
 					<div class="table-responsive log-wrap">
@@ -335,7 +391,7 @@
 		<div class="col-md-12">
 			<div class="card">
 				<div class="card-header">
-					<h3 class="card-title">Container Activity</h3>
+					<h3 class="card-title">Container Activity <span class="cfg-help" data-tip="Creates vs stops over time. A spike in creates with no matching stops could mean containers are piling up. A sudden drop in creates might mean a Docker host went down.">?</span></h3>
 					<select class="form-control form-control-sm chart-range-select" style="width: auto;" onchange="syncRangeAndLoad(this)">
 						<option value="24h">Last 24 hours</option>
 						<option value="7d" selected>Last 7 days</option>
@@ -354,7 +410,7 @@
 		<div class="col-md-12">
 			<div class="card">
 				<div class="card-header">
-					<h3 class="card-title">Top Users by Container Time</h3>
+					<h3 class="card-title">Top Users by Container Time <span class="cfg-help" data-tip="Total time each user has had containers running. Unusually high values compared to peers could mean someone is hoarding containers or forgot to stop them.">?</span></h3>
 					<select class="form-control form-control-sm chart-range-select" style="width: auto;" onchange="syncRangeAndLoad(this)">
 						<option value="24h">Last 24 hours</option>
 						<option value="7d" selected>Last 7 days</option>
@@ -373,7 +429,7 @@
 		<div class="col-md-12">
 			<div class="card">
 				<div class="card-header">
-					<h3 class="card-title">Challenge Statistics</h3>
+					<h3 class="card-title">Challenge Statistics <span class="cfg-help" data-tip="Container count and restarts per user for each challenge. High restarts/user on a challenge usually means the image is crashing or players are brute-forcing something.">?</span></h3>
 					<select class="form-control form-control-sm chart-range-select" style="width: auto;" onchange="syncRangeAndLoad(this)">
 						<option value="24h">Last 24 hours</option>
 						<option value="7d" selected>Last 7 days</option>
@@ -392,7 +448,7 @@
 		<div class="col-md-12">
 			<div class="card">
 				<div class="card-header">
-					<h3 class="card-title">Solve Times</h3>
+					<h3 class="card-title">Solve Times <span class="cfg-help" data-tip="Time from container start to correct flag submission. Each dot is one solve. Clusters of very fast solves on a challenge could indicate flag leaking or an unintended shortcut.">?</span></h3>
 					<select class="form-control form-control-sm chart-range-select" style="width: auto;" onchange="syncRangeAndLoad(this)">
 						<option value="24h">Last 24 hours</option>
 						<option value="7d" selected>Last 7 days</option>
@@ -535,7 +591,7 @@
 		const safeUser = escapeHtml(container.user || '');
 		const safeChallenge = escapeHtml(container.challenge || '');
 		const safeTeam = container.team ? escapeHtml(container.team) : '';
-		const teamColumn = safeTeam ? `<a href="/admin/teams/${container.team_id}">${safeTeam}</a>` : '';
+		const teamColumn = safeTeam ? `<a href="/admin/teams/${safeId(container.team_id)}">${safeTeam}</a>` : '';
 		const cid = escapeAttr(container.container_id);
 		// container IDs are hex strings from docker, strip anything else for JS context
 		const cidJs = container.container_id.replace(/[^a-f0-9]/gi, '');
@@ -553,8 +609,8 @@
 						${escapeHtml(container.container_id.substring(0, 12))}
 					</span>
 				</td>
-				<td><a href="/admin/challenges/${container.challenge_id}">${safeChallenge}</a></td>
-				<td><a href="/admin/users/${container.user_id}">${safeUser}</a></td>
+				<td><a href="/admin/challenges/${safeId(container.challenge_id)}">${safeChallenge}</a></td>
+				<td><a href="/admin/users/${safeId(container.user_id)}">${safeUser}</a></td>
 				<td>${teamColumn}</td>
 				<td class="countdown-timer" data-expires="${container.expires}">calculating...</td>
 				<td>
@@ -629,29 +685,56 @@
 		'flag_sharing': 'badge-evt-flag-share',
 	};
 
+	function safeId(val) {
+		return parseInt(val, 10) || 0;
+	}
+
 	function formatEventDetails(event) {
 		const m = event.metadata || {};
 		switch (event.type) {
 			case 'host_healthy':
 			case 'host_unhealthy':
 				return m.context_name ? escapeHtml(m.context_name) : '';
-			case 'flag_sharing':
-				return m.source_entity ? 'flag from ' + escapeHtml(m.source_entity) : '';
-			default: {
+			case 'flag_sharing': {
 				const parts = [];
+				if (m.source_entity) {
+					const srcId = safeId(m.source_id);
+					const srcType = m.source_type === 'teams' ? 'teams' : 'users';
+					parts.push('flag from ' + (srcId
+						? '<a href="/admin/' + srcType + '/' + srcId + '">' + escapeHtml(m.source_entity) + '</a>'
+						: escapeHtml(m.source_entity)));
+				}
 				if (m.challenge_name) {
 					parts.push(m.challenge_id
-						? '<a href="/admin/challenges/' + m.challenge_id + '">' + escapeHtml(m.challenge_name) + '</a>'
+						? '<a href="/admin/challenges/' + safeId(m.challenge_id) + '">' + escapeHtml(m.challenge_name) + '</a>'
 						: escapeHtml(m.challenge_name));
-				}
-				if (m.team_name) {
-					parts.push(m.team_id
-						? '<a href="/admin/teams/' + m.team_id + '">' + escapeHtml(m.team_name) + '</a>'
-						: escapeHtml(m.team_name));
 				}
 				return parts.join(' / ');
 			}
+			default: {
+				return m.challenge_name
+					? (m.challenge_id
+						? '<a href="/admin/challenges/' + safeId(m.challenge_id) + '">' + escapeHtml(m.challenge_name) + '</a>'
+						: escapeHtml(m.challenge_name))
+					: '';
+			}
 		}
+	}
+
+	function formatEventUser(event) {
+		const m = event.metadata || {};
+		const userId = safeId(event.user_id);
+		let html = event.username
+			? (userId ? '<a href="/admin/users/' + userId + '">' + escapeHtml(event.username) + '</a>' : escapeHtml(event.username))
+			: '';
+		if (m.team_name && html) {
+			const teamId = safeId(m.team_id);
+			const teamHtml = teamId
+				? '<a href="/admin/teams/' + teamId + '">' + escapeHtml(m.team_name) + '</a>'
+				: escapeHtml(m.team_name);
+			html += ' (' + teamHtml + ')';
+		}
+		return html;
 	}
 
 	function addEventToFeed(event) {
@@ -662,13 +745,12 @@
 		const row = document.createElement('tr');
 		const badgeClass = EVENT_BADGE_CLASS[event.type] || 'badge-secondary';
 		const label = EVENT_LABELS[event.type] || event.type;
-		const details = formatEventDetails(event);
 
 		row.innerHTML =
 			'<td class="log-time">' + escapeHtml(formatTimestamp(event.timestamp)) + '</td>' +
-			'<td class="log-user">' + (event.username ? '<a href="/admin/users/' + event.user_id + '">' + escapeHtml(event.username) + '</a>' : '') + '</td>' +
-			'<td><span class="badge ' + badgeClass + '">' + escapeHtml(label) + '</span></td>' +
-			'<td class="log-detail">' + details + '</td>';
+			'<td class="log-user">' + formatEventUser(event) + '</td>' +
+			'<td><span class="badge ' + escapeAttr(badgeClass) + '">' + escapeHtml(label) + '</span></td>' +
+			'<td class="log-detail">' + formatEventDetails(event) + '</td>';
 
 		feed.insertBefore(row, feed.firstChild);
 
@@ -818,16 +900,23 @@
 
 	const charts = {};
 
-	function getRange() {
-		const first = document.querySelector('.chart-range-select');
-		return first ? first.value : '7d';
+	function getRangeFor(chartId) {
+		const card = document.getElementById(chartId).closest('.card');
+		const sel = card ? card.querySelector('.chart-range-select') : null;
+		return sel ? sel.value : '7d';
 	}
 
 	function syncRangeAndLoad(source) {
-		document.querySelectorAll('.chart-range-select').forEach(function(sel) {
-			if (sel !== source) sel.value = source.value;
-		});
-		loadAllCharts();
+		const chart = source.closest('.card').querySelector('.chart-container');
+		if (!chart) return;
+		const id = chart.id;
+		const loaders = {
+			'activity-chart': loadActivityChart,
+			'users-chart': loadUsersChart,
+			'challenges-chart': loadChallengesChart,
+			'solve-chart': loadSolveChart,
+		};
+		if (loaders[id]) loaders[id]();
 	}
 
 	function initChart(id) {
@@ -844,11 +933,11 @@
 	}
 
 	function loadActivityChart() {
-		fetch(`/containers/api/analytics/activity?range=${getRange()}`)
+		const range = getRangeFor('activity-chart');
+		fetch(`/containers/api/analytics/activity?range=${range}`)
 			.then(r => r.json())
 			.then(data => {
 				const chart = initChart('activity-chart');
-				const range = getRange();
 				const labels = data.labels.map(ts => {
 					const d = new Date(ts * 1000);
 					if (range === '24h') {
@@ -863,7 +952,7 @@
 					toolbox: { feature: { saveAsImage: {} } },
 					dataZoom: [{ type: 'inside' }, { type: 'slider' }],
 					xAxis: { type: 'category', data: labels },
-					yAxis: { type: 'value' },
+					yAxis: { type: 'value', name: 'Containers' },
 					series: [
 						{ name: 'Creates', type: 'line', data: data.creates, smooth: true, itemStyle: { color: '#28a745' } },
 						{ name: 'Stops', type: 'line', data: data.stops, smooth: true, itemStyle: { color: '#dc3545' } }
@@ -873,7 +962,7 @@
 	}
 
 	function loadUsersChart() {
-		fetch(`/containers/api/analytics/top_users?range=${getRange()}`)
+		fetch(`/containers/api/analytics/top_users?range=${getRangeFor('users-chart')}`)
 			.then(r => r.json())
 			.then(data => {
 				const chart = initChart('users-chart');
@@ -891,7 +980,7 @@
 					},
 					toolbox: { feature: { saveAsImage: {} } },
 					grid: { left: '20%' },
-					xAxis: { type: 'value', axisLabel: { formatter: v => formatDuration(v) } },
+					xAxis: { type: 'value', name: 'Total Time', axisLabel: { formatter: v => formatDuration(v) } },
 					yAxis: { type: 'category', data: names.reverse(), axisLabel: { width: 120, overflow: 'truncate' } },
 					series: [{ type: 'bar', data: times.reverse(), itemStyle: { color: '#007bff' } }]
 				});
@@ -899,7 +988,7 @@
 	}
 
 	function loadChallengesChart() {
-		fetch(`/containers/api/analytics/challenges?range=${getRange()}`)
+		fetch(`/containers/api/analytics/challenges?range=${getRangeFor('challenges-chart')}`)
 			.then(r => r.json())
 			.then(data => {
 				const chart = initChart('challenges-chart');
@@ -930,7 +1019,7 @@
 	}
 
 	function loadSolveChart() {
-		fetch(`/containers/api/analytics/solve_times?range=${getRange()}`)
+		fetch(`/containers/api/analytics/solve_times?range=${getRangeFor('solve-chart')}`)
 			.then(r => r.json())
 			.then(data => {
 				const chart = initChart('solve-chart');
@@ -958,7 +1047,7 @@
 					toolbox: { feature: { saveAsImage: {} } },
 					dataZoom: [{ type: 'inside' }, { type: 'slider' }],
 					xAxis: { type: 'category', data: names, axisLabel: { rotate: 30, overflow: 'truncate' } },
-					yAxis: { type: 'value', name: 'Seconds', axisLabel: { formatter: v => formatDuration(v) } },
+					yAxis: { type: 'value', name: 'Solve Time', axisLabel: { formatter: v => formatDuration(v) } },
 					series: [
 						{ name: 'Avg solve time', type: 'bar', data: data.map(c => c.avg_time), itemStyle: { color: '#6f42c1' } },
 						{ name: 'Individual solves', type: 'scatter', data: scatterData, symbolSize: 6, itemStyle: { color: '#fd7e14', opacity: 0.6 } }

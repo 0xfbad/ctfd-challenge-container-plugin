@@ -165,7 +165,7 @@ class ContainerChallenge(BaseChallenge):
 
             owner = _find_token_owner(secret, challenge.id, submitted_token, xid, team_mode)
             if owner:
-                identifier = owner[1]
+                source_id, identifier = owner
                 event_logger.log_event(
                     "flag_sharing",
                     f"user '{user.name}' submitted a flag belonging to '{identifier}' on challenge '{challenge.name}'",
@@ -176,6 +176,8 @@ class ContainerChallenge(BaseChallenge):
                         "challenge_id": challenge.id,
                         "challenge_name": challenge.name,
                         "source_entity": identifier,
+                        "source_id": source_id,
+                        "source_type": "teams" if team_mode else "users",
                     },
                 )
                 return False, "this flag belongs to another participant. this attempt has been logged."
