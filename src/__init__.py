@@ -2,7 +2,7 @@ import socket
 import time
 import logging
 from flask import Flask
-from CTFd.plugins import register_plugin_assets_directory, register_admin_plugin_menu_bar
+from CTFd.plugins import register_plugin_assets_directory
 from CTFd.plugins.challenges import CHALLENGE_CLASSES
 import os
 
@@ -124,8 +124,6 @@ def load(app: Flask):
     app.container_manager = container_manager
 
     app.register_blueprint(containers_bp)
-
-    register_admin_plugin_menu_bar(title="Challenge Containers", route="/containers/dashboard")
 
     # register config template in the DictLoader so {% include %} on
     # /admin/config can find it without hardcoding the plugin folder name
