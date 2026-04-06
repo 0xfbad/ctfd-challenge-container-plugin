@@ -1,9 +1,66 @@
+<style>
+.cfg-help {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 1px solid #adb5bd;
+    color: #adb5bd;
+    background: none;
+    font-size: 10px;
+    font-weight: 600;
+    cursor: help;
+    position: relative;
+    vertical-align: middle;
+    margin-left: 3px;
+    line-height: 1;
+}
+
+.cfg-help:hover {
+    border-color: #6c757d;
+    color: #6c757d;
+}
+
+.cfg-help:hover::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: #343a40;
+    color: #f8f9fa;
+    padding: 8px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.4;
+    width: 240px;
+    white-space: normal;
+    z-index: 1000;
+    pointer-events: none;
+}
+
+.cfg-help:hover::before {
+    content: '';
+    position: absolute;
+    bottom: calc(100% + 2px);
+    left: 50%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: #343a40;
+    z-index: 1000;
+    pointer-events: none;
+}
+</style>
+
 <form id="cc-settings-form" autocomplete="off" class="w-100">
     <div class="row">
         <div class="col-md-6">
             <h5>Container Limits</h5>
             <div class="form-group">
-                <label for="cc-setting-max_containers_per_user">Max containers per user</label>
+                <label for="cc-setting-max_containers_per_user">Max containers per user <span class="cfg-help" data-tip="The most containers one person can have running at once. If someone hits this limit, they'll need to stop a container before starting another. Raise it if your competition has many container challenges players work on at the same time.">?</span></label>
                 <input type="number" class="form-control cc-setting-input" id="cc-setting-max_containers_per_user"
                     data-key="max_containers_per_user" min="1">
             </div>
@@ -12,7 +69,7 @@
         <div class="col-md-6">
             <h5>Image Management</h5>
             <div class="form-group">
-                <label for="cc-pull-image-name">Pre-pull image to all contexts</label>
+                <label for="cc-pull-image-name">Pre-pull image to all contexts <span class="cfg-help" data-tip="Downloads a Docker image to your servers ahead of time so containers start instantly during the competition. Without this, the first player to launch a challenge waits for the image to download.">?</span></label>
                 <div class="input-group">
                     <input type="text" class="form-control" id="cc-pull-image-name"
                         placeholder="e.g. nginx:latest">
@@ -29,17 +86,17 @@
         <div class="col-md-6">
             <h5>Performance</h5>
             <div class="form-group">
-                <label for="cc-setting-thread_pool_size">Thread pool size</label>
+                <label for="cc-setting-thread_pool_size">Thread pool size <span class="cfg-help" data-tip="Controls how many background tasks (starting, stopping, checking containers) run in parallel. More threads handle higher traffic but use more memory.">?</span></label>
                 <input type="number" class="form-control cc-setting-input" id="cc-setting-thread_pool_size"
                     data-key="thread_pool_size" min="1" max="32">
             </div>
             <div class="form-group">
-                <label for="cc-setting-max_concurrent_creates">Max concurrent creates per context</label>
+                <label for="cc-setting-max_concurrent_creates">Max concurrent creates per context <span class="cfg-help" data-tip="Limits how many containers can be created at the same time on a single server. Prevents overload when many players start challenges at once. Increase if your servers have resources to spare.">?</span></label>
                 <input type="number" class="form-control cc-setting-input" id="cc-setting-max_concurrent_creates"
                     data-key="max_concurrent_creates" min="1" max="32">
             </div>
             <div class="form-group">
-                <label for="cc-setting-expiration_check_interval">Expiration check interval (seconds)</label>
+                <label for="cc-setting-expiration_check_interval">Expiration check interval (seconds) <span class="cfg-help" data-tip="How often the system checks for containers past their time limit. Lower means expired containers get cleaned up faster but uses slightly more resources.">?</span></label>
                 <input type="number" class="form-control cc-setting-input" id="cc-setting-expiration_check_interval"
                     data-key="expiration_check_interval" min="1">
             </div>
@@ -48,12 +105,12 @@
         <div class="col-md-6">
             <h5>Rate Limiting <span class="badge badge-warning">restart required</span></h5>
             <div class="form-group">
-                <label for="cc-setting-rate_limit_requests">Requests per interval</label>
+                <label for="cc-setting-rate_limit_requests">Requests per interval <span class="cfg-help" data-tip="How many times a user can check container status or connection info within the rate limit window below. Start, stop, and renew have their own stricter limit. Raise this if legitimate players are hitting the limit.">?</span></label>
                 <input type="number" class="form-control cc-setting-input" id="cc-setting-rate_limit_requests"
                     data-key="rate_limit_requests" min="1">
             </div>
             <div class="form-group">
-                <label for="cc-setting-rate_limit_interval">Interval (seconds)</label>
+                <label for="cc-setting-rate_limit_interval">Interval (seconds) <span class="cfg-help" data-tip="The time window for rate limiting, in seconds. Combined with the requests setting above, this defines the throttle. Lower values are stricter, higher values are more lenient.">?</span></label>
                 <input type="number" class="form-control cc-setting-input" id="cc-setting-rate_limit_interval"
                     data-key="rate_limit_interval" min="1">
             </div>

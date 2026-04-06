@@ -3,7 +3,7 @@ from CTFd.utils import get_config
 
 DEFAULTS = {
     "max_containers_per_user": 4,
-    "rate_limit_requests": 120,
+    "rate_limit_requests": 45,
     "rate_limit_interval": 60,
     "expiration_check_interval": 5,
     "thread_pool_size": 4,
