@@ -103,17 +103,17 @@ class Orchestrator:
             if self.container_counts[context_name] > 0:
                 self.container_counts[context_name] -= 1
 
-    def mark_unhealthy(self, context_name):
+    def mark_unhealthy(self, context_name, reason="unreachable"):
         from .event_logger import event_logger
 
         with self.lock:
             self.health[context_name] = False
-        logger.warning(f"context {context_name} marked unhealthy")
+        logger.warning(f"context {context_name} marked unhealthy: {reason}")
         event_logger.log_event(
             "host_unhealthy",
-            f"context {context_name} marked unhealthy",
+            f"context {context_name} marked unhealthy: {reason}",
             level="warning",
-            metadata={"context_name": context_name},
+            metadata={"context_name": context_name, "reason": reason},
         )
 
     def mark_healthy(self, context_name):

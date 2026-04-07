@@ -134,6 +134,20 @@
 		color: #6c757d;
 	}
 
+	.cell-clip {
+		max-width: 400px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.cell-clip-sm {
+		max-width: 200px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
 	.badge-evt-created { background-color: #d4edda; color: #155724; }
 	.badge-evt-killed { background-color: #f8d7da; color: #721c24; }
 	.badge-evt-expired { background-color: #fff3cd; color: #856404; }
@@ -665,6 +679,16 @@
 		return String(text).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 	}
 
+	function userBadges(obj) {
+		let b = '';
+		if (obj.is_admin) b += ' <i class="fas fa-shield-alt" style="color:#adb5bd" title="Admin"></i>';
+		if (obj.is_hidden) b += ' <i class="fas fa-eye-slash" style="color:#adb5bd" title="Hidden"></i>';
+		if (obj.is_banned) b += ' <i class="fas fa-ban" style="color:#adb5bd" title="Banned"></i>';
+		return b;
+	}
+
+	const _userFlags = {};
+
 	const EVENT_LABELS = {
 		'created': 'Created',
 		'killed': 'Killed',
@@ -692,9 +716,14 @@
 	function formatEventDetails(event) {
 		const m = event.metadata || {};
 		switch (event.type) {
-			case 'host_healthy':
 			case 'host_unhealthy':
-				return m.context_name ? escapeHtml(m.context_name) : '';
+				return [m.context_name, m.reason].filter(Boolean).join(': ');
+			case 'host_healthy': {
+				if (!m.context_name) return '';
+				const img = m.image;
+				if (img) return `${escapeHtml(m.context_name)}: image ${escapeHtml(img.id)} (${img.size_mb}MB, built ${escapeHtml(img.created)})`;
+				return `${escapeHtml(m.context_name)}: reachable`;
+			}
 			case 'flag_sharing': {
 				const parts = [];
 				if (m.source_entity) {
@@ -724,8 +753,14 @@
 	function formatEventUser(event) {
 		const m = event.metadata || {};
 		const userId = safeId(event.user_id);
+
+		if (userId && (event.is_admin || event.is_hidden || event.is_banned)) {
+			_userFlags[userId] = {is_admin: event.is_admin, is_hidden: event.is_hidden, is_banned: event.is_banned};
+		}
+		const flags = _userFlags[userId] || event;
+
 		let html = event.username
-			? (userId ? '<a href="/admin/users/' + userId + '">' + escapeHtml(event.username) + '</a>' : escapeHtml(event.username))
+			? (userId ? '<a href="/admin/users/' + userId + '">' + escapeHtml(event.username) + '</a>' + userBadges(flags) : escapeHtml(event.username))
 			: '';
 		if (m.team_name && html) {
 			const teamId = safeId(m.team_id);
@@ -737,7 +772,12 @@
 		return html;
 	}
 
+	const seenEventIds = new Set();
+
 	function addEventToFeed(event) {
+		if (event.id && seenEventIds.has(event.id)) return;
+		if (event.id) seenEventIds.add(event.id);
+
 		const feed = document.getElementById('event-feed');
 		const empty = document.getElementById('event-feed-empty');
 		if (empty) empty.remove();
@@ -745,12 +785,14 @@
 		const row = document.createElement('tr');
 		const badgeClass = EVENT_BADGE_CLASS[event.type] || 'badge-secondary';
 		const label = EVENT_LABELS[event.type] || event.type;
+		const details = formatEventDetails(event);
+		const detailsText = details.replace(/<[^>]*>/g, '');
 
 		row.innerHTML =
 			'<td class="log-time">' + escapeHtml(formatTimestamp(event.timestamp)) + '</td>' +
 			'<td class="log-user">' + formatEventUser(event) + '</td>' +
 			'<td><span class="badge ' + escapeAttr(badgeClass) + '">' + escapeHtml(label) + '</span></td>' +
-			'<td class="log-detail">' + formatEventDetails(event) + '</td>';
+			'<td class="log-detail cell-clip" title="' + escapeAttr(detailsText) + '">' + details + '</td>';
 
 		feed.insertBefore(row, feed.firstChild);
 
@@ -1071,7 +1113,6 @@
 		attachTooltipListeners();
 		startCountdowns();
 		startAutoRefresh();
-		loadRecentEvents();
 		connectEventStream();
 		loadAllCharts();
 

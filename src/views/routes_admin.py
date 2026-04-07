@@ -121,7 +121,6 @@ def route_get_recent_events():
     return jsonify(events=events)
 
 
-
 @containers_bp.route("/api/events/stream", methods=["GET"])
 @admins_only
 def route_events_stream():
