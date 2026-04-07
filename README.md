@@ -166,7 +166,7 @@ Docker integration is split into three files that mirror the remote-desktop plug
 
 ## Thread safety
 
-Thread-local Docker clients use a generation counter that gets bumped whenever context configs change, so stale connections get dropped and recreated transparently. The host manager and orchestrator each have their own lock, both only held during the final state swap, not during I/O like Docker pings
+Docker clients are cached per context in a shared process-level dict protected by the host manager lock. One client per context is reused across all greenlets. When a client hits a connection error it gets closed and evicted so the next call creates a fresh one. Config reloads bump a generation counter that triggers a full close-and-recreate cycle on next access
 
 Uses `threading.BoundedSemaphore` and `threading.Lock` directly, gunicorn's gevent workers monkey-patch the threading module so these cooperate with the event loop without explicit gevent imports
 
@@ -317,3 +317,5 @@ All analytics endpoints accept `?range=24h|7d|30d|all` (default `7d`)
 **Containers piling up on one host**: the load balancer uses weighted least-connections scoring, check that your context weights are set appropriately in the admin UI, a context with weight 2 gets twice the score bonus compared to weight 1
 
 **Host went down during CTF**: the health check runs every 30 seconds and flips unhealthy contexts out of the scheduling pool, when the host comes back the next health check re-enables it automatically, check CTFd logs for `host_unhealthy` and `host_healthy` events or look at the admin event stream
+
+**Too many open files / CTFd container crash**: the default fd limit (1024) can be exhausted by leaked sockets. If you're hitting this, raise the limit by adding `ulimits: { nofile: { soft: 65536, hard: 65536 } }` to the ctfd service in docker-compose.yml

@@ -1,6 +1,6 @@
 import threading
 from unittest.mock import patch, MagicMock
-from docker_host_manager import DockerHostManager, _ThreadLocalClients
+from docker_host_manager import DockerHostManager
 
 
 def make_host_manager(contexts=None):
@@ -27,23 +27,6 @@ def test_semaphore_acquire_release():
 def test_semaphore_missing_context_returns_true():
     hm = make_host_manager()
     assert hm.acquire_semaphore("nonexistent") is True
-
-
-def test_thread_local_clients_are_isolated():
-    tl = _ThreadLocalClients()
-    tl.clients["ctx"] = "main_client"
-
-    result = {}
-
-    def check():
-        result["has_ctx"] = "ctx" in tl.clients
-
-    t = threading.Thread(target=check)
-    t.start()
-    t.join()
-
-    assert tl.clients["ctx"] == "main_client"
-    assert result["has_ctx"] is False
 
 
 def test_get_client_creates_new():
@@ -75,16 +58,17 @@ def test_get_client_unknown_context_raises():
         assert "no client" in str(e)
 
 
-def test_clear_thread_local_client():
+def test_clear_client_closes_and_removes():
     hm = make_host_manager()
 
     mock_client = MagicMock()
     with patch("docker_host_manager.docker.DockerClient", return_value=mock_client):
         hm._get_client("default")
-        assert "default" in hm._thread_local.clients
+        assert "default" in hm._clients
 
-        hm._clear_thread_local_client("default")
-        assert "default" not in hm._thread_local.clients
+        hm._clear_client("default")
+        assert "default" not in hm._clients
+        mock_client.close.assert_called_once()
 
 
 def test_init_semaphores_creates_per_context():
@@ -112,3 +96,4 @@ def test_generation_counter_invalidates_cache():
         c2 = hm._get_client("default")
         assert c2 is mock_client_2
         assert c2 is not c1
+        mock_client_1.close.assert_called_once()
