@@ -319,3 +319,151 @@ All analytics endpoints accept `?range=24h|7d|30d|all` (default `7d`)
 **Host went down during CTF**: the health check runs every 30 seconds and flips unhealthy contexts out of the scheduling pool, when the host comes back the next health check re-enables it automatically, check CTFd logs for `host_unhealthy` and `host_healthy` events or look at the admin event stream
 
 **Too many open files / CTFd container crash**: the default fd limit (1024) can be exhausted by leaked sockets. If you're hitting this, raise the limit by adding `ulimits: { nofile: { soft: 65536, hard: 65536 } }` to the ctfd service in docker-compose.yml
+
+## Compose stacks (multi-container challenges)
+
+Challenges that need multiple containers on a shared network (like ARP spoofing labs with attacker/sender/receiver machines) are supported natively. The plugin creates a per-user Docker bridge network and spins up all containers on it. Users connect to the entry container, companion containers run alongside silently
+
+### challenge.yml format
+
+The existing `image`, `port`, `ctype` fields define the entry container (what the user connects to). Add `services` for companions and `network` for custom subnets
+
+```yaml
+type: container
+ctype: ssh
+image: arp-attacker:latest
+port: 22
+ssh_username: ctf
+ssh_password_mode: auto
+cap_add: NET_ADMIN,NET_RAW
+
+services:
+  sender:
+    image: arp-sender:latest
+    command: /send.sh
+    cap_add: NET_RAW
+    environment:
+      SEND_INTERVAL: "10"
+  receiver:
+    image: arp-receiver:latest
+    command: /recv.sh
+
+network:
+  subnet: 10.10.10.0/24
+  ips:
+    entry: 10.10.10.30
+    sender: 10.10.10.10
+    receiver: 10.10.10.20
+```
+
+When `services` is present the plugin creates a Docker network named `chal-u{uid}-c{cid}-{ts}-net`, starts the entry container with a published port, then starts each companion container on the same network with no published ports. All containers and the network get labeled `ctf.stack_id={uuid}` for cleanup
+
+### Model fields
+
+- `ContainerChallengeModel.services_json` (Text, nullable): JSON string of companion service definitions
+- `ContainerChallengeModel.network_json` (Text, nullable): JSON string with optional subnet and static IPs
+- `ContainerInfoModel.stack_id` (String(64), nullable, indexed): groups containers in a compose stack
+- `ContainerInfoModel.is_entry` (Boolean, default True): marks the user-facing container
+
+### Environment variables
+
+`CHALLENGE_ID`, `TEAM_ID`, `USER_ID`, and `FRESHNESS_TOKEN` are injected into all containers in the stack. `SSH_USERNAME` and `SSH_PASSWORD` are injected into the entry container only. Per-service `environment` blocks from services_json are merged into each companion's env
+
+### Lifecycle
+
+Kill/extend/expire operations work on the entire stack. When the entry container is killed or expires, the plugin finds all `ContainerInfoModel` rows sharing the same `stack_id`, kills all containers via Docker labels, removes the network, and deletes all DB rows. Extending renews the `expires` timestamp on all rows in the stack
+
+### Stats
+
+Active Now, Total Sessions, Peak Concurrent, and Avg Duration all count stacks as one session, not one per container. History rows are deduplicated by `stack_id`
+
+### Dashboard
+
+The Active Containers table shows one row per stack with the entry container's info. The container name column shows `(+N)` next to stack entries indicating companion count. Kill and extend buttons operate on the whole stack. Logs button shows the entry container's stdout/stderr
+
+## SSH auto-password
+
+SSH challenges can auto-generate a random password instead of requiring a hardcoded one
+
+```yaml
+ssh_username: ctf
+ssh_password_mode: auto
+```
+
+On challenge create the plugin generates `secrets.token_urlsafe(8)` and stores it in `ssh_password`. On update, existing passwords are preserved. The password is passed to the container as the `SSH_PASSWORD` environment variable. The container entrypoint reads it and sets it via `chpasswd`
+
+The admin edit form shows the current password and a dropdown to switch between "No password" and "Auto-generate"
+
+## Extra capabilities
+
+The `cap_add` field on the challenge model accepts a comma-separated list of Linux capabilities to add back after `cap_drop=ALL`
+
+```yaml
+cap_add: NET_ADMIN,NET_RAW,SYS_ADMIN
+```
+
+SSH challenges automatically get `SYS_CHROOT,SETUID,SETGID,CHOWN,DAC_OVERRIDE,AUDIT_WRITE` added for sshd privilege separation. The `cap_add` field is additive on top of those
+
+When `cap_add` is set, `no-new-privileges` is skipped so file capabilities (set via `setcap` in the Dockerfile) work for non-root users
+
+## Misconfiguration detection
+
+When a container challenge has no image or port set, or no Docker contexts are available, the user-facing view shows a red banner: "This challenge has a broken configuration. This is on our end, not yours." instead of a broken Start button. The check runs on every `view_info` call before returning "instance not started"
+
+## Container naming
+
+Containers are named `chal-u{user_id}-c{challenge_id}-{timestamp}`. The hostname (what shows in the shell prompt) is set to the image base name, so users see `ctf@arp-attacker:~$` instead of a hash. Companion containers use the service name as hostname
+
+## Random port assignment
+
+Host ports are randomly assigned from the 40000-59999 range with up to 50 retries on collision, instead of Docker's default sequential allocation from the ephemeral range
+
+## Image availability cache
+
+The image matrix scan results are persisted to the database (`ContainerSettingsModel` key `image_cache`) so they survive restarts. The config page loads cached results on page load and only hits Docker when you click Scan. Each cell shows a status icon on hover with SHA, size, and build time. Different SHAs across contexts get an "outdated" badge
+
+The edit/create challenge forms show image availability status below the image field, read from the cache. Shows which contexts have the image without scanning Docker on every page load
+
+## Dashboard summary stats
+
+Six stat cards at the top of the dashboard: Active Now, Total Sessions, Avg Duration, Peak Concurrent, Unique Users, Flag Shares. All refresh every 10 seconds
+
+## Dashboard activity events
+
+| Event | Badge | Details |
+|-------|-------|---------|
+| Requested | blue | host scores and container counts per context |
+| Created | green | context / challenge link |
+| Killed | red | context / challenge link |
+| Expired | yellow | context / challenge link |
+| Renewed | cyan | context / challenge link |
+| Solved | green | challenge link, timer shortened |
+| Error | red | context, image, reason |
+| Admin | yellow | who did what to whose container |
+| Context | cyan | context added/updated/deleted |
+| Host Up | green | context reachable |
+| Host Down | red | context, reason |
+| Flag Share | yellow | submitter, flag owner, challenge |
+
+Admin actions (kill, extend, purge, clear history) show the admin who performed them in the User column
+
+## Flag sharing
+
+The dashboard has a dedicated Flag Sharing Attempts table between Active Containers and Activity, showing Time, Submitted By (with team in parentheses), Flag Belongs To, and Challenge. New detections are pushed in real time via SSE. The Flag Shares stat card shows the total count
+
+The Flag Sharing Over Time chart shows detections binned hourly with a pie breakdown by challenge
+
+## Usage heatmap
+
+Hour-of-day by day-of-week heatmap with GitHub-style green color scale showing when container launches are busiest. Accepts the same time range selector as other charts
+
+## Admin endpoints added
+
+- `POST /containers/api/admin_extend` extend a container by container_id (admin only)
+- `POST /containers/api/clear_history` delete all container history records (admin only)
+- `GET /containers/api/stats/summary` stat card data (active, total, avg duration, peak, users, flag shares)
+- `GET /containers/api/flag_sharing` all flag sharing events from the event log
+- `GET /containers/api/images/cache` cached image matrix without scanning Docker
+- `GET /containers/api/images/status?image=name` per-image availability from cache
+- `GET /containers/api/analytics/flag_sharing` flag sharing timeline data
+- `GET /containers/api/analytics/heatmap` container launches by hour/weekday

@@ -277,6 +277,113 @@ class DockerHostManager:
             self._clear_client(context_name)
             raise
 
+    # -- compose stack operations --
+
+    def create_network(self, context_name, network_name, subnet=None, labels=None):
+        client = self._get_client(context_name)
+        ipam_config = None
+        if subnet:
+            ipam_pool = docker.types.IPAMPool(subnet=subnet)
+            ipam_config = docker.types.IPAMConfig(pool_configs=[ipam_pool])
+        return client.networks.create(
+            network_name,
+            driver="bridge",
+            ipam=ipam_config,
+            labels=labels or {},
+        )
+
+    def run_container_on_network(
+        self,
+        context_name,
+        image,
+        network_name,
+        container_name,
+        command,
+        environment,
+        ip_address=None,
+        publish_port=None,
+        hostname=None,
+        internal_port=None,
+        **kwargs,
+    ):
+        import random
+
+        client = self._get_client(context_name)
+
+        # skip no-new-privileges when cap_add is set so file capabilities work
+        sec_opt = [] if kwargs.get("cap_add") else ["no-new-privileges:true"]
+
+        if publish_port and internal_port:
+            last_err = None
+            for _ in range(50):
+                host_port = random.randint(40000, 59999)
+                try:
+                    container = client.containers.run(
+                        image,
+                        name=container_name,
+                        hostname=hostname or container_name,
+                        command=command or None,
+                        detach=True,
+                        auto_remove=True,
+                        cap_drop=["ALL"],
+                        security_opt=sec_opt,
+                        pids_limit=256,
+                        environment=environment,
+                        network=network_name,
+                        ports={str(internal_port): host_port},
+                        **kwargs,
+                    )
+                    if ip_address:
+                        # reconnect with static IP (initial connect used DHCP)
+                        network = client.networks.get(network_name)
+                        network.disconnect(container)
+                        network.connect(container, ipv4_address=ip_address)
+                    return container, host_port
+                except docker.errors.APIError as e:
+                    if "port is already allocated" in str(e) or "address already in use" in str(e):
+                        last_err = e
+                        continue
+                    raise
+            raise docker.errors.DockerException(f"failed to find available port: {last_err}")
+        else:
+            container = client.containers.run(
+                image,
+                name=container_name,
+                hostname=container_name,
+                command=command or None,
+                detach=True,
+                auto_remove=True,
+                cap_drop=["ALL"],
+                security_opt=sec_opt,
+                pids_limit=256,
+                environment=environment,
+                network=network_name,
+                **kwargs,
+            )
+            if ip_address:
+                network = client.networks.get(network_name)
+                network.disconnect(container)
+                network.connect(container, ipv4_address=ip_address)
+            return container, None
+
+    def kill_stack(self, context_name, stack_id):
+        client = self._get_client(context_name)
+        killed = 0
+        containers = client.containers.list(filters={"label": f"ctf.stack_id={stack_id}"}, all=True)
+        for c in containers:
+            try:
+                c.kill()
+                killed += 1
+            except (docker.errors.NotFound, docker.errors.APIError):
+                pass
+        networks = client.networks.list(filters={"label": f"ctf.stack_id={stack_id}"})
+        for n in networks:
+            try:
+                n.remove()
+            except docker.errors.APIError:
+                pass
+        return killed
+
     def get_container_logs(self, context_name, container_id, tail=200):
         try:
             client = self._get_client(context_name)

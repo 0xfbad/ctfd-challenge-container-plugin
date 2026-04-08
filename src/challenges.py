@@ -171,6 +171,16 @@ class ContainerChallenge(BaseChallenge):
 
             if match:
                 _shorten_after_solve(challenge.id, xid, team_mode)
+                event_logger.log_event(
+                    "solved",
+                    f"user '{user.name}' solved '{challenge.name}', timer shortened",
+                    user_id=user.id,
+                    username=user.name,
+                    metadata={
+                        "challenge_id": challenge.id,
+                        "challenge_name": challenge.name,
+                    },
+                )
                 return True, "correct"
 
             submitted_token = extract_token(template, submission)
@@ -220,6 +230,8 @@ class ContainerChallenge(BaseChallenge):
             "max_memory_mb": challenge.max_memory_mb,
             "max_cpu": challenge.max_cpu,
             "cap_add": challenge.cap_add,
+            "services_json": challenge.services_json,
+            "network_json": challenge.network_json,
             "description": challenge.description,
             "connection_info": challenge.connection_info,
             "category": challenge.category,

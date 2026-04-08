@@ -21,7 +21,8 @@ CTFd._internal.challenge.submit = function (preview) {
             return response;
         }
         // re-fetch container info to pick up post-solve expiry change
-        if (response.data && response.data.status === "correct") {
+        var status = (response.data && response.data.status) || (response.data && response.data.data && response.data.data.status);
+        if (status === "correct" || status === "already_solved") {
             setTimeout(function() {
                 fetch("/containers/api/view_info", {
                     method: "POST",
@@ -33,7 +34,7 @@ CTFd._internal.challenge.submit = function (preview) {
                     if (data.expires) startTimer(data.expires);
                 })
                 .catch(function() {});
-            }, 500);
+            }, 1000);
         }
         return response;
     });

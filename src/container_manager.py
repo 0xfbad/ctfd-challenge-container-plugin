@@ -249,9 +249,12 @@ class ContainerManager:
             **(extra_env or {}),
         }
 
-        container_name = f"ctf-c{chal_id}-u{user_id}-{int(time.time())}"
+        ts = int(time.time())
+        container_name = f"chal-u{user_id}-c{chal_id}-{ts}"
+        # hostname is what shows in the shell prompt, use image base name
+        container_hostname = image.split(":")[0] if image else container_name
         kwargs["name"] = container_name
-        kwargs["hostname"] = container_name
+        kwargs["hostname"] = container_hostname
 
         # ssh containers need extra capabilities for sshd privilege separation
         caps = []
@@ -334,6 +337,132 @@ class ContainerManager:
 
         raise ContainerException(f"failed to create container on any context: {last_error}")
 
+    # -- compose stack creation --
+
+    def create_stack(
+        self,
+        chal_id,
+        team_id,
+        user_id,
+        image,
+        port,
+        command,
+        volumes,
+        services_json,
+        network_json,
+        max_memory_mb=None,
+        max_cpu=None,
+        context_name=None,
+        extra_env=None,
+        ctype=None,
+        cap_add=None,
+    ):
+        import uuid
+
+        self._ensure_connected()
+
+        services = json.loads(services_json) if services_json else {}
+        network_cfg = json.loads(network_json) if network_json else {}
+
+        stack_id = uuid.uuid4().hex
+        ts = int(time.time())
+        base_name = f"chal-u{user_id}-c{chal_id}-{ts}"
+        net_name = f"{base_name}-net"
+
+        # pick context
+        if context_name:
+            if context_name not in self.host_manager._context_configs:
+                raise ContainerException(f"docker context '{context_name}' not available")
+        else:
+            context_name = self.orchestrator.select_and_reserve()
+            if context_name is None:
+                raise ContainerException("no healthy context available")
+
+        self.orchestrator.reserve_slot(context_name)
+        stack_labels = {"ctf.stack_id": stack_id}
+
+        base_env = {
+            "CHALLENGE_ID": str(chal_id),
+            "TEAM_ID": str(team_id),
+            "USER_ID": str(user_id),
+            **(extra_env or {}),
+        }
+
+        try:
+            subnet = network_cfg.get("subnet")
+            ips = network_cfg.get("ips", {})
+
+            self.host_manager.create_network(context_name, net_name, subnet=subnet, labels=stack_labels)
+
+            # build entry container caps
+            entry_caps = []
+            if ctype == "ssh":
+                entry_caps.extend(["SYS_CHROOT", "SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "AUDIT_WRITE"])
+            if cap_add:
+                entry_caps.extend([c.strip() for c in cap_add.split(",") if c.strip()])
+
+            entry_kwargs: dict[str, Any] = {"labels": stack_labels}
+            if entry_caps:
+                entry_kwargs["cap_add"] = list(set(entry_caps))
+            if max_memory_mb:
+                entry_kwargs["mem_limit"] = f"{int(max_memory_mb)}m"
+            if max_cpu:
+                entry_kwargs["cpu_quota"] = int(float(max_cpu) * 100000)
+                entry_kwargs["cpu_period"] = 100000
+
+            entry_hostname = image.split(":")[0] if image else base_name
+            entry_container, host_port = self.host_manager.run_container_on_network(
+                context_name,
+                image,
+                net_name,
+                base_name,
+                command,
+                base_env,
+                ip_address=ips.get("entry"),
+                publish_port=True,
+                hostname=entry_hostname,
+                internal_port=port,
+                **entry_kwargs,
+            )
+
+            # create companion containers
+            companions = []
+            for svc_name, svc_cfg in services.items():
+                svc_env = dict(base_env)
+                svc_env.update(svc_cfg.get("environment", {}))
+
+                svc_caps = []
+                if svc_cfg.get("cap_add"):
+                    svc_caps = [c.strip() for c in svc_cfg["cap_add"].split(",") if c.strip()]
+
+                svc_kwargs: dict[str, Any] = {"labels": stack_labels}
+                if svc_caps:
+                    svc_kwargs["cap_add"] = svc_caps
+
+                svc_container, _ = self.host_manager.run_container_on_network(
+                    context_name,
+                    svc_cfg["image"],
+                    net_name,
+                    f"{base_name}-{svc_name}",
+                    svc_cfg.get("command"),
+                    svc_env,
+                    ip_address=ips.get(svc_name),
+                    hostname=svc_name,
+                    **svc_kwargs,
+                )
+                companions.append((svc_name, svc_container))
+
+            return entry_container, host_port, companions, stack_id, context_name
+
+        except Exception:
+            # clean up partial stack
+            try:
+                self.host_manager.kill_stack(context_name, stack_id)
+            except Exception:
+                pass
+            self.orchestrator.release_slot(context_name)
+            raise
+
     # -- image operations --
 
     def get_images(self) -> list:
@@ -414,44 +543,58 @@ class ContainerManager:
         with app.app_context():
             from .event_logger import event_logger
 
-            containers = ContainerInfoModel.query.all()
-            killed = []
+            # only check entry containers (or standalone containers without stack_id)
+            entries = ContainerInfoModel.query.filter(
+                db.or_(ContainerInfoModel.is_entry == True, ContainerInfoModel.stack_id.is_(None))  # noqa: E712
+            ).all()
+            killed_rows = []
+            released_stacks = set()
 
-            for container in containers:
+            for container in entries:
                 if container.expires == 0:
                     continue
+                if container.expires >= int(time.time()):
+                    continue
 
-                if container.expires < int(time.time()):
-                    try:
+                try:
+                    if container.stack_id:
+                        self.host_manager.kill_stack(container.docker_context, container.stack_id)
+                    else:
                         self.kill_container(container.container_id, container.docker_context)
-                    except ContainerException:
-                        logger.warning("expiry job: docker is not initialized, please check your settings")
-                        continue
+                except ContainerException:
+                    logger.warning("expiry job: docker is not initialized")
+                    continue
 
-                    self.release_slot(container.docker_context)
+                self.release_slot(container.docker_context)
 
-                    event_logger.log_event(
-                        "expired",
-                        f"container expired for {container.challenge.name if container.challenge else 'unknown'}",
-                        user_id=container.user_id,
-                        username=container.user.name if container.user else None,
-                        metadata={
-                            "container_id": container.container_id,
-                            "challenge_id": container.challenge_id,
-                            "challenge_name": container.challenge.name if container.challenge else None,
-                            "team_id": container.team_id,
-                            "team_name": container.team.name if container.team else None,
-                        },
-                    )
+                event_logger.log_event(
+                    "expired",
+                    f"container expired for {container.challenge.name if container.challenge else 'unknown'}",
+                    user_id=container.user_id,
+                    username=container.user.name if container.user else None,
+                    metadata={
+                        "container_id": container.container_id,
+                        "challenge_id": container.challenge_id,
+                        "challenge_name": container.challenge.name if container.challenge else None,
+                        "team_id": container.team_id,
+                        "team_name": container.team.name if container.team else None,
+                    },
+                )
 
-                    killed.append(container)
+                # collect all rows to delete (entry + companions)
+                if container.stack_id and container.stack_id not in released_stacks:
+                    siblings = ContainerInfoModel.query.filter_by(stack_id=container.stack_id).all()
+                    killed_rows.extend(siblings)
+                    released_stacks.add(container.stack_id)
+                else:
+                    killed_rows.append(container)
 
-            for container in killed:
-                history = ContainerHistoryModel.query.filter_by(container_id=container.container_id).first()
+            for row in killed_rows:
+                history = ContainerHistoryModel.query.filter_by(container_id=row.container_id).first()
                 if history:
                     history.stopped_at = time.time()
                     if not history.reason:
                         history.reason = "expired"
-                db.session.delete(container)
-            if killed:
+                db.session.delete(row)
+            if killed_rows:
                 db.session.commit()

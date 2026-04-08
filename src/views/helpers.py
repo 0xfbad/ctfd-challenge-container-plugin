@@ -58,6 +58,7 @@ def log_container_event(
     challenge_name=None,
     team_id=None,
     team_name=None,
+    docker_context=None,
 ):
     event_logger.log_event(
         event_type=event_type,
@@ -70,6 +71,7 @@ def log_container_event(
             "challenge_name": challenge_name,
             "team_id": team_id,
             "team_name": team_name,
+            "docker_context": docker_context,
         },
     )
 
@@ -127,47 +129,58 @@ def kill_container(container_id):
     container_manager = current_app.container_manager
     container = ContainerInfoModel.query.filter_by(container_id=container_id).first()
 
+    if not container:
+        return {"error": "container not found"}
+
+    context_name = container.docker_context
+    stack_id = container.stack_id
+
     try:
-        context_name = container.docker_context if container else None
-        container_manager.kill_container(container_id, context_name)
+        if stack_id:
+            container_manager.host_manager.kill_stack(context_name, stack_id)
+        else:
+            container_manager.kill_container(container_id, context_name)
     except ContainerException:
         return {"error": "docker is not initialized, please check your settings"}
     except Exception as e:
         logger.error(f"failed to kill container {container_id}: {e}")
         return {"error": "failed to stop container, please try again"}
 
-    if container:
-        try:
-            container_manager.release_slot(container.docker_context)
+    try:
+        container_manager.release_slot(context_name)
 
-            challenge_id = container.challenge_id
-            challenge_name = container.challenge.name if container.challenge else None
-            user_id = container.user_id
-            user_name = container.user.name if container.user else None
-            team_id = container.team_id
-            team_name = container.team.name if container.team else None
+        challenge_name = container.challenge.name if container.challenge else None
+        user_name = container.user.name if container.user else None
+        team_name = container.team.name if container.team else None
 
-            log_container_event(
-                event_type="killed",
-                container_id=container_id,
-                challenge_id=challenge_id,
-                challenge_name=challenge_name,
-                user_id=user_id,
-                user_name=user_name,
-                team_id=team_id,
-                team_name=team_name,
-                message=f"container killed for {challenge_name}",
-            )
+        log_container_event(
+            event_type="killed",
+            container_id=container_id,
+            challenge_id=container.challenge_id,
+            challenge_name=challenge_name,
+            user_id=container.user_id,
+            user_name=user_name,
+            team_id=container.team_id,
+            team_name=team_name,
+            docker_context=context_name,
+            message=f"container killed for {challenge_name}",
+        )
 
+        # delete all rows in the stack (or just this one for standalone)
+        if stack_id:
+            siblings = ContainerInfoModel.query.filter_by(stack_id=stack_id).all()
+            for s in siblings:
+                record_history_stop(s.container_id, "stopped")
+                db.session.delete(s)
+        else:
             record_history_stop(container_id, "stopped")
             db.session.delete(container)
-            db.session.commit()
-            return {"success": "container killed"}
-        except Exception as e:
-            logger.error(f"failed to clean up container {container_id}: {e}")
-            return {"error": "failed to stop container, please try again"}
-    else:
-        return {"error": "container not found"}
+
+        db.session.commit()
+        return {"success": "container killed"}
+    except Exception as e:
+        logger.error(f"failed to clean up container {container_id}: {e}")
+        return {"error": "failed to stop container, please try again"}
 
 
 def renew_container(chal_id, xid, is_team):
@@ -176,7 +189,7 @@ def renew_container(chal_id, xid, is_team):
     if challenge is None:
         return {"error": "challenge not found"}, 400
 
-    filter_args = {"challenge_id": challenge.id}
+    filter_args = {"challenge_id": challenge.id, "is_entry": True}
     filter_args["team_id" if is_team else "user_id"] = xid
     running_container = ContainerInfoModel.query.filter_by(**filter_args).first()
 
@@ -185,7 +198,11 @@ def renew_container(chal_id, xid, is_team):
 
     try:
         expiration_seconds = (challenge.expiration_minutes or 0) * 60
-        running_container.expires = int(time.time() + expiration_seconds) if expiration_seconds > 0 else 0
+        new_expires = int(time.time() + expiration_seconds) if expiration_seconds > 0 else 0
+        running_container.expires = new_expires
+        # renew all siblings in the stack
+        if running_container.stack_id:
+            ContainerInfoModel.query.filter_by(stack_id=running_container.stack_id).update({"expires": new_expires})
         db.session.commit()
     except Exception:
         return {"error": "database error occurred, please try again"}
@@ -272,68 +289,185 @@ def _create_container_inner(chal_id, xid, uid, is_team):
 
     extra_env = extra_env or None
 
-    try:
-        created_container, context_name = container_manager.create_container(
-            chal_id,
-            xid,
-            uid,
-            challenge.image,
-            challenge.port,
-            challenge.command,
-            challenge.volumes,
-            challenge.max_memory_mb,
-            challenge.max_cpu,
-            challenge.docker_context,
-            extra_env=extra_env,
-            ctype=challenge.ctype,
-            cap_add=challenge.cap_add,
-        )
-    except ContainerException as err:
-        return {"error": sanitize_container_error(err)}
-
-    port = container_manager.get_container_port(created_container.id, context_name)
-
-    if port is None:
-        return {"status": "error", "error": "could not get port"}
-
     expiration_seconds = (challenge.expiration_minutes or 0) * 60
     expires = int(time.time() + expiration_seconds) if expiration_seconds > 0 else 0
+    now = int(time.time())
 
-    new_container = ContainerInfoModel(
-        container_id=created_container.id,
-        challenge_id=challenge.id,
-        team_id=xid if is_team else None,
+    # log container request with orchestration info
+    host_status = container_manager.orchestrator.get_status()
+    event_logger.log_event(
+        "container_requested",
+        f"container requested for {challenge.name}",
         user_id=uid,
-        port=port,
-        timestamp=int(time.time()),
-        expires=expires,
-        docker_context=context_name,
+        metadata={
+            "challenge_id": challenge.id,
+            "challenge_name": challenge.name,
+            "is_stack": bool(challenge.services_json),
+            "hosts": {
+                h["context_name"]: {
+                    "containers": h["active_containers"],
+                    "weight": h["weight"],
+                    "healthy": h["healthy"],
+                    "score": round(h["weight"] / (h["active_containers"] + 1), 2) if h["healthy"] else 0,
+                }
+                for h in host_status
+            },
+        },
     )
-    db.session.add(new_container)
-    try:
-        db.session.commit()
-    except Exception:
-        db.session.rollback()
-        # kill the orphaned docker container best-effort
+
+    # compose stack path
+    if challenge.services_json:
         try:
-            container_manager.kill_container(created_container.id, context_name)
-        except Exception:
-            pass
-        return {"error": "database error, container has been cleaned up"}, 500
+            entry_container, host_port, companions, stack_id, context_name = container_manager.create_stack(
+                chal_id,
+                xid,
+                uid,
+                challenge.image,
+                challenge.port,
+                challenge.command,
+                challenge.volumes,
+                challenge.services_json,
+                challenge.network_json,
+                challenge.max_memory_mb,
+                challenge.max_cpu,
+                challenge.docker_context,
+                extra_env=extra_env,
+                ctype=challenge.ctype,
+                cap_add=challenge.cap_add,
+            )
+        except ContainerException as err:
+            return {"error": sanitize_container_error(err)}
 
-    history = ContainerHistoryModel(
-        container_id=created_container.id,
-        challenge_id=challenge.id,
-        user_id=uid,
-        team_id=xid if is_team else None,
-        docker_context=context_name,
-        created_at=time.time(),
-    )
-    db.session.add(history)
-    try:
-        db.session.commit()
-    except Exception:
-        db.session.rollback()
+        if host_port is None:
+            return {"status": "error", "error": "could not get port"}
+
+        # store entry container
+        entry_row = ContainerInfoModel(
+            container_id=entry_container.id,
+            challenge_id=challenge.id,
+            team_id=xid if is_team else None,
+            user_id=uid,
+            port=host_port,
+            timestamp=now,
+            expires=expires,
+            docker_context=context_name,
+            stack_id=stack_id,
+            is_entry=True,
+        )
+        db.session.add(entry_row)
+        db.session.add(
+            ContainerHistoryModel(
+                container_id=entry_container.id,
+                challenge_id=challenge.id,
+                user_id=uid,
+                team_id=xid if is_team else None,
+                docker_context=context_name,
+                stack_id=stack_id,
+                created_at=time.time(),
+            )
+        )
+
+        # store companion containers
+        for svc_name, svc_container in companions:
+            db.session.add(
+                ContainerInfoModel(
+                    container_id=svc_container.id,
+                    challenge_id=challenge.id,
+                    team_id=xid if is_team else None,
+                    user_id=uid,
+                    port=0,
+                    timestamp=now,
+                    expires=expires,
+                    docker_context=context_name,
+                    stack_id=stack_id,
+                    is_entry=False,
+                )
+            )
+            db.session.add(
+                ContainerHistoryModel(
+                    container_id=svc_container.id,
+                    challenge_id=challenge.id,
+                    user_id=uid,
+                    team_id=xid if is_team else None,
+                    docker_context=context_name,
+                    stack_id=stack_id,
+                    created_at=time.time(),
+                )
+            )
+
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            try:
+                container_manager.host_manager.kill_stack(context_name, stack_id)
+            except Exception:
+                pass
+            return {"error": "database error, stack has been cleaned up"}, 500
+
+        new_container = entry_row
+        created_container = entry_container
+
+    # single container path
+    else:
+        try:
+            created_container, context_name = container_manager.create_container(
+                chal_id,
+                xid,
+                uid,
+                challenge.image,
+                challenge.port,
+                challenge.command,
+                challenge.volumes,
+                challenge.max_memory_mb,
+                challenge.max_cpu,
+                challenge.docker_context,
+                extra_env=extra_env,
+                ctype=challenge.ctype,
+                cap_add=challenge.cap_add,
+            )
+        except ContainerException as err:
+            return {"error": sanitize_container_error(err)}
+
+        port = container_manager.get_container_port(created_container.id, context_name)
+        if port is None:
+            return {"status": "error", "error": "could not get port"}
+
+        new_container = ContainerInfoModel(
+            container_id=created_container.id,
+            challenge_id=challenge.id,
+            team_id=xid if is_team else None,
+            user_id=uid,
+            port=port,
+            timestamp=now,
+            expires=expires,
+            docker_context=context_name,
+        )
+        db.session.add(new_container)
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            try:
+                container_manager.kill_container(created_container.id, context_name)
+            except Exception:
+                pass
+            return {"error": "database error, container has been cleaned up"}, 500
+
+        db.session.add(
+            ContainerHistoryModel(
+                container_id=created_container.id,
+                challenge_id=challenge.id,
+                user_id=uid,
+                team_id=xid if is_team else None,
+                docker_context=context_name,
+                created_at=time.time(),
+            )
+        )
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
 
     user_id = new_container.user_id
     user_name = new_container.user.name if new_container.user else None
@@ -349,6 +483,7 @@ def _create_container_inner(chal_id, xid, uid, is_team):
         user_name=user_name,
         team_id=team_id,
         team_name=team_name,
+        docker_context=context_name,
         message=f"container created for {challenge.name}",
     )
 
@@ -363,9 +498,17 @@ def view_container_info(chal_id, xid, is_team):
     if challenge is None:
         return {"error": "challenge not found"}, 400
 
-    filter_args = {"challenge_id": challenge.id}
+    filter_args = {"challenge_id": challenge.id, "is_entry": True}
     filter_args["team_id" if is_team else "user_id"] = xid
     running_container = ContainerInfoModel.query.filter_by(**filter_args).first()
+
+    # fallback for legacy rows without is_entry
+    if not running_container:
+        legacy_args = {"challenge_id": challenge.id}
+        legacy_args["team_id" if is_team else "user_id"] = xid
+        running_container = (
+            ContainerInfoModel.query.filter_by(**legacy_args).filter(ContainerInfoModel.stack_id.is_(None)).first()
+        )
 
     if running_container:
         try:
@@ -375,7 +518,13 @@ def view_container_info(chal_id, xid, is_team):
                 )
                 return response
             else:
-                db.session.delete(running_container)
+                # clean up stale rows
+                if running_container.stack_id:
+                    stale = ContainerInfoModel.query.filter_by(stack_id=running_container.stack_id).all()
+                    for s in stale:
+                        db.session.delete(s)
+                else:
+                    db.session.delete(running_container)
                 db.session.commit()
                 return {"status": "instance not started"}
         except ContainerException:

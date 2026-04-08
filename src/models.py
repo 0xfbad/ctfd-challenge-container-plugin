@@ -18,6 +18,8 @@ class ContainerChallengeModel(Challenges):
     max_cpu = db.Column(db.Float, nullable=True)
     docker_context = db.Column(db.String(512), nullable=True)
     cap_add = db.Column(db.Text, default="")
+    services_json = db.Column(db.Text, nullable=True)
+    network_json = db.Column(db.Text, nullable=True)
 
 
 class ContainerInfoModel(db.Model):
@@ -30,6 +32,8 @@ class ContainerInfoModel(db.Model):
     timestamp = db.Column(db.Integer)
     expires = db.Column(db.Integer)
     docker_context = db.Column(db.String(512), nullable=True)
+    stack_id = db.Column(db.String(64), nullable=True, index=True)
+    is_entry = db.Column(db.Boolean, default=True)
     team = relationship("Teams", foreign_keys=[team_id])
     user = relationship("Users", foreign_keys=[user_id])
     challenge = relationship(ContainerChallengeModel, foreign_keys=[challenge_id])
@@ -49,6 +53,7 @@ class ContainerHistoryModel(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     team_id = db.Column(db.Integer, db.ForeignKey("teams.id", ondelete="SET NULL"), nullable=True)
     docker_context = db.Column(db.String(512), nullable=True)
+    stack_id = db.Column(db.String(64), nullable=True)
     created_at = db.Column(db.Float)
     stopped_at = db.Column(db.Float, nullable=True)
     reason = db.Column(db.String(32), nullable=True)

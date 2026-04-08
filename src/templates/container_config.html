@@ -84,6 +84,15 @@
     <p class="text-muted text-center small">Click Scan to check which challenge images are available on each context</p>
 </div>
 
+<div class="d-flex justify-content-between align-items-center mb-3 mt-4">
+    <h5 class="mb-0">Danger Zone</h5>
+</div>
+<div>
+    <button type="button" class="btn btn-sm btn-outline-danger" id="cc-clear-history-btn">
+        <i class="fas fa-eraser"></i> Clear Container History
+    </button>
+</div>
+
 <!-- edit context modal -->
 <div class="modal fade" id="ccEditCtxModal" tabindex="-1">
     <div class="modal-dialog">
@@ -464,6 +473,14 @@
     // ---- image matrix ----
 
     document.getElementById('cc-scan-btn').addEventListener('click', function() { scanImages(); });
+
+    document.getElementById('cc-clear-history-btn').addEventListener('click', function() {
+        if (!confirm('Clear all container history? This resets stats and charts.')) return;
+        ccFetch('/api/clear_history', { method: 'POST' }).then(function(data) {
+            if (data.success) CTFd.ui.ezq.ezAlert({ title: 'Success', body: data.success, button: 'OK' });
+            else CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Failed', button: 'OK' });
+        });
+    });
 
     // load cached results on page load, only hit docker on Scan click
     loadCachedImages();

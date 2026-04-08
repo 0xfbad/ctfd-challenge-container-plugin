@@ -169,6 +169,28 @@
         </label>
         <input type="text" class="form-control" name="cap_add" placeholder="Leave blank for defaults">
     </div>
+
+    <div class="form-group">
+        <label>
+            Companion Services (JSON)<br>
+            <small class="form-text text-muted">
+                Companion containers for multi-service challenges. Leave blank for single-container.
+            </small>
+        </label>
+        <textarea class="form-control" name="services_json" rows="3"
+            placeholder='{"sender": {"image": "sender:latest", "command": "/send.sh"}}'></textarea>
+    </div>
+
+    <div class="form-group">
+        <label>
+            Network Config (JSON)<br>
+            <small class="form-text text-muted">
+                Custom subnet and static IPs. Leave blank for Docker defaults.
+            </small>
+        </label>
+        <textarea class="form-control" name="network_json" rows="2"
+            placeholder='{"subnet": "10.10.10.0/24", "ips": {"entry": "10.10.10.30", "sender": "10.10.10.10"}}'></textarea>
+    </div>
 </div>
 
 <script src="/plugins/challenge-containers/src/assets/challenge-form-utils.js"></script>

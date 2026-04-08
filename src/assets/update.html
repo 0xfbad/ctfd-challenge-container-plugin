@@ -182,6 +182,26 @@
         </label>
         <input type="text" class="form-control" name="cap_add" value="{{ challenge.cap_add | default('', true) }}" placeholder="Leave blank for defaults">
     </div>
+
+    <div class="form-group">
+        <label>
+            Companion Services (JSON)<br>
+            <small class="form-text text-muted">
+                Companion containers for multi-service challenges. Leave blank for single-container.
+            </small>
+        </label>
+        <textarea class="form-control" name="services_json" rows="3">{{ challenge.services_json | default('', true) }}</textarea>
+    </div>
+
+    <div class="form-group">
+        <label>
+            Network Config (JSON)<br>
+            <small class="form-text text-muted">
+                Custom subnet and static IPs. Leave blank for Docker defaults.
+            </small>
+        </label>
+        <textarea class="form-control" name="network_json" rows="2">{{ challenge.network_json | default('', true) }}</textarea>
+    </div>
 </div>
 
 <script src="/plugins/challenge-containers/src/assets/challenge-form-utils.js"></script>

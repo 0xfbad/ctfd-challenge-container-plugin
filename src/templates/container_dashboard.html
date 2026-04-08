@@ -158,32 +158,33 @@
 	.badge-evt-error { background-color: #f8d7da; color: #721c24; }
 	.badge-evt-admin { background-color: #fff3cd; color: #856404; }
 	.badge-evt-context { background-color: #d1ecf1; color: #0c5460; }
+	.badge-evt-requested { background-color: #cce5ff; color: #004085; }
 
 	.action-buttons {
+		white-space: nowrap;
 		display: flex;
 		gap: 4px;
-		flex-wrap: nowrap;
 	}
 
 	.action-buttons .btn {
-		width: 30px;
-		height: 30px;
+		width: 32px;
+		height: 32px;
 		padding: 0;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		background: transparent;
 		border: none;
-		border-radius: 3px;
-		cursor: pointer;
-		font-size: 13px;
-		transition: background 0.15s;
+		background: transparent;
 	}
 
-	.action-buttons .btn:hover { background: rgba(128, 128, 128, 0.15); }
-	.action-buttons .btn-log { color: #6c757d; }
-	.action-buttons .btn-kill { color: #dc3545; }
-	.action-buttons .btn-kill:hover { background: rgba(220, 53, 69, 0.1); }
+	.action-buttons .btn:hover {
+		background-color: rgba(0, 0, 0, 0.05);
+		border-radius: 3px;
+	}
+
+	.icon-monitor { color: #6c757d; }
+	.icon-kill { color: #dc3545; }
+	.icon-extend { color: #ffc107; }
 
 	.container-id-link {
 		cursor: default;
@@ -193,8 +194,7 @@
 
 	.time-remaining {
 		font-family: monospace;
-		font-weight: 600;
-		font-size: 12px;
+		font-weight: 500;
 	}
 
 	.flag-sharing-table .badge {
@@ -218,6 +218,10 @@
 	.countdown-expired { color: #dc3545; }
 	.countdown-warning { color: #ffc107; }
 	.countdown-ok { color: #28a745; }
+
+	.status-active { color: #28a745; font-weight: bold; }
+	.status-warning { color: #ffc107; font-weight: bold; }
+	.status-expired { color: #dc3545; font-weight: bold; }
 
 	.chart-container {
 		width: 100%;
@@ -301,7 +305,7 @@
 			<div class="card">
 				<div class="card-header">
 					<h3 class="card-title">Active Containers <span class="cfg-help" data-tip="Every container running right now across all Docker contexts. Hover a container ID to see its connection command. If a container looks stuck, check its logs before killing it.">?</span></h3>
-					<button class="btn btn-danger" id="container-purge-btn" onclick="purgeContainers()">
+					<button class="btn btn-danger btn-sm" id="container-purge-btn" onclick="purgeContainers()">
 						<i class="fas fa-trash"></i> Purge All
 					</button>
 				</div>
@@ -312,10 +316,11 @@
 								<tr>
 									<th>User</th>
 									<th>Challenge</th>
-									<th>Context</th>
 									<th>Container</th>
-									<th>Time</th>
-									<th></th>
+									<th>Context</th>
+									<th>Time Remaining</th>
+									<th>Status</th>
+									<th>Actions</th>
 								</tr>
 							</thead>
 							<tbody id="container-table-body">
@@ -586,29 +591,52 @@
 		countdownInterval = setInterval(updateCountdowns, 1000);
 	}
 
+	function buildConnectionCmd(container) {
+		if (container.connect_type === 'tcp') return 'nc ' + container.hostname + ' ' + container.port;
+		if (container.connect_type === 'ssh') {
+			let cmd = 'ssh ' + (container.ssh_username || '') + '@' + container.hostname + ' -p ' + container.port;
+			if (container.ssh_password) cmd += ' (pass: ' + container.ssh_password + ')';
+			return cmd;
+		}
+		return 'http://' + container.hostname + ':' + container.port;
+	}
+
 	function createContainerRow(container) {
 		const safeUser = escapeHtml(container.user || '');
 		const safeChallenge = escapeHtml(container.challenge || '');
 		const cidJs = container.container_id.replace(/[^a-f0-9]/gi, '');
-		const cidShort = escapeHtml(container.container_id.substring(0, 12));
+		const containerName = escapeHtml(container.container_name || container.container_id.substring(0, 12));
 		const ctx = escapeHtml(container.docker_context || 'local');
+		const companionBadge = container.companion_count > 0
+			? ` <small class="text-muted">(+${container.companion_count})</small>` : '';
+		const connCmd = escapeAttr(buildConnectionCmd(container));
+
+		const now = Math.floor(Date.now() / 1000);
+		const remaining = container.expires - now;
+		const statusClass = remaining <= 0 ? 'status-expired' : remaining < 300 ? 'status-warning' : 'status-active';
+		const statusText = remaining <= 0 ? 'EXPIRED' : remaining < 300 ? 'EXPIRING' : 'ACTIVE';
 
 		return `
 			<tr data-container-id="${escapeAttr(container.container_id)}" data-expires="${container.expires}">
 				<td><a href="/admin/users/${safeId(container.user_id)}">${safeUser}</a></td>
 				<td><a href="/admin/challenges/${safeId(container.challenge_id)}">${safeChallenge}</a></td>
+				<td class="cell-clip-sm" title="${escapeAttr(container.container_id)}"><code>${containerName}</code>${companionBadge}</td>
 				<td>${ctx}</td>
-				<td><code class="container-id-link" title="${escapeAttr(container.container_id)}">${cidShort}</code></td>
 				<td class="countdown-timer time-remaining" data-expires="${container.expires}"></td>
-				<td>
-					<div class="action-buttons">
-						<button class="btn btn-log" onclick="showContainerLogs('${cidJs}')" title="View logs">
-							<i class="fas fa-terminal"></i>
-						</button>
-						<button class="btn btn-kill" onclick="killContainer('${cidJs}')" title="Kill container">
-							<i class="fas fa-times"></i>
-						</button>
-					</div>
+				<td><span class="${statusClass}">${statusText}</span></td>
+				<td class="action-buttons">
+					<button class="btn" onclick="showContainerLogs('${cidJs}')" title="View logs">
+						<i class="fas fa-terminal icon-monitor"></i>
+					</button>
+					<button class="btn" onclick="killContainer('${cidJs}')" title="Kill">
+						<i class="fas fa-times icon-kill"></i>
+					</button>
+					<button class="btn" onclick="adminExtend('${cidJs}')" title="Extend">
+						<i class="fas fa-clock icon-extend"></i>
+					</button>
+					<button class="btn" onclick="navigator.clipboard.writeText('${connCmd}')" title="${connCmd}">
+						<i class="fas fa-copy icon-monitor"></i>
+					</button>
 				</td>
 			</tr>
 		`;
@@ -617,7 +645,7 @@
 	function updateContainersTable(containers) {
 		const tbody = document.getElementById('container-table-body');
 		if (!containers || containers.length === 0) {
-			tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-2">No active containers</td></tr>';
+			tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-2">No active containers</td></tr>';
 			return;
 		}
 		tbody.innerHTML = containers.map(createContainerRow).join('');
@@ -629,6 +657,7 @@
 			.then(response => response.json())
 			.then(data => {
 				updateContainersTable(data.containers);
+				refreshStats();
 			})
 			.catch(error => console.error('Error refreshing containers:', error));
 	}
@@ -665,6 +694,8 @@
 		'container_error': 'Error',
 		'admin_action': 'Admin',
 		'context_changed': 'Context',
+		'container_requested': 'Requested',
+		'solved': 'Solved',
 	};
 
 	const EVENT_BADGE_CLASS = {
@@ -678,6 +709,8 @@
 		'container_error': 'badge-evt-error',
 		'admin_action': 'badge-evt-admin',
 		'context_changed': 'badge-evt-context',
+		'container_requested': 'badge-evt-requested',
+		'solved': 'badge-evt-created',
 	};
 
 	function safeId(val) {
@@ -689,12 +722,8 @@
 		switch (event.type) {
 			case 'host_unhealthy':
 				return [m.context_name, m.reason].filter(Boolean).join(': ');
-			case 'host_healthy': {
-				if (!m.context_name) return '';
-				const img = m.image;
-				if (img) return `${escapeHtml(m.context_name)}: image ${escapeHtml(img.id)} (${img.size_mb}MB, built ${escapeHtml(img.created)})`;
-				return `${escapeHtml(m.context_name)}: reachable`;
-			}
+			case 'host_healthy':
+				return m.context_name ? `${escapeHtml(m.context_name)}: reachable` : '';
 			case 'container_error': {
 				const parts = [];
 				if (m.context_name) parts.push(escapeHtml(m.context_name));
@@ -703,18 +732,29 @@
 				return parts.join(': ');
 			}
 			case 'admin_action': {
+				const target = m.target_id
+					? '<a href="/admin/users/' + safeId(m.target_id) + '">' + escapeHtml(m.target || '') + '</a>'
+					: escapeHtml(m.target || '');
 				if (m.action === 'purge') return `purged ${m.count} containers`;
-				if (m.action === 'kill' && m.target) {
-					const targetLink = m.target_id
-						? '<a href="/admin/users/' + safeId(m.target_id) + '">' + escapeHtml(m.target) + '</a>'
-						: escapeHtml(m.target);
-					const chalPart = m.challenge_name ? ' / ' + escapeHtml(m.challenge_name) : '';
-					return 'killed ' + targetLink + "'s container" + chalPart;
-				}
+				if (m.action === 'kill') return `killed ${target}'s container`;
+				if (m.action === 'extend') return `extended ${target}'s container`;
+				if (m.action === 'clear_history') return `cleared ${m.count} history records`;
 				return m.action || '';
 			}
 			case 'context_changed':
 				return [m.context_name, m.action].filter(Boolean).join(': ');
+			case 'container_requested': {
+				if (!m.hosts) return '';
+				const hostParts = Object.entries(m.hosts).map(([name, h]) => {
+					const status = h.healthy ? `${h.containers} active, score ${h.score}` : 'unhealthy';
+					return `${escapeHtml(name)}: ${status}`;
+				});
+				return hostParts.join(' | ');
+			}
+			case 'solved':
+				return m.challenge_name
+					? (m.challenge_id ? '<a href="/admin/challenges/' + safeId(m.challenge_id) + '">' + escapeHtml(m.challenge_name) + '</a>' : escapeHtml(m.challenge_name)) + ', timer shortened'
+					: 'timer shortened';
 			case 'flag_sharing': {
 				const parts = [];
 				if (m.source_entity) {
@@ -732,11 +772,14 @@
 				return parts.join(' / ');
 			}
 			default: {
-				return m.challenge_name
-					? (m.challenge_id
+				const defParts = [];
+				if (m.docker_context) defParts.push(escapeHtml(m.docker_context));
+				if (m.challenge_name) {
+					defParts.push(m.challenge_id
 						? '<a href="/admin/challenges/' + safeId(m.challenge_id) + '">' + escapeHtml(m.challenge_name) + '</a>'
-						: escapeHtml(m.challenge_name))
-					: '';
+						: escapeHtml(m.challenge_name));
+				}
+				return defParts.join(' / ');
 			}
 		}
 	}
@@ -852,6 +895,21 @@
 		}
 	}
 
+	function clearHistory() {
+		if (!confirm('Clear all container history? This resets stats and charts.')) return;
+		fetch('/containers/api/clear_history', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'CSRF-Token': init.csrfNonce }
+		})
+		.then(r => r.json())
+		.then(data => {
+			if (data.success) {
+				refreshStats();
+				loadAllCharts();
+			}
+		});
+	}
+
 	function purgeContainers() {
 		if (!confirm('Are you sure you want to purge all containers?')) {
 			return;
@@ -882,6 +940,7 @@
 	}
 
 	function killContainer(container_id) {
+		if (!confirm('Kill this container?')) return;
 		fetch('/containers/api/kill', {
 			method: 'POST',
 			headers: {
@@ -898,6 +957,27 @@
 			}
 		})
 		.catch(error => console.error('Error:', error));
+	}
+
+	function adminExtend(containerId) {
+		fetch('/containers/api/admin_extend', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'Accept': 'application/json',
+				'CSRF-Token': init.csrfNonce
+			},
+			body: JSON.stringify({ container_id: containerId })
+		})
+		.then(r => r.json())
+		.then(data => {
+			if (data.error) {
+				alert('Extend failed: ' + data.error);
+			} else {
+				refreshContainers();
+			}
+		})
+		.catch(e => console.error('Error:', e));
 	}
 
 	let _logContainerId = null;
@@ -1248,7 +1328,7 @@
 	}
 
 	function formatDurationShort(seconds) {
-		if (!seconds || seconds <= 0) return '0s';
+		if (!seconds || seconds <= 0) return '-';
 		var h = Math.floor(seconds / 3600);
 		var m = Math.floor((seconds % 3600) / 60);
 		if (h > 0) return h + 'h ' + m + 'm';

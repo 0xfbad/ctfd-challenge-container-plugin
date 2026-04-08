@@ -9,6 +9,7 @@ import threading
 import docker
 from flask import request, render_template, current_app, jsonify, Response, stream_with_context
 from CTFd.utils.decorators import admins_only
+from CTFd.utils.user import get_current_user
 from CTFd.models import db
 
 from . import containers_bp
@@ -65,7 +66,13 @@ def route_containers_dashboard():
 @admins_only
 def route_get_running_containers():
     container_manager = current_app.container_manager
-    running_containers = ContainerInfoModel.query.order_by(ContainerInfoModel.timestamp.desc()).all()
+    running_containers = (
+        ContainerInfoModel.query.filter(
+            db.or_(ContainerInfoModel.is_entry == True, ContainerInfoModel.stack_id.is_(None))  # noqa: E712
+        )
+        .order_by(ContainerInfoModel.timestamp.desc())
+        .all()
+    )
 
     try:
         connected = container_manager.is_connected()
@@ -85,8 +92,11 @@ def route_get_running_containers():
 
         hostname = get_hostname_for_context(container.docker_context)
 
+        container_name = f"chal-u{container.user_id}-c{container.challenge_id}-{container.timestamp}"
+
         container_data = {
             "container_id": container.container_id,
+            "container_name": container_name,
             "image": container.challenge.image,
             "challenge": f"{container.challenge.name}",
             "challenge_id": container.challenge_id,
@@ -101,6 +111,10 @@ def route_get_running_containers():
             "ssh_username": container.challenge.ssh_username,
             "ssh_password": container.challenge.ssh_password,
             "docker_context": container.docker_context or "local",
+            "stack_id": container.stack_id,
+            "companion_count": ContainerInfoModel.query.filter_by(stack_id=container.stack_id, is_entry=False).count()
+            if container.stack_id
+            else 0,
         }
         if team_mode:
             container_data["team"] = f"{container.team.name}"
@@ -118,23 +132,36 @@ def route_get_running_containers():
 @containers_bp.route("/api/stats/summary", methods=["GET"])
 @admins_only
 def route_stats_summary():
-    active = ContainerInfoModel.query.count()
-    total = ContainerHistoryModel.query.count()
+    # only count entry containers / standalone (not companions)
+    entry_filter = db.or_(ContainerInfoModel.is_entry == True, ContainerInfoModel.stack_id.is_(None))  # noqa: E712
+    active = ContainerInfoModel.query.filter(entry_filter).count()
 
-    rows = ContainerHistoryModel.query.filter(
+    total_history = ContainerHistoryModel.query.filter(
         ContainerHistoryModel.stopped_at.isnot(None),
     ).all()
 
-    durations = [r.stopped_at - r.created_at for r in rows if r.stopped_at and r.created_at]
+    # deduplicate stacks: group by stack_id, count each stack once
+    seen_stacks = set()
+    entry_rows = []
+    for r in total_history:
+        if r.stack_id:
+            if r.stack_id not in seen_stacks:
+                seen_stacks.add(r.stack_id)
+                entry_rows.append(r)
+        else:
+            entry_rows.append(r)
+
+    total = len(entry_rows) + active
+    durations = [r.stopped_at - r.created_at for r in entry_rows if r.stopped_at and r.created_at]
     avg_duration = sum(durations) / len(durations) if durations else 0
 
     unique_users = db.session.query(db.func.count(db.distinct(ContainerHistoryModel.user_id))).scalar() or 0
 
     flag_shares = len([e for e in event_logger.get_recent_events(limit=2000) if e.get("type") == "flag_sharing"])
 
-    # peak concurrent via sweep line on history
+    # peak concurrent via sweep line on entry rows only
     events_list = []
-    for r in ContainerHistoryModel.query.all():
+    for r in entry_rows:
         if r.created_at:
             events_list.append((r.created_at, 1))
         if r.stopped_at:
@@ -148,7 +175,7 @@ def route_stats_summary():
 
     return jsonify(
         active=active,
-        total=total + active,
+        total=total,
         avg_duration=round(avg_duration),
         unique_users=unique_users,
         flag_shares=flag_shares,
@@ -247,9 +274,12 @@ def route_kill_container():
     result = kill_container(container_id)
 
     if "success" in result:
+        admin = get_current_user()
         event_logger.log_event(
             "admin_action",
             f"admin killed container for {user_name or 'unknown'}",
+            user_id=admin.id if admin else None,
+            username=admin.name if admin else None,
             level="warning",
             metadata={
                 "action": "kill",
@@ -264,6 +294,50 @@ def route_kill_container():
     return jsonify(result), status_code
 
 
+@containers_bp.route("/api/admin_extend", methods=["POST"])
+@admins_only
+def route_admin_extend():
+    if not request.is_json:
+        return jsonify(error="invalid request"), 400
+
+    container_id = request.json.get("container_id")
+    if not container_id:
+        return jsonify(error="no container_id specified"), 400
+
+    container = ContainerInfoModel.query.filter_by(container_id=container_id).first()
+    if not container:
+        return jsonify(error="container not found"), 404
+
+    challenge = container.challenge
+    if not challenge:
+        return jsonify(error="challenge not found"), 404
+
+    expiration_seconds = (challenge.expiration_minutes or 0) * 60
+    new_expires = int(time.time() + expiration_seconds) if expiration_seconds > 0 else 0
+
+    container.expires = new_expires
+    if container.stack_id:
+        ContainerInfoModel.query.filter_by(stack_id=container.stack_id).update({"expires": new_expires})
+    db.session.commit()
+
+    admin = get_current_user()
+    event_logger.log_event(
+        "admin_action",
+        f"admin extended container for {container.user.name if container.user else 'unknown'}",
+        user_id=admin.id if admin else None,
+        username=admin.name if admin else None,
+        level="info",
+        metadata={
+            "action": "extend",
+            "target": container.user.name if container.user else None,
+            "target_id": container.user_id,
+            "challenge_name": challenge.name,
+        },
+    )
+
+    return jsonify(success="extended")
+
+
 @containers_bp.route("/api/purge", methods=["POST"])
 @admins_only
 def route_purge_containers():
@@ -273,13 +347,35 @@ def route_purge_containers():
             kill_container(cid)
         except ContainerException:
             pass
+    admin = get_current_user()
     event_logger.log_event(
         "admin_action",
         f"purged {len(container_ids)} containers",
+        user_id=admin.id if admin else None,
+        username=admin.name if admin else None,
         level="warning",
         metadata={"action": "purge", "count": len(container_ids)},
     )
     return jsonify(success="purged all containers"), 200
+
+
+@containers_bp.route("/api/clear_history", methods=["POST"])
+@admins_only
+def route_clear_history():
+    count = ContainerHistoryModel.query.count()
+    ContainerHistoryModel.query.delete()
+    db.session.commit()
+
+    admin = get_current_user()
+    event_logger.log_event(
+        "admin_action",
+        f"cleared {count} history records",
+        user_id=admin.id if admin else None,
+        username=admin.name if admin else None,
+        level="warning",
+        metadata={"action": "clear_history", "count": count},
+    )
+    return jsonify(success=f"cleared {count} history records")
 
 
 @containers_bp.route("/api/images", methods=["GET"])
