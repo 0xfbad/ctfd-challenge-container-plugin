@@ -308,7 +308,7 @@ window.ContainerFormUtils = (function () {
 			html = '<small class="text-warning"><i class="fas fa-exclamation-circle"></i> Missing on ' + missing.join(", ") + '</small>';
 		}
 
-		html += ' <small class="text-muted">(' + new Date(data.scanned_at * 1000).toLocaleString(undefined, {year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}) + ')</small>';
+		html += ' <small class="text-muted">(' + new Date(data.scanned_at * 1000).toLocaleString('en-US', {month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit',hour12:true}) + ')</small>';
 		return html;
 	}
 

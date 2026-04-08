@@ -96,14 +96,18 @@ def route_get_running_containers():
 
         container_name = f"chal-u{container.user_id}-c{container.challenge_id}-{container.timestamp}"
 
+        user_obj = container.user
         container_data = {
             "container_id": container.container_id,
             "container_name": container_name,
             "image": container.challenge.image,
             "challenge": f"{container.challenge.name}",
             "challenge_id": container.challenge_id,
-            "user": f"{container.user.name}",
+            "user": f"{user_obj.name}",
             "user_id": container.user_id,
+            "is_admin": user_obj.type == "admin" if user_obj else False,
+            "is_hidden": getattr(user_obj, "hidden", False),
+            "is_banned": getattr(user_obj, "banned", False),
             "port": container.port,
             "created": container.timestamp,
             "expires": container.expires,
@@ -129,6 +133,26 @@ def route_get_running_containers():
     }
 
     return jsonify(response_data)
+
+
+@containers_bp.route("/api/user_flags", methods=["GET"])
+@admins_only
+def route_user_flags():
+    from CTFd.models import Users
+
+    rows = Users.query.with_entities(Users.id, Users.type, Users.hidden, Users.banned).all()
+    flags = {}
+    for uid, utype, hidden, banned in rows:
+        f = {}
+        if utype == "admin":
+            f["is_admin"] = True
+        if hidden:
+            f["is_hidden"] = True
+        if banned:
+            f["is_banned"] = True
+        if f:
+            flags[uid] = f
+    return jsonify(flags)
 
 
 @containers_bp.route("/api/stats/summary", methods=["GET"])
@@ -886,14 +910,18 @@ def route_analytics_top_users():
         if row.challenge_id:
             stats["challenges"].add(row.challenge_id)
 
-    user_names = {u.id: u.name for u in Users.query.filter(Users.id.in_(user_stats.keys())).all()}
+    users_by_id = {u.id: u for u in Users.query.filter(Users.id.in_(user_stats.keys())).all()}
 
     result = []
     for user_id, stats in user_stats.items():
+        user_obj = users_by_id.get(user_id)
         result.append(
             {
                 "user_id": user_id,
-                "username": user_names.get(user_id, f"user#{user_id}"),
+                "username": user_obj.name if user_obj else f"user#{user_id}",
+                "is_admin": user_obj.type == "admin" if user_obj else False,
+                "is_hidden": getattr(user_obj, "hidden", False) if user_obj else False,
+                "is_banned": getattr(user_obj, "banned", False) if user_obj else False,
                 "total_seconds": round(stats["total_seconds"], 1),
                 "container_count": stats["container_count"],
                 "unique_challenges": len(stats["challenges"]),
@@ -1070,6 +1098,6 @@ def route_analytics_heatmap():
                 data.append([day, hour, matrix[hour][day]])
 
     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    hours = [f"{h:02d}:00" for h in range(24)]
+    hours = [f"{h % 12 or 12} {'AM' if h < 12 else 'PM'}" for h in range(24)]
 
     return jsonify(data=data, days=days, hours=hours)

@@ -481,13 +481,14 @@
 
 	function formatTimestamp(timestamp) {
 		const date = new Date(timestamp * 1000);
-		return date.toLocaleString(undefined, {
-			month: '2-digit',
-			day: '2-digit',
-			hour: '2-digit',
+		return date.toLocaleString('en-US', {
+			month: 'short',
+			day: 'numeric',
+			year: 'numeric',
+			hour: 'numeric',
 			minute: '2-digit',
 			second: '2-digit',
-			hour12: false
+			hour12: true
 		});
 	}
 
@@ -563,7 +564,7 @@
 
 		return `
 			<tr data-container-id="${escapeAttr(container.container_id)}" data-expires="${container.expires}">
-				<td><a href="/admin/users/${safeId(container.user_id)}">${safeUser}</a></td>
+				<td><a href="/admin/users/${safeId(container.user_id)}">${safeUser}</a>${userBadges(container)}</td>
 				<td><a href="/admin/challenges/${safeId(container.challenge_id)}">${safeChallenge}</a></td>
 				<td class="cell-clip-sm" title="${escapeAttr(container.container_id)}"><code>${containerName}</code>${companionBadge}</td>
 				<td>${ctx}</td>
@@ -677,8 +678,10 @@
 				return parts.join(': ');
 			}
 			case 'admin_action': {
-				const target = m.target_id
-					? '<a href="/admin/users/' + safeId(m.target_id) + '">' + escapeHtml(m.target || '') + '</a>'
+				const targetId = safeId(m.target_id);
+				const targetFlags = _userFlags[targetId] || {};
+				const target = targetId
+					? '<a href="/admin/users/' + targetId + '">' + escapeHtml(m.target || '') + '</a>' + userBadges(targetFlags)
 					: escapeHtml(m.target || '');
 				if (m.action === 'purge') return `purged ${m.count} containers`;
 				if (m.action === 'kill') return `killed ${target}'s container`;
@@ -705,8 +708,9 @@
 				if (m.source_entity) {
 					const srcId = safeId(m.source_id);
 					const srcType = m.source_type === 'teams' ? 'teams' : 'users';
+					const srcBadges = srcType === 'users' ? userBadges(_userFlags[srcId] || {}) : '';
 					parts.push('flag from ' + (srcId
-						? '<a href="/admin/' + srcType + '/' + srcId + '">' + escapeHtml(m.source_entity) + '</a>'
+						? '<a href="/admin/' + srcType + '/' + srcId + '">' + escapeHtml(m.source_entity) + '</a>' + srcBadges
 						: escapeHtml(m.source_entity)));
 				}
 				if (m.challenge_name) {
@@ -995,9 +999,9 @@
 				const labels = data.labels.map(ts => {
 					const d = new Date(ts * 1000);
 					if (range === '24h') {
-						return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+						return d.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
 					}
-					return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+					return d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 				});
 
 				chart.setOption({
@@ -1029,7 +1033,11 @@
 						axisPointer: { type: 'shadow' },
 						formatter: function(params) {
 							const user = data[params[0].dataIndex];
-							return `${escapeHtml(user.username)}<br/>Time: ${formatDuration(user.total_seconds)}<br/>Containers: ${user.container_count}<br/>Challenges: ${user.unique_challenges}`;
+							const uid = safeId(user.user_id);
+							const nameHtml = uid
+								? '<a href="/admin/users/' + uid + '" style="color:inherit;text-decoration:underline">' + escapeHtml(user.username) + '</a>'
+								: escapeHtml(user.username);
+							return `${nameHtml}${userBadges(user)}<br/>Time: ${formatDuration(user.total_seconds)}<br/>Containers: ${user.container_count}<br/>Challenges: ${user.unique_challenges}`;
 						}
 					},
 					toolbox: { feature: { saveAsImage: {} } },
@@ -1125,8 +1133,8 @@
 				const range = getRangeFor('flag-sharing-chart');
 				const labels = data.labels.map(ts => {
 					const d = new Date(ts * 1000);
-					if (range === '24h') return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
-					return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+					if (range === '24h') return d.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+					return d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 				});
 
 				const byChallenge = data.by_challenge || {};
@@ -1219,8 +1227,9 @@
 		const m = e.metadata || {};
 		const userId = safeId(e.user_id);
 
+		const flags = _userFlags[userId] || e;
 		let submitter = e.username
-			? (userId ? '<a href="/admin/users/' + userId + '">' + escapeHtml(e.username) + '</a>' : escapeHtml(e.username))
+			? (userId ? '<a href="/admin/users/' + userId + '">' + escapeHtml(e.username) + '</a>' + userBadges(flags) : escapeHtml(e.username))
 			: '';
 		if (m.team_name) {
 			const teamId = safeId(m.team_id);
@@ -1232,8 +1241,9 @@
 
 		const srcId = safeId(m.source_id);
 		const srcType = m.source_type === 'teams' ? 'teams' : 'users';
+		const ownerBadges = srcType === 'users' ? userBadges(_userFlags[srcId] || {}) : '';
 		const ownerHtml = m.source_entity
-			? (srcId ? '<a href="/admin/' + srcType + '/' + srcId + '">' + escapeHtml(m.source_entity) + '</a>' : escapeHtml(m.source_entity))
+			? (srcId ? '<a href="/admin/' + srcType + '/' + srcId + '">' + escapeHtml(m.source_entity) + '</a>' + ownerBadges : escapeHtml(m.source_entity))
 			: '';
 
 		const chalHtml = m.challenge_name
@@ -1296,12 +1306,19 @@
 	}
 
 	document.addEventListener('DOMContentLoaded', function() {
-		startCountdowns();
-		startAutoRefresh();
-		connectEventStream();
-		loadAllCharts();
-		loadFlagSharing();
-		refreshStats();
+		fetch('/containers/api/user_flags')
+			.then(r => r.json())
+			.then(flags => {
+				for (const [id, f] of Object.entries(flags)) {
+					_userFlags[id] = f;
+				}
+				startCountdowns();
+				startAutoRefresh();
+				connectEventStream();
+				loadAllCharts();
+				loadFlagSharing();
+				refreshStats();
+			});
 
 		document.getElementById('log-refresh-btn').addEventListener('click', function() {
 			if (_logContainerId) fetchLogs(_logContainerId);
