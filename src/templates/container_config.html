@@ -161,65 +161,11 @@
     </div>
 </div>
 
+<link rel="stylesheet" href="{{ url_for('containers.static', filename='plugin-common.css') }}">
 <style>
 .cc-ctx-actions { white-space: nowrap; display: flex; gap: 4px; }
 .cc-ctx-actions .btn { width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: none; background: transparent; }
 .cc-ctx-actions .btn:hover { background-color: rgba(0,0,0,0.05); border-radius: 3px; }
-
-.cfg-help {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    border: 1px solid #adb5bd;
-    color: #adb5bd;
-    background: none;
-    font-size: 10px;
-    font-weight: 600;
-    cursor: help;
-    position: relative;
-    vertical-align: middle;
-    margin-left: 3px;
-    line-height: 1;
-}
-
-.cfg-help:hover {
-    border-color: #6c757d;
-    color: #6c757d;
-}
-
-.cfg-help:hover::after {
-    content: attr(data-tip);
-    position: absolute;
-    bottom: calc(100% + 8px);
-    left: 50%;
-    transform: translateX(-50%);
-    background: #343a40;
-    color: #f8f9fa;
-    padding: 8px 10px;
-    border-radius: 4px;
-    font-size: 12px;
-    font-weight: 400;
-    line-height: 1.4;
-    width: 240px;
-    white-space: normal;
-    z-index: 1000;
-    pointer-events: none;
-}
-
-.cfg-help:hover::before {
-    content: '';
-    position: absolute;
-    bottom: calc(100% + 2px);
-    left: 50%;
-    transform: translateX(-50%);
-    border: 5px solid transparent;
-    border-top-color: #343a40;
-    z-index: 1000;
-    pointer-events: none;
-}
 </style>
 
 <script>
@@ -243,7 +189,6 @@
         return fetch(B + path, opts).then(function(r) { return r.json(); });
     }
 
-    // ---- settings ----
 
     function loadSettings() {
         ccFetch('/api/settings').then(function(data) {
@@ -269,7 +214,6 @@
             });
     });
 
-    // ---- contexts ----
 
     function loadContexts() {
         ccFetch('/api/contexts/list').then(function(data) {
@@ -392,7 +336,6 @@
             });
     });
 
-    // ---- discover / import ----
 
     document.getElementById('cc-import-btn').addEventListener('click', function() {
         discoverContexts();
@@ -470,7 +413,6 @@
         });
     }
 
-    // ---- image matrix ----
 
     document.getElementById('cc-scan-btn').addEventListener('click', function() { scanImages(); });
 
@@ -578,27 +520,7 @@
             hdr + '<tbody>' + rows + '</tbody></table></div>';
     }
 
-    function pullToCtx(image, ctx, btn) {
-        btn.disabled = true;
-        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
 
-        ccFetch('/api/pull', { method: 'POST', body: JSON.stringify({ image: image, context_name: ctx }) })
-            .then(function(data) {
-                var r = data.results && data.results[ctx];
-                if (r === 'ok') {
-                    btn.closest('td').innerHTML = '<span class="text-success font-weight-bold">&#10003;</span>';
-                } else {
-                    CTFd.ui.ezq.ezAlert({ title: 'Pull Failed', body: ctx + ': ' + (r || data.error || 'unknown error'), button: 'OK' });
-                    btn.disabled = false; btn.innerHTML = 'Pull';
-                }
-            })
-            .catch(function(e) {
-                CTFd.ui.ezq.ezAlert({ title: 'Pull Error', body: e.message, button: 'OK' });
-                btn.disabled = false; btn.innerHTML = 'Pull';
-            });
-    }
-
-    // ---- init ----
     loadSettings();
     loadContexts();
 })();

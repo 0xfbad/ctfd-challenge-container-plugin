@@ -41,6 +41,7 @@ def test_kill_container_records_history():
     mock_container.user.name = "alice"
     mock_container.team_id = None
     mock_container.team.name = None
+    mock_container.stack_id = None
 
     mock_cm = MagicMock()
     mock_app = MagicMock()
@@ -88,6 +89,9 @@ def test_create_container_inserts_history():
     mock_challenge.ctype = "tcp"
     mock_challenge.ssh_username = None
     mock_challenge.ssh_password = None
+    mock_challenge.services_json = None
+    mock_challenge.network_json = None
+    mock_challenge.cap_add = None
 
     mock_app = MagicMock()
     mock_app.container_manager = mock_cm

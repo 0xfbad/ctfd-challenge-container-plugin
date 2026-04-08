@@ -25,6 +25,8 @@ def _make_container(container_id, expires, challenge_name="test"):
     c.user.name = "user1"
     c.team_id = None
     c.team.name = None
+    c.stack_id = None
+    c.is_entry = True
     return c
 
 
@@ -37,7 +39,7 @@ def test_kill_failure_skips_db_delete():
     mock_app = MagicMock()
 
     with patch("container_manager.ContainerInfoModel") as mock_model, patch("container_manager.db") as mock_db:
-        mock_model.query.all.return_value = [expired_container]
+        mock_model.query.filter.return_value.all.return_value = [expired_container]
 
         cm.kill_container = MagicMock(side_effect=ContainerException("docker down"))
 
@@ -55,7 +57,7 @@ def test_expires_zero_never_expired():
     mock_app = MagicMock()
 
     with patch("container_manager.ContainerInfoModel") as mock_model, patch("container_manager.db") as mock_db:
-        mock_model.query.all.return_value = [never_expire]
+        mock_model.query.filter.return_value.all.return_value = [never_expire]
         cm.kill_container = MagicMock()
 
         cm.kill_expired_containers(mock_app)
@@ -77,7 +79,7 @@ def test_successful_kill_deletes_db_row():
         patch("container_manager.ContainerHistoryModel") as mock_hist,
         patch("container_manager.db") as mock_db,
     ):
-        mock_model.query.all.return_value = [expired_container]
+        mock_model.query.filter.return_value.all.return_value = [expired_container]
         mock_hist.query.filter_by.return_value.first.return_value = None
         cm.kill_container = MagicMock()
 

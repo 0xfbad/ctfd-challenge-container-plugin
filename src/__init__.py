@@ -45,12 +45,18 @@ def _seed_local_context(app):
 
     import docker as docker_lib
 
+    client = None
     try:
         client = docker_lib.DockerClient(base_url=f"unix://{LOCAL_SOCKET_PATH}")
         client.ping()
-        client.close()
     except Exception:
         return
+    finally:
+        if client:
+            try:
+                client.close()
+            except Exception:
+                pass
 
     db.session.add(
         DockerContextModel(

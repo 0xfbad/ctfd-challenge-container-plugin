@@ -98,9 +98,12 @@ class ContainerManager:
             coalesce=True,
         )
         self.expiration_scheduler.start()
-        atexit.register(lambda: self.expiration_scheduler.shutdown())
 
-    # -- scheduling delegates --
+        def _shutdown_scheduler():
+            if self.expiration_scheduler.running:
+                self.expiration_scheduler.shutdown(wait=False)
+
+        atexit.register(_shutdown_scheduler)
 
     def select_and_reserve(self):
         return self.orchestrator.select_and_reserve()
@@ -110,8 +113,6 @@ class ContainerManager:
 
     def release_slot(self, context_name):
         self.orchestrator.release_slot(context_name)
-
-    # -- container operations (multi-context scan when context_name is None) --
 
     def is_container_running(self, container_id: str, context_name: str | None = None) -> bool:
         self._ensure_connected()
@@ -191,8 +192,6 @@ class ContainerManager:
                 continue
         return ""
 
-    # -- container creation with load-balanced fallthrough --
-
     def create_container(
         self,
         chal_id: int | str,
@@ -251,7 +250,7 @@ class ContainerManager:
 
         ts = int(time.time())
         container_name = f"chal-u{user_id}-c{chal_id}-{ts}"
-        # hostname is what shows in the shell prompt, use image base name
+        # sets shell prompt to image name instead of container hash
         container_hostname = image.split(":")[0] if image else container_name
         kwargs["name"] = container_name
         kwargs["hostname"] = container_hostname
@@ -337,8 +336,6 @@ class ContainerManager:
 
         raise ContainerException(f"failed to create container on any context: {last_error}")
 
-    # -- compose stack creation --
-
     def create_stack(
         self,
         chal_id,
@@ -369,7 +366,6 @@ class ContainerManager:
         base_name = f"chal-u{user_id}-c{chal_id}-{ts}"
         net_name = f"{base_name}-net"
 
-        # pick context
         if context_name:
             if context_name not in self.host_manager._context_configs:
                 raise ContainerException(f"docker context '{context_name}' not available")
@@ -394,7 +390,6 @@ class ContainerManager:
 
             self.host_manager.create_network(context_name, net_name, subnet=subnet, labels=stack_labels)
 
-            # build entry container caps
             entry_caps = []
             if ctype == "ssh":
                 entry_caps.extend(["SYS_CHROOT", "SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "AUDIT_WRITE"])
@@ -425,7 +420,6 @@ class ContainerManager:
                 **entry_kwargs,
             )
 
-            # create companion containers
             companions = []
             for svc_name, svc_cfg in services.items():
                 svc_env = dict(base_env)
@@ -455,15 +449,12 @@ class ContainerManager:
             return entry_container, host_port, companions, stack_id, context_name
 
         except Exception:
-            # clean up partial stack
             try:
                 self.host_manager.kill_stack(context_name, stack_id)
             except Exception:
-                pass
+                logger.debug("failed to clean up partial stack %s", stack_id, exc_info=True)
             self.orchestrator.release_slot(context_name)
             raise
-
-    # -- image operations --
 
     def get_images(self) -> list:
         self._ensure_connected()
@@ -508,8 +499,6 @@ class ContainerManager:
                 results[ctx] = f"failed: {e}"
         return results
 
-    # -- status --
-
     def is_connected(self) -> bool:
         if not self.host_manager.has_contexts():
             return False
@@ -527,8 +516,6 @@ class ContainerManager:
 
         max_concurrent = get_setting("max_concurrent_creates", 2)
         self.host_manager._init_semaphores(max_concurrent)
-
-    # -- expiration --
 
     def kill_expired_containers(self, app: Flask):
         if not self.host_manager.has_contexts():
@@ -581,7 +568,6 @@ class ContainerManager:
                     },
                 )
 
-                # collect all rows to delete (entry + companions)
                 if container.stack_id and container.stack_id not in released_stacks:
                     siblings = ContainerInfoModel.query.filter_by(stack_id=container.stack_id).all()
                     killed_rows.extend(siblings)

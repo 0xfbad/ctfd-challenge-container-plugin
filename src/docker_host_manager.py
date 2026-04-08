@@ -75,13 +75,19 @@ def discover_contexts():
 
 def ping_endpoint(endpoint, timeout=3):
     """Quick connectivity check for a docker endpoint."""
+    client = None
     try:
         client = docker.DockerClient(base_url=endpoint, timeout=timeout)
         client.ping()
-        client.close()
         return True
     except Exception:
         return False
+    finally:
+        if client:
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
 class DockerHostManager:
@@ -160,15 +166,21 @@ class DockerHostManager:
                 logger.warning(f"no endpoint for context '{ctx.context_name}', skipping")
                 continue
 
+            client = None
             try:
                 client = docker.DockerClient(base_url=endpoint)
                 client.ping()
-                client.close()
                 new_configs[ctx.context_name] = endpoint
                 new_pub_hostnames[ctx.context_name] = ctx.pub_hostname
                 logger.info(f"connected to context '{ctx.context_name}' at {endpoint}")
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
                 logger.error(f"could not connect to context '{ctx.context_name}': {e}")
+            finally:
+                if client:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
 
         with self._lock:
             self._context_configs = new_configs
@@ -276,8 +288,6 @@ class DockerHostManager:
         except docker.errors.DockerException:
             self._clear_client(context_name)
             raise
-
-    # -- compose stack operations --
 
     def create_network(self, context_name, network_name, subnet=None, labels=None):
         client = self._get_client(context_name)

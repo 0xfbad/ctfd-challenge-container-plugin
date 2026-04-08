@@ -1,23 +1,25 @@
-import queue
 import json
+import logging
+import os
+import queue
+import socket as _socket
+import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from statistics import median
-import logging
-import threading
 
 import docker
-from flask import request, render_template, current_app, jsonify, Response, stream_with_context
+from flask import Response, current_app, jsonify, render_template, request, stream_with_context
+
+from CTFd.models import db
 from CTFd.utils.decorators import admins_only
 from CTFd.utils.user import get_current_user
-from CTFd.models import db
 
 from . import containers_bp
-from .helpers import kill_container, get_hostname_for_context
-from ..utils import is_team_mode, get_setting, set_setting, DEFAULTS
-from ..models import ContainerInfoModel, ContainerHistoryModel, DockerContextModel, ContainerChallengeModel
+from .helpers import get_hostname_for_context, kill_container
 from ..container_manager import ContainerException
-import os
 from ..docker_host_manager import (
     LOCAL_CONTEXT_NAME,
     LOCAL_SOCKET_PATH,
@@ -26,6 +28,8 @@ from ..docker_host_manager import (
     ping_endpoint,
 )
 from ..event_logger import event_logger
+from ..models import ContainerChallengeModel, ContainerHistoryModel, ContainerInfoModel, DockerContextModel
+from ..utils import DEFAULTS, get_setting, is_team_mode, set_setting
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +39,7 @@ _sse_connection_count = 0
 _sse_connection_lock = threading.Lock()
 
 
-@containers_bp.route("/dashboard", methods=["GET"])
-@admins_only
-def route_containers_dashboard():
-    container_manager = current_app.container_manager
-    running_containers = ContainerInfoModel.query.order_by(ContainerInfoModel.timestamp.desc()).all()
-
+def _get_connection_status(container_manager):
     try:
         connected = container_manager.is_connected()
     except ContainerException:
@@ -50,6 +49,17 @@ def route_containers_dashboard():
         running_ids = container_manager.get_running_container_ids()
     except ContainerException:
         running_ids = set()
+
+    return connected, running_ids
+
+
+@containers_bp.route("/dashboard", methods=["GET"])
+@admins_only
+def route_containers_dashboard():
+    container_manager = current_app.container_manager
+    running_containers = ContainerInfoModel.query.order_by(ContainerInfoModel.timestamp.desc()).all()
+
+    connected, running_ids = _get_connection_status(container_manager)
 
     for container in running_containers:
         container.is_running = container.container_id in running_ids
@@ -74,15 +84,7 @@ def route_get_running_containers():
         .all()
     )
 
-    try:
-        connected = container_manager.is_connected()
-    except ContainerException:
-        connected = False
-
-    try:
-        running_ids = container_manager.get_running_container_ids()
-    except ContainerException:
-        running_ids = set()
+    connected, running_ids = _get_connection_status(container_manager)
 
     team_mode = is_team_mode()
 
@@ -410,12 +412,6 @@ def route_get_contexts():
     return jsonify(contexts=contexts)
 
 
-@containers_bp.route("/admin/contexts", methods=["GET"])
-@admins_only
-def route_list_contexts():
-    return render_template("admin/contexts.html")
-
-
 @containers_bp.route("/api/contexts/list", methods=["GET"])
 @admins_only
 def route_api_list_contexts():
@@ -572,21 +568,24 @@ def route_api_test_context(context_id):
     if not endpoint:
         return jsonify(error="no endpoint could be resolved for this context"), 400
 
+    client = None
     try:
         client = docker.DockerClient(base_url=endpoint)
         client.ping()
-        client.close()
         return jsonify(success="context is reachable")
     except Exception as e:
         return jsonify(error=f"context unreachable: {str(e)}"), 500
+    finally:
+        if client:
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
 @containers_bp.route("/api/contexts/discover", methods=["GET"])
 @admins_only
 def route_api_discover_contexts():
-    import socket as _socket
-    from concurrent.futures import ThreadPoolExecutor
-
     try:
         found = discover_contexts()
         existing = {ctx.context_name for ctx in DockerContextModel.query.all()}
@@ -633,8 +632,6 @@ def route_api_discover_contexts():
 @containers_bp.route("/api/images/matrix", methods=["GET"])
 @admins_only
 def route_api_images_matrix():
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     container_manager = current_app.container_manager
 
     challenges = ContainerChallengeModel.query.all()
@@ -829,12 +826,6 @@ def _range_cutoff():
     return 0
 
 
-@containers_bp.route("/admin/stats", methods=["GET"])
-@admins_only
-def route_analytics_page():
-    return render_template("admin/analytics.html")
-
-
 @containers_bp.route("/api/analytics/activity", methods=["GET"])
 @admins_only
 def route_analytics_activity():
@@ -895,14 +886,14 @@ def route_analytics_top_users():
         if row.challenge_id:
             stats["challenges"].add(row.challenge_id)
 
+    user_names = {u.id: u.name for u in Users.query.filter(Users.id.in_(user_stats.keys())).all()}
+
     result = []
     for user_id, stats in user_stats.items():
-        user = Users.query.get(user_id)
-        username = user.name if user else f"user#{user_id}"
         result.append(
             {
                 "user_id": user_id,
-                "username": username,
+                "username": user_names.get(user_id, f"user#{user_id}"),
                 "total_seconds": round(stats["total_seconds"], 1),
                 "container_count": stats["container_count"],
                 "unique_challenges": len(stats["challenges"]),
@@ -938,10 +929,10 @@ def route_analytics_challenges():
         end = row.stopped_at if row.stopped_at else now
         stats["lifetimes"].append(end - row.created_at)
 
+    chal_names = {c.id: c.name for c in Challenges.query.filter(Challenges.id.in_(chal_stats.keys())).all()}
+
     result = []
     for chal_id, stats in chal_stats.items():
-        challenge = Challenges.query.get(chal_id)
-        name = challenge.name if challenge else f"challenge#{chal_id}"
         unique_users = len(stats["users"])
         avg_lifetime = sum(stats["lifetimes"]) / len(stats["lifetimes"]) if stats["lifetimes"] else 0
         restarts_per_user = stats["count"] / unique_users if unique_users > 0 else 0
@@ -949,7 +940,7 @@ def route_analytics_challenges():
         result.append(
             {
                 "challenge_id": chal_id,
-                "name": name,
+                "name": chal_names.get(chal_id, f"challenge#{chal_id}"),
                 "container_count": stats["count"],
                 "unique_users": unique_users,
                 "avg_lifetime": round(avg_lifetime, 1),
@@ -1005,16 +996,15 @@ def route_analytics_solve_times():
         stats["times"].append(round(solve_time, 1))
         stats["solve_count"] += 1
 
+    chal_names = {c.id: c.name for c in Challenges.query.filter(Challenges.id.in_(chal_times.keys())).all()}
+
     result = []
     for chal_id, stats in chal_times.items():
-        challenge = Challenges.query.get(chal_id)
-        name = challenge.name if challenge else f"challenge#{chal_id}"
         times = stats["times"]
-
         result.append(
             {
                 "challenge_id": chal_id,
-                "name": name,
+                "name": chal_names.get(chal_id, f"challenge#{chal_id}"),
                 "solve_count": stats["solve_count"],
                 "times": times,
                 "avg_time": round(sum(times) / len(times), 1) if times else 0,
@@ -1064,9 +1054,6 @@ def route_analytics_heatmap():
     cutoff = _range_cutoff()
 
     rows = ContainerHistoryModel.query.filter(ContainerHistoryModel.created_at >= cutoff).all()
-
-    # build hour-of-day x day-of-week matrix
-    from datetime import datetime
 
     matrix = [[0] * 7 for _ in range(24)]
     for r in rows:

@@ -101,7 +101,7 @@ def get_hostname_for_context(context_name):
 
     from ..docker_host_manager import LOCAL_CONTEXT_NAME
 
-    # local context runs on the same machine, use the address users reach CTFd through
+    # local containers are colocated so users connect via the CTFd hostname
     if context_name == LOCAL_CONTEXT_NAME:
         return _request_hostname()
 
@@ -166,7 +166,6 @@ def kill_container(container_id):
             message=f"container killed for {challenge_name}",
         )
 
-        # delete all rows in the stack (or just this one for standalone)
         if stack_id:
             siblings = ContainerInfoModel.query.filter_by(stack_id=stack_id).all()
             for s in siblings:
@@ -200,7 +199,6 @@ def renew_container(chal_id, xid, is_team):
         expiration_seconds = (challenge.expiration_minutes or 0) * 60
         new_expires = int(time.time() + expiration_seconds) if expiration_seconds > 0 else 0
         running_container.expires = new_expires
-        # renew all siblings in the stack
         if running_container.stack_id:
             ContainerInfoModel.query.filter_by(stack_id=running_container.stack_id).update({"expires": new_expires})
         db.session.commit()
@@ -293,7 +291,6 @@ def _create_container_inner(chal_id, xid, uid, is_team):
     expires = int(time.time() + expiration_seconds) if expiration_seconds > 0 else 0
     now = int(time.time())
 
-    # log container request with orchestration info
     host_status = container_manager.orchestrator.get_status()
     event_logger.log_event(
         "container_requested",
@@ -315,7 +312,6 @@ def _create_container_inner(chal_id, xid, uid, is_team):
         },
     )
 
-    # compose stack path
     if challenge.services_json:
         try:
             entry_container, host_port, companions, stack_id, context_name = container_manager.create_stack(
@@ -341,7 +337,6 @@ def _create_container_inner(chal_id, xid, uid, is_team):
         if host_port is None:
             return {"status": "error", "error": "could not get port"}
 
-        # store entry container
         entry_row = ContainerInfoModel(
             container_id=entry_container.id,
             challenge_id=challenge.id,
@@ -367,7 +362,6 @@ def _create_container_inner(chal_id, xid, uid, is_team):
             )
         )
 
-        # store companion containers
         for svc_name, svc_container in companions:
             db.session.add(
                 ContainerInfoModel(
@@ -402,13 +396,12 @@ def _create_container_inner(chal_id, xid, uid, is_team):
             try:
                 container_manager.host_manager.kill_stack(context_name, stack_id)
             except Exception:
-                pass
+                logger.debug("failed to clean up stack %s after db error", stack_id, exc_info=True)
             return {"error": "database error, stack has been cleaned up"}, 500
 
         new_container = entry_row
         created_container = entry_container
 
-    # single container path
     else:
         try:
             created_container, context_name = container_manager.create_container(
@@ -451,7 +444,7 @@ def _create_container_inner(chal_id, xid, uid, is_team):
             try:
                 container_manager.kill_container(created_container.id, context_name)
             except Exception:
-                pass
+                logger.debug("failed to clean up container after db error", exc_info=True)
             return {"error": "database error, container has been cleaned up"}, 500
 
         db.session.add(

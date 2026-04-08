@@ -4,7 +4,7 @@ CTFd plugin that provisions per-user Docker containers for challenges across a p
 
 ## How it works
 
-When a user starts a challenge the plugin picks the least-loaded healthy Docker context, acquires the per-context creation semaphore so concurrent requests don't overwhelm the daemon, hits the Docker API through the SDK's SSH tunnel, creates the container with dynamic port mapping and security hardening, reads the mapped port back, writes a `ContainerInfoModel` row to the database with the container ID and expiration timestamp, and returns the connection details to the user. Each challenge can be pinned to a specific Docker context or left unassigned so the load balancer picks one automatically
+When a user starts a challenge the plugin picks the least-loaded healthy Docker context and acquires the per-context creation semaphore so concurrent requests don't overwhelm the daemon. It creates the container with dynamic port mapping and security hardening through the Docker SDK's SSH tunnel, reads the mapped port back, writes a `ContainerInfoModel` row to the database with the container ID and expiration timestamp, then returns the connection details to the user. Each challenge can be pinned to a specific Docker context or left unassigned so the load balancer picks one automatically
 
 Users connect directly to the container's mapped port on the runner host. The plugin supports TCP, SSH, and web connection types, each challenge gets configured with credentials and connection info that the frontend displays
 
@@ -240,8 +240,8 @@ Managed through the admin settings page, no config files needed
 | thread_pool_size | 4 | worker threads for Docker operations |
 | max_concurrent_creates | 2 | parallel container creation limit per host |
 | expiration_check_interval | 5 | seconds between expiry sweeps |
-| rate_limit_requests | 500 | max requests per rate limit interval |
-| rate_limit_interval | 10 | rate limit window in seconds |
+| rate_limit_requests | 45 | max requests per rate limit interval |
+| rate_limit_interval | 60 | rate limit window in seconds |
 | freshness_secret | (auto-generated) | HMAC key for freshness tokens, clear to disable |
 | post_solve_expiry_seconds | 90 | seconds until container expires after a correct solve, 0 to disable |
 

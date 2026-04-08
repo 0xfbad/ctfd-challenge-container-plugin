@@ -25,6 +25,8 @@ def _make_container(container_id, expires, challenge_name="test"):
     c.user.name = "user1"
     c.team_id = None
     c.team.name = None
+    c.stack_id = None
+    c.is_entry = True
     return c
 
 
@@ -44,7 +46,7 @@ def test_expiry_records_history():
         patch("container_manager.ContainerHistoryModel") as mock_hist,
         patch("container_manager.db") as mock_db,
     ):
-        mock_model.query.all.return_value = [expired_container]
+        mock_model.query.filter.return_value.all.return_value = [expired_container]
         mock_hist.query.filter_by.return_value.first.return_value = mock_history
         cm.kill_container = MagicMock()
 
@@ -73,7 +75,7 @@ def test_expiry_preserves_solved_reason():
         patch("container_manager.ContainerHistoryModel") as mock_hist,
         patch("container_manager.db"),
     ):
-        mock_model.query.all.return_value = [expired_container]
+        mock_model.query.filter.return_value.all.return_value = [expired_container]
         mock_hist.query.filter_by.return_value.first.return_value = mock_history
         cm.kill_container = MagicMock()
 
@@ -97,7 +99,7 @@ def test_expiry_no_history_row():
         patch("container_manager.ContainerHistoryModel") as mock_hist,
         patch("container_manager.db"),
     ):
-        mock_model.query.all.return_value = [expired_container]
+        mock_model.query.filter.return_value.all.return_value = [expired_container]
         mock_hist.query.filter_by.return_value.first.return_value = None
         cm.kill_container = MagicMock()
 

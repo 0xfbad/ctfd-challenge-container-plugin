@@ -1,0 +1,54 @@
+.cfg-help {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 1px solid #adb5bd;
+    color: #adb5bd;
+    background: none;
+    font-size: 10px;
+    font-weight: 600;
+    cursor: help;
+    position: relative;
+    vertical-align: middle;
+    margin-left: 3px;
+    line-height: 1;
+}
+
+.cfg-help:hover {
+    border-color: #6c757d;
+    color: #6c757d;
+}
+
+.cfg-help:hover::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: #343a40;
+    color: #f8f9fa;
+    padding: 8px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.4;
+    width: 240px;
+    white-space: normal;
+    z-index: 1000;
+    pointer-events: none;
+}
+
+.cfg-help:hover::before {
+    content: '';
+    position: absolute;
+    bottom: calc(100% + 2px);
+    left: 50%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: #343a40;
+    z-index: 1000;
+    pointer-events: none;
+}
