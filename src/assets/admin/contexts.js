@@ -318,6 +318,17 @@ document.addEventListener('DOMContentLoaded', function() {
 		}
 	}
 
+	function newestId(img, contexts, matrix) {
+		var latest = null;
+		contexts.forEach(function(ctx) {
+			var e = matrix[img] && matrix[img][ctx];
+			if (e && e.available && e.info) {
+				if (!latest || e.info.created > latest.created) latest = e.info;
+			}
+		});
+		return latest ? latest.id : null;
+	}
+
 	function renderImageMatrix(images, contexts, matrix) {
 		var container = document.getElementById('image-matrix-container');
 
@@ -326,25 +337,45 @@ document.addEventListener('DOMContentLoaded', function() {
 			'</tr></thead>';
 
 		var rows = images.map(function(img) {
+			var newest = newestId(img, contexts, matrix);
+			var anyMissing = false;
+			var anyOutdated = false;
+
 			var cells = contexts.map(function(ctx) {
-				var present = matrix[img] && matrix[img][ctx];
-				if (present) {
-					return '<td class="text-center"><span class="text-success font-weight-bold">&#10003;</span></td>';
+				var entry = matrix[img] && matrix[img][ctx];
+				if (!entry || !entry.available) {
+					anyMissing = true;
+					return '<td class="text-center" style="background:rgba(220,53,69,0.06)">' +
+						'<i class="fas fa-times-circle text-danger" title="Not found. Build or load this image on this host."></i></td>';
 				}
+
+				var info = entry.info;
+				if (!info) {
+					return '<td class="text-center">' +
+						'<i class="fas fa-check-circle text-success" title="Available"></i></td>';
+				}
+
+				var isStale = newest && info.id !== newest;
+				if (isStale) anyOutdated = true;
+
+				if (isStale) {
+					return '<td class="text-center" style="background:rgba(255,193,7,0.08)">' +
+						'<i class="fas fa-exclamation-circle text-warning" title="Outdated. SHA ' + esc(info.id) + ' (' + info.size_mb + 'MB, built ' + esc(info.created) + ') does not match the newest build. Rebuild on this host."></i></td>';
+				}
+
 				return '<td class="text-center">' +
-					'<button class="btn btn-sm btn-outline-secondary pull-btn" ' +
-						'data-image="' + esc(img) + '" data-ctx="' + esc(ctx) + '">Pull</button></td>';
+					'<i class="fas fa-check-circle text-success" title="Up to date. SHA ' + esc(info.id) + ' (' + info.size_mb + 'MB, built ' + esc(info.created) + ')"></i></td>';
 			}).join('');
 
-			return '<tr><td><code>' + esc(img) + '</code></td>' + cells + '</tr>';
+			var badge = '';
+			if (anyMissing) badge = ' <span class="badge bg-danger">missing</span>';
+			else if (anyOutdated) badge = ' <span class="badge bg-warning text-dark">outdated</span>';
+
+			return '<tr><td>' + esc(img) + badge + '</td>' + cells + '</tr>';
 		}).join('');
 
 		container.innerHTML = '<div class="table-responsive"><table class="table table-sm table-bordered">' +
 			header + '<tbody>' + rows + '</tbody></table></div>';
-
-		container.querySelectorAll('.pull-btn').forEach(function(btn) {
-			btn.onclick = function() { pullImage(this.dataset.image, this.dataset.ctx, this); };
-		});
 	}
 
 	async function pullImage(image, ctx, btn) {

@@ -75,9 +75,9 @@
 
 <div class="d-flex justify-content-between align-items-center mb-3">
     <h5 class="mb-0">Image Availability <span class="cfg-help" data-tip="Shows which challenge images are present on which Docker hosts. Pull missing images to a context before players need them.">?</span></h5>
-    <div>
+    <div class="d-flex align-items-center">
+        <small class="text-muted mr-2" id="cc-scan-status"></small>
         <button type="button" class="btn btn-sm btn-outline-primary" id="cc-scan-btn">Scan</button>
-        <small class="text-muted ml-2" id="cc-scan-status"></small>
     </div>
 </div>
 <div id="cc-matrix-container">
@@ -465,6 +465,27 @@
 
     document.getElementById('cc-scan-btn').addEventListener('click', function() { scanImages(); });
 
+    // load cached results on page load, only hit docker on Scan click
+    loadCachedImages();
+
+    function loadCachedImages() {
+        var st = document.getElementById('cc-scan-status');
+        var box = document.getElementById('cc-matrix-container');
+
+        ccFetch('/api/images/cache')
+            .then(function(data) {
+                if (!data.cached) {
+                    box.innerHTML = '<p class="text-muted text-center small">No scan data yet. Click Scan to check image availability.</p>';
+                    return;
+                }
+                st.textContent = 'Last scanned: ' + new Date(data.scanned_at * 1000).toLocaleString(undefined, {year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
+                renderMatrix(data.images || [], data.contexts || [], data.matrix || {}, box);
+            })
+            .catch(function() {
+                box.innerHTML = '<p class="text-muted text-center small">Click Scan to check image availability</p>';
+            });
+    }
+
     function scanImages() {
         var st = document.getElementById('cc-scan-status');
         var box = document.getElementById('cc-matrix-container');
@@ -472,35 +493,72 @@
 
         ccFetch('/api/images/matrix')
             .then(function(data) {
-                st.textContent = '';
-                var imgs = data.images || [], ctxs = data.contexts || [], mx = data.matrix || {};
-
-                if (!imgs.length) { box.innerHTML = '<p class="text-muted text-center small">No challenge images configured yet</p>'; return; }
-                if (!ctxs.length) { box.innerHTML = '<p class="text-muted text-center small">No connected contexts</p>'; return; }
-
-                var hdr = '<thead><tr><th><b>Image</b></th>' +
-                    ctxs.map(function(c) { return '<th class="text-center"><b>' + esc(c) + '</b></th>'; }).join('') +
-                    '</tr></thead>';
-
-                var rows = imgs.map(function(img) {
-                    var cells = ctxs.map(function(ctx) {
-                        if (mx[img] && mx[img][ctx]) {
-                            return '<td class="text-center"><span class="text-success font-weight-bold">&#10003;</span></td>';
-                        }
-                        return '<td class="text-center"><button class="btn btn-sm btn-outline-secondary cc-pull" ' +
-                            'data-image="' + esc(img) + '" data-ctx="' + esc(ctx) + '">Pull</button></td>';
-                    }).join('');
-                    return '<tr><td><code>' + esc(img) + '</code></td>' + cells + '</tr>';
-                }).join('');
-
-                box.innerHTML = '<div class="table-responsive"><table class="table table-sm table-striped border">' +
-                    hdr + '<tbody>' + rows + '</tbody></table></div>';
-
-                box.querySelectorAll('.cc-pull').forEach(function(btn) {
-                    btn.addEventListener('click', function() { pullToCtx(this.dataset.image, this.dataset.ctx, this); });
-                });
+                var now = new Date();
+                st.textContent = 'Last scanned: ' + now.toLocaleString();
+                renderMatrix(data.images || [], data.contexts || [], data.matrix || {}, box);
             })
             .catch(function(e) { st.textContent = 'Error: ' + e.message; });
+    }
+
+    function renderMatrix(imgs, ctxs, mx, box) {
+        if (!imgs.length) { box.innerHTML = '<p class="text-muted text-center small">No challenge images configured yet</p>'; return; }
+        if (!ctxs.length) { box.innerHTML = '<p class="text-muted text-center small">No connected contexts</p>'; return; }
+
+        function newestId(img) {
+            var latest = null;
+            ctxs.forEach(function(ctx) {
+                var e = mx[img] && mx[img][ctx];
+                if (e && e.available && e.info) {
+                    if (!latest || e.info.created > latest.created) latest = e.info;
+                }
+            });
+            return latest ? latest.id : null;
+        }
+
+        var hdr = '<thead><tr><th><b>Image</b></th>' +
+            ctxs.map(function(c) { return '<th class="text-center"><b>' + esc(c) + '</b></th>'; }).join('') +
+            '</tr></thead>';
+
+        var rows = imgs.map(function(img) {
+            var newest = newestId(img);
+            var anyMissing = false;
+            var anyOutdated = false;
+
+            var cells = ctxs.map(function(ctx) {
+                var entry = mx[img] && mx[img][ctx];
+                if (!entry || !entry.available) {
+                    anyMissing = true;
+                    return '<td class="text-center" style="background:rgba(220,53,69,0.06)">' +
+                        '<i class="fas fa-times-circle text-danger" title="Not found. Build or load this image on this host."></i></td>';
+                }
+
+                var info = entry.info;
+                if (!info) {
+                    return '<td class="text-center">' +
+                        '<i class="fas fa-check-circle text-success" title="Available"></i></td>';
+                }
+
+                var isStale = newest && info.id !== newest;
+                if (isStale) anyOutdated = true;
+
+                if (isStale) {
+                    return '<td class="text-center" style="background:rgba(255,193,7,0.08)">' +
+                        '<i class="fas fa-exclamation-circle text-warning" title="Outdated. SHA ' + esc(info.id) + ' (' + info.size_mb + 'MB, built ' + esc(info.created) + ') does not match the newest build. Rebuild on this host."></i></td>';
+                }
+
+                return '<td class="text-center">' +
+                    '<i class="fas fa-check-circle text-success" title="Up to date. SHA ' + esc(info.id) + ' (' + info.size_mb + 'MB, built ' + esc(info.created) + ')"></i></td>';
+            }).join('');
+
+            var badge = '';
+            if (anyMissing) badge = ' <span class="badge bg-danger">missing</span>';
+            else if (anyOutdated) badge = ' <span class="badge bg-warning text-dark">outdated</span>';
+
+            return '<tr><td>' + esc(img) + badge + '</td>' + cells + '</tr>';
+        }).join('');
+
+        box.innerHTML = '<div class="table-responsive"><table class="table table-sm table-striped border">' +
+            hdr + '<tbody>' + rows + '</tbody></table></div>';
     }
 
     function pullToCtx(image, ctx, btn) {

@@ -206,6 +206,8 @@ class ContainerManager:
         max_cpu: float | None = None,
         context_name: str | None = None,
         extra_env: dict | None = None,
+        ctype: str | None = None,
+        cap_add: str | None = None,
     ):
         self._ensure_connected()
 
@@ -247,12 +249,27 @@ class ContainerManager:
             **(extra_env or {}),
         }
 
+        container_name = f"ctf-c{chal_id}-u{user_id}-{int(time.time())}"
+        kwargs["name"] = container_name
+        kwargs["hostname"] = container_name
+
+        # ssh containers need extra capabilities for sshd privilege separation
+        caps = []
+        if ctype == "ssh":
+            caps.extend(["SYS_CHROOT", "SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "AUDIT_WRITE"])
+        if cap_add:
+            caps.extend([c.strip() for c in cap_add.split(",") if c.strip()])
+        if caps:
+            kwargs["cap_add"] = list(set(caps))
+
         if context_name:
             return self._create_on_context(context_name, image, port, command, environment, kwargs)
 
         return self._create_load_balanced(image, port, command, environment, kwargs)
 
     def _create_on_context(self, context_name, image, port, command, environment, kwargs):
+        from .event_logger import event_logger
+
         if context_name not in self.host_manager._context_configs:
             raise ContainerException(f"docker context '{context_name}' not available")
 
@@ -263,9 +280,21 @@ class ContainerManager:
             return container, context_name
         except docker.errors.ImageNotFound:
             self.orchestrator.release_slot(context_name)
+            event_logger.log_event(
+                "container_error",
+                f"image {image} not found on {context_name}",
+                level="error",
+                metadata={"context_name": context_name, "image": image, "reason": "image not found"},
+            )
             raise ContainerException("docker image not found")
         except docker.errors.DockerException as e:
             self.orchestrator.release_slot(context_name)
+            event_logger.log_event(
+                "container_error",
+                f"failed to create container on {context_name}: {e}",
+                level="error",
+                metadata={"context_name": context_name, "image": image, "reason": str(e)},
+            )
             raise ContainerException(f"failed to create container: {e}")
         finally:
             self.host_manager.release_semaphore(context_name)

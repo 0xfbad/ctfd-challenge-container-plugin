@@ -3,74 +3,61 @@
 {% block connection_info %}
 <style>
 	.instance-container {
-		background-color: var(--bs-body-bg, #fff);
-		filter: brightness(0.96);
+		background-color: rgba(0, 0, 0, 0.03);
 		border: 1px solid var(--bs-border-color-translucent, rgba(0, 0, 0, 0.175));
 		border-radius: 6px;
-		padding: 16px;
+		padding: 14px 16px;
 		margin-bottom: 16px;
 	}
 
 	@media (prefers-color-scheme: dark) {
-		.instance-container {
-			filter: brightness(1.08);
-		}
+		.instance-container { background-color: rgba(255, 255, 255, 0.04); }
 	}
 
 	.instance-header {
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		gap: 8px;
-		margin-bottom: 8px;
+		gap: 6px;
+		margin-bottom: 6px;
 		font-weight: 600;
-		font-size: 14px;
+		font-size: 13px;
 		color: var(--bs-body-color, #212529);
+	}
+
+	.instance-header > span:first-child {
+		opacity: 0.7;
 	}
 
 	.instance-info-icon {
 		cursor: help;
-		color: var(--bs-body-color, #212529);
-		opacity: 0.6;
+		opacity: 0.5;
 		position: relative;
 		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: 16px;
-		height: 16px;
-		border: 1.5px solid currentColor;
-		border-radius: 50%;
 		font-size: 11px;
-		font-weight: bold;
-		transition: opacity 0.2s;
+		transition: opacity 0.15s;
 	}
 
-	.instance-info-icon:hover {
-		opacity: 1;
-		color: var(--bs-link-color, #007bff);
-	}
+	.instance-info-icon:hover { opacity: 1; }
 
 	.instance-tooltip {
 		position: absolute;
-		bottom: 100%;
+		bottom: calc(100% + 8px);
 		left: 50%;
 		transform: translateX(-50%);
-		background-color: var(--bs-body-bg, #fff);
-		color: var(--bs-body-color, #212529);
-		padding: 14px 18px;
+		background: #1a1e21;
+		color: #dee2e6;
+		padding: 12px 14px;
 		border-radius: 6px;
 		font-size: 12px;
 		font-weight: normal;
 		white-space: normal;
-		max-width: 300px;
-		width: max-content;
-		z-index: 1000;
+		width: 340px;
+		z-index: 1050;
 		display: none;
-		margin-bottom: 8px;
-		box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
-		border: 1px solid var(--bs-border-color-translucent, rgba(0, 0, 0, 0.175));
-		line-height: 1.6;
 		text-align: left;
+		line-height: 1.5;
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
 	}
 
 	.instance-tooltip::after {
@@ -79,138 +66,191 @@
 		top: 100%;
 		left: 50%;
 		transform: translateX(-50%);
-		border: 7px solid transparent;
-		border-top-color: var(--bs-body-bg, #fff);
+		border: 6px solid transparent;
+		border-top-color: #1a1e21;
 	}
 
-	.instance-info-icon:hover .instance-tooltip {
-		display: block;
-	}
+	.instance-info-icon:hover .instance-tooltip { display: block; }
 
-	.tooltip-header {
-		font-weight: 600;
-		margin-bottom: 8px;
-		color: var(--bs-link-color, #007bff);
-		opacity: 0.9;
-		font-size: 13px;
-	}
-
-	.tooltip-item {
-		margin-bottom: 6px;
-		padding-left: 2px;
+	.instance-tooltip .tip-item {
 		display: flex;
-		align-items: center;
+		align-items: flex-start;
 		gap: 8px;
+		margin-bottom: 5px;
 	}
 
-	.tooltip-item i {
+	.instance-tooltip .tip-item i {
+		font-size: 10px;
+		opacity: 0.5;
+		width: 12px;
+		flex-shrink: 0;
+		margin-top: 3px;
+	}
+
+	.instance-tooltip .tip-warn {
+		margin-top: 8px;
+		padding-top: 8px;
+		border-top: 1px solid rgba(255, 255, 255, 0.1);
+		color: #ff8a8a;
 		font-size: 11px;
-		opacity: 0.6;
-		width: 14px;
-		flex-shrink: 0;
-	}
-
-	.tooltip-warning {
-		margin-top: 10px;
-		padding-top: 10px;
-		border-top: 1px solid;
-		border-top-color: var(--bs-body-color, #212529);
-		border-top-opacity: 0.2;
-		color: #ff6b6b;
-		font-weight: 500;
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		gap: 6px;
 	}
 
-	.tooltip-warning i {
-		color: #ff6b6b;
-		font-size: 12px;
-		width: 14px;
+	.instance-tooltip .tip-warn i {
+		font-size: 10px;
 		flex-shrink: 0;
 	}
 
-	.instance-content {
-		text-align: center;
+	.instance-content { text-align: center; }
+
+	.deployment-info {
+		margin: 4px 0 8px 0;
+		padding: 0;
+		font-size: 14px;
 	}
 
-	.instance-timer {
+	.connection-row {
+		display: inline-flex;
+		align-items: stretch;
+		margin: 4px 0;
+		border-radius: 4px;
+		overflow: hidden;
+		border: 1px solid rgba(128, 128, 128, 0.2);
+	}
+
+	.connection-row code {
+		background: rgba(0, 0, 0, 0.75);
+		color: #e8e8e8;
+		padding: 7px 12px;
 		font-family: 'Courier New', Consolas, monospace;
 		font-size: 13px;
-		font-weight: 600;
-		margin: 2px 0 6px 0;
-		padding: 5px 10px;
-		border-radius: 4px;
 		display: inline-block;
-		min-width: 85px;
+		user-select: all;
+		border: none;
+		border-radius: 0;
 	}
 
-	.instance-timer.timer-ok {
-		color: #1e7e34;
-		background-color: rgba(40, 167, 69, 0.15);
-		border: 1px solid rgba(40, 167, 69, 0.3);
+	.copy-btn {
+		background: rgba(0, 0, 0, 0.6);
+		border: none;
+		border-left: 1px solid rgba(128, 128, 128, 0.2);
+		padding: 0 10px;
+		cursor: pointer;
+		color: #adb5bd;
+		transition: background 0.15s, color 0.15s;
+		font-size: 12px;
+		display: inline-flex;
+		align-items: center;
 	}
 
-	.instance-timer.timer-warning {
-		color: #856404;
-		background-color: rgba(255, 193, 7, 0.15);
-		border: 1px solid rgba(255, 193, 7, 0.3);
+	.copy-btn:hover { background: rgba(0, 0, 0, 0.8); color: #fff; }
+	.copy-btn.copied { color: #6fdc8c; }
+
+	.connection-label {
+		font-size: 11px;
+		font-weight: 600;
+		color: var(--bs-body-color, #212529);
+		opacity: 0.5;
+		text-align: center;
+		margin-bottom: 2px;
 	}
 
-	.instance-timer.timer-expired {
-		color: #a71d2a;
-		background-color: rgba(220, 53, 69, 0.15);
-		border: 1px solid rgba(220, 53, 69, 0.3);
+	.connection-hint {
+		font-size: 11px;
+		color: var(--bs-body-color, #212529);
+		opacity: 0.4;
+		margin: 4px 0 0 0;
 	}
 
-	@media (prefers-color-scheme: dark) {
-		.instance-timer.timer-ok {
-			color: #6fdc8c;
-			background-color: rgba(76, 175, 80, 0.2);
-			border-color: rgba(76, 175, 80, 0.4);
-		}
-
-		.instance-timer.timer-warning {
-			color: #ffd93d;
-			background-color: rgba(255, 235, 59, 0.2);
-			border-color: rgba(255, 235, 59, 0.4);
-		}
-
-		.instance-timer.timer-expired {
-			color: #ff6b6b;
-			background-color: rgba(244, 67, 54, 0.2);
-			border-color: rgba(244, 67, 54, 0.4);
-		}
+	.deployment-info a {
+		color: var(--bs-link-color, #007bff);
+		font-weight: 500;
+		text-decoration: none;
+		word-break: break-all;
+		font-size: 14px;
 	}
 
-	.instance-buttons {
+	.deployment-info a:hover {
+		text-decoration: underline;
+	}
+
+	.instance-bar {
 		display: flex;
-		gap: 8px;
+		align-items: center;
 		justify-content: center;
-		flex-wrap: wrap;
+		gap: 6px;
 		margin-top: 8px;
 	}
 
-	.instance-btn {
-		min-width: 120px;
-		font-weight: 500;
-		transition: all 0.2s;
+	.instance-bar .bar-timer {
+		font-family: monospace;
+		font-size: 12px;
+		font-weight: 600;
+		min-width: 48px;
+		text-align: center;
+		padding: 0 4px;
+		color: var(--bs-body-color, #212529);
+		opacity: 0.7;
+		cursor: default;
+		user-select: none;
 	}
 
-	.instance-btn:disabled {
-		cursor: not-allowed;
-		opacity: 0.65;
+	.instance-bar .bar-timer.timer-warning { color: #b58105; }
+	.instance-bar .bar-timer.timer-expired { color: #dc3545; }
+
+	@media (prefers-color-scheme: dark) {
+		.instance-bar .bar-timer.timer-warning { color: #ffc107; }
+		.instance-bar .bar-timer.timer-expired { color: #ff6b6b; }
+	}
+
+	.instance-bar .bar-divider {
+		width: 1px;
+		height: 16px;
+		background: var(--bs-border-color-translucent, rgba(0, 0, 0, 0.175));
+	}
+
+	.bar-btn {
+		background: none;
+		color: var(--bs-body-color, #6c757d);
+		border: none;
+		padding: 3px 10px;
+		border-radius: 3px;
+		cursor: pointer;
+		font-size: 12px;
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		transition: background 0.15s, color 0.15s;
+	}
+
+	.bar-btn:hover { background: rgba(128, 128, 128, 0.15); color: var(--bs-body-color, #212529); }
+	.bar-btn.stop:hover { color: #dc3545; background: rgba(220, 53, 69, 0.1); }
+	.bar-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+	.bar-btn:disabled:hover { background: none; }
+
+	.instance-start {
+		margin-top: 4px;
+	}
+
+	.instance-start .btn {
+		font-size: 13px;
+		font-weight: 500;
+		gap: 6px;
+		display: inline-flex;
+		align-items: center;
 	}
 
 	.loading-spinner {
-		width: 14px;
-		height: 14px;
+		width: 12px;
+		height: 12px;
 		border: 2px solid currentColor;
 		border-top: 2px solid transparent;
 		border-radius: 50%;
 		animation: spin 0.8s linear infinite;
 		display: inline-block;
-		margin-right: 6px;
+		margin-right: 4px;
 		vertical-align: middle;
 	}
 
@@ -219,36 +259,23 @@
 		100% { transform: rotate(360deg); }
 	}
 
-	.deployment-info {
-		margin: 8px 0;
-		padding: 10px;
+	.misconfigured-banner {
+		padding: 10px 16px;
+		background: #f8d7da;
+		border: 1px solid #f5c6cb;
 		border-radius: 4px;
-		font-size: 15px;
-	}
-
-	.deployment-info code {
-		background: var(--bs-body-color, #212529);
-		color: var(--bs-body-bg, #fff);
-		padding: 8px 12px;
-		border-radius: 4px;
-		font-family: 'Courier New', Consolas, monospace;
-		font-size: 14px;
-		display: inline-block;
-		margin-top: 8px;
-		opacity: 0.95;
-	}
-
-	.deployment-info a {
-		color: var(--bs-link-color, #007bff);
+		text-align: center;
+		color: #721c24;
 		font-weight: 500;
-		text-decoration: none;
-		word-break: break-all;
-		font-size: 15px;
+		font-size: 13px;
 	}
 
-	.deployment-info a:hover {
-		text-decoration: underline;
-		color: var(--bs-link-hover-color, #0056b3);
+	@media (prefers-color-scheme: dark) {
+		.misconfigured-banner {
+			background: rgba(220, 53, 69, 0.15);
+			border-color: rgba(220, 53, 69, 0.3);
+			color: #ff6b6b;
+		}
 	}
 </style>
 
@@ -258,24 +285,27 @@
 	<div class="instance-header">
 		<span>Challenge Instance</span>
 		<span class="instance-info-icon">
-			?
+			<i class="fas fa-info-circle"></i>
 			<span class="instance-tooltip">
-				<div class="tooltip-header">Personal Container</div>
-				<div class="tooltip-item">
+				<div class="tip-item">
 					<i class="fas fa-server"></i>
-					<span>You get your own isolated environment to prevent interference</span>
+					<span>You get your own isolated environment</span>
 				</div>
-				<div class="tooltip-item">
+				<div class="tip-item">
 					<i class="fas fa-clock"></i>
-					<span>Expires after a time limit to free up server resources</span>
+					<span>Expires after a time limit, extend if you need more</span>
 				</div>
-				<div class="tooltip-item">
+				<div class="tip-item">
 					<i class="fas fa-flag"></i>
-					<span>Your flag may be unique to prevent sharing answers</span>
+					<span>Your flag may be unique to you</span>
 				</div>
-				<div class="tooltip-warning">
+				<div class="tip-item">
+					<i class="fas fa-redo"></i>
+					<span>If something breaks, stop and start a new instance</span>
+				</div>
+				<div class="tip-warn">
 					<i class="fas fa-exclamation-triangle"></i>
-					<span>Sharing flags with other users is cheating</span>
+					<span>Sharing flags is cheating</span>
 				</div>
 			</span>
 		</span>
@@ -284,15 +314,20 @@
 	<div class="instance-content">
 		<div id="deployment-info" class="deployment-info" style="display: none;"></div>
 
-		<div class="instance-buttons">
-			<button onclick="container_request({{ challenge.id }})" class="btn btn-success instance-btn d-none" id="create-chal">
+		<div class="instance-start d-none" id="create-chal">
+			<button onclick="container_request({{ challenge.id }})" class="btn btn-outline-success btn-sm">
 				<i class="fas fa-play"></i> Start Instance
 			</button>
-			<button onclick="container_renew({{ challenge.id }})" class="btn btn-info instance-btn d-none" id="extend-chal">
-				<i class="fas fa-clock"></i> Extend Time
+		</div>
+
+		<div class="instance-bar d-none" id="running-bar">
+			<span class="bar-timer" id="instance-timer">--:--</span>
+			<span class="bar-divider"></span>
+			<button onclick="container_renew({{ challenge.id }})" class="bar-btn" id="extend-chal">
+				<i class="fas fa-plus"></i> Extend
 			</button>
-			<button onclick="container_stop({{ challenge.id }})" class="btn btn-danger instance-btn d-none" id="terminate-chal">
-				<i class="fas fa-power-off"></i> Terminate Instance
+			<button onclick="container_stop({{ challenge.id }})" class="bar-btn stop" id="terminate-chal">
+				<i class="fas fa-stop"></i> Stop
 			</button>
 		</div>
 	</div>

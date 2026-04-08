@@ -13,6 +13,17 @@ class Orchestrator:
         self.weights = {}
         self.lock = Lock()
 
+    @staticmethod
+    def _challenge_image():
+        """Get the first configured challenge image for health check info."""
+        try:
+            from .models import ContainerChallengeModel
+
+            chal = ContainerChallengeModel.query.filter(ContainerChallengeModel.image.isnot(None)).first()
+            return chal.image if chal else None
+        except Exception:
+            return None
+
     def load_from_db(self):
         from .models import DockerContextModel
         from .utils import get_setting
@@ -39,7 +50,11 @@ class Orchestrator:
             new_weights[name] = ctx.weight
 
             if is_connected:
-                events.append(("host_healthy", f"context {name} is healthy", "info", {"context_name": name}))
+                meta: dict = {"context_name": name}
+                image_info = self.host_manager.get_image_info(name, self._challenge_image())
+                if image_info:
+                    meta["image"] = image_info
+                events.append(("host_healthy", f"context {name} is healthy", "info", meta))
             else:
                 events.append(
                     (

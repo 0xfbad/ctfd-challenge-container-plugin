@@ -7,7 +7,7 @@ CTFd._internal.challenge.postRender = function () {};
 CTFd._internal.challenge.submit = function (preview) {
     const challengeId = parseInt(CTFd.lib.$("#challenge-id").val());
     const submission = CTFd.lib.$("#challenge-input").val();
-    const alert = resetAlert();
+    resetAlert();
 
     const body = {
         challenge_id: challengeId,
@@ -20,216 +20,244 @@ CTFd._internal.challenge.submit = function (preview) {
         if (response.status === 429 || response.status === 403) {
             return response;
         }
+        // re-fetch container info to pick up post-solve expiry change
+        if (response.data && response.data.status === "correct") {
+            setTimeout(function() {
+                fetch("/containers/api/view_info", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "Accept": "application/json", "CSRF-Token": init.csrfNonce },
+                    body: JSON.stringify({ chal_id: challengeId }),
+                })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.expires) startTimer(data.expires);
+                })
+                .catch(function() {});
+            }, 500);
+        }
         return response;
     });
 };
 
+var _expiryInterval = null;
+
 function resetAlert() {
-    const alert = document.getElementById("deployment-info");
-    alert.innerHTML = "";
-    alert.classList.remove("alert-danger");
-    alert.style.display = "none";
-
-    return alert;
+    var el = document.getElementById("deployment-info");
+    el.innerHTML = "";
+    el.classList.remove("alert-danger");
+    el.style.display = "none";
+    return el;
 }
 
-function toggleChallengeCreate() {
-    const btn = document.getElementById("create-chal");
-    btn.classList.toggle('d-none');
+function showStart() {
+    document.getElementById("create-chal").classList.remove("d-none");
+    document.getElementById("running-bar").classList.add("d-none");
 }
 
-function toggleChallengeUpdate() {
-    const btnExtend = document.getElementById("extend-chal");
-    const btnTerminate = document.getElementById("terminate-chal");
-    btnExtend.classList.toggle('d-none');
-    btnTerminate.classList.toggle('d-none');
+function showRunning() {
+    document.getElementById("create-chal").classList.add("d-none");
+    document.getElementById("running-bar").classList.remove("d-none");
 }
 
-function calculateExpiry(expiresAtTimestamp) {
-    const now = Date.now(); 
-    const difference = Math.floor((expiresAtTimestamp * 1000 - now) / 1000);
-
-    return difference > 0 ? difference : 0;
+function hideAll() {
+    document.getElementById("create-chal").classList.add("d-none");
+    document.getElementById("running-bar").classList.add("d-none");
 }
 
 function formatTime(seconds) {
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = seconds % 60;
+    var hours = Math.floor(seconds / 3600);
+    var minutes = Math.floor((seconds % 3600) / 60);
+    var secs = seconds % 60;
 
-    const hoursStr = hours > 0 ? String(hours).padStart(2, '0') + ':' : '';
-    const minutesStr = String(minutes).padStart(2, '0');
-    const secondsStr = String(secs).padStart(2, '0');
-
-    return hoursStr + `${minutesStr}:${secondsStr}`;
+    var h = hours > 0 ? String(hours).padStart(2, '0') + ':' : '';
+    return h + String(minutes).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
 }
 
-function getTimerClass(seconds) {
-    if (seconds <= 0) return 'timer-expired';
-    if (seconds < 300) return 'timer-warning';
-    return 'timer-ok';
-}
+function startTimer(expiresAt) {
+    if (_expiryInterval) clearInterval(_expiryInterval);
 
+    var timer = document.getElementById("instance-timer");
 
-function createChallengeLinkElement(data, parent) {
-    if (parent.expiryInterval) {
-        clearInterval(parent.expiryInterval);
-    }
-    parent.innerHTML = '';
-    parent.style.display = 'block';
+    function tick() {
+        var left = Math.max(0, Math.floor((expiresAt * 1000 - Date.now()) / 1000));
+        timer.textContent = left > 0 ? formatTime(left) : "expired";
+        timer.className = "bar-timer" + (left <= 0 ? " timer-expired" : left < 300 ? " timer-warning" : "");
 
-    const timerDiv = document.createElement('div');
-    timerDiv.className = 'instance-timer';
-    parent.append(timerDiv);
-
-    const connectionDetails = document.createElement('div');
-    connectionDetails.style.marginTop = '10px';
-    parent.append(connectionDetails);
-
-    function updateExpiry() {
-        const secondsLeft = calculateExpiry(data.expires);
-
-        timerDiv.textContent = secondsLeft > 0
-            ? `Expires in ${formatTime(secondsLeft)}`
-            : "Expired";
-
-        timerDiv.className = 'instance-timer ' + getTimerClass(secondsLeft);
-
-        if (secondsLeft <= 0) {
-            clearInterval(parent.expiryInterval);
-            delete parent.expiryInterval;
-
-            toggleChallengeCreate();
-            toggleChallengeUpdate();
-
-            connectionDetails.innerHTML = '';
+        if (left <= 0) {
+            clearInterval(_expiryInterval);
+            _expiryInterval = null;
+            resetAlert();
+            showStart();
         }
     }
 
-    updateExpiry();
-    parent.expiryInterval = setInterval(updateExpiry, 1000);
-
-    if (data.connect === "tcp") {
-        const codeElement = document.createElement('code');
-        codeElement.textContent = `nc ${data.hostname} ${data.port}`;
-        connectionDetails.append(codeElement);
-    } else if (data.connect === "ssh") {
-        const codeElement = document.createElement('code');
-        codeElement.textContent = data.ssh_password
-            ? `sshpass -p ${data.ssh_password} ssh -o StrictHostKeyChecking=no ${data.hostname} -p ${data.port}`
-            : `ssh -o StrictHostKeyChecking=no ${data.hostname} -p ${data.port}`;
-        connectionDetails.append(codeElement);
-    } else {
-        const link = document.createElement('a');
-        link.href = `http://${data.hostname}:${data.port}`;
-        link.textContent = link.href;
-        link.target = '_blank';
-        connectionDetails.append(link);
-    }
+    tick();
+    _expiryInterval = setInterval(tick, 1000);
 }
 
+function showConnection(data, container) {
+    container.innerHTML = '';
+    container.style.display = 'block';
+
+    if (data.connect === "web") {
+        var url = "http://" + data.hostname + ":" + data.port;
+        var link = document.createElement('a');
+        link.href = url;
+        link.textContent = url;
+        link.target = '_blank';
+        container.append(link);
+
+        var hint = document.createElement('div');
+        hint.className = 'connection-hint';
+        hint.textContent = 'click to open in a new tab';
+        container.append(hint);
+    } else if (data.connect === "ssh") {
+        var cmd = "ssh " + (data.ssh_username || '') + "@" + data.hostname + " -p " + data.port;
+        container.append(makeCopyField("Command", cmd));
+        if (data.ssh_password) {
+            container.append(makeCopyField("Password", data.ssh_password));
+        }
+        var hint = document.createElement('div');
+        hint.className = 'connection-hint';
+        hint.textContent = 'run the command in your terminal, then enter the password';
+        container.append(hint);
+    } else {
+        var cmd = "nc " + data.hostname + " " + data.port;
+        container.append(makeCopyField(null, cmd));
+        var hint = document.createElement('div');
+        hint.className = 'connection-hint';
+        hint.textContent = 'paste into your terminal to connect';
+        container.append(hint);
+    }
+
+    startTimer(data.expires);
+    showRunning();
+}
+
+
 function view_container_info(challengeId) {
-    resetAlert();
-    const alert = document.getElementById("deployment-info");
+    var info = resetAlert();
 
     fetch("/containers/api/view_info", {
         method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "CSRF-Token": init.csrfNonce,
-        },
+        headers: { "Content-Type": "application/json", "Accept": "application/json", "CSRF-Token": init.csrfNonce },
         body: JSON.stringify({ chal_id: challengeId }),
     })
-    .then((response) => response.json())
-    .then((data) => {
-        if (data.status === "instance not started") {
-            alert.style.display = "none";
-            toggleChallengeCreate();
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.status === "misconfigured") {
+            info.style.display = 'block';
+            info.innerHTML = '<div class="misconfigured-banner"><i class="fas fa-exclamation-triangle" style="margin-right:6px"></i>' +
+                (data.message || 'This challenge has a broken configuration. This is on our end, not yours.') + '</div>';
+        } else if (data.status === "instance not started") {
+            showStart();
         } else if (data.status === "already_running") {
-            createChallengeLinkElement(data, alert);
-            toggleChallengeUpdate();
+            showConnection(data, info);
         } else if (data.status === "host_unavailable") {
-            createChallengeLinkElement(data, alert);
-            const warning = document.createElement('div');
-            warning.className = 'alert alert-warning';
-            warning.style.marginTop = '8px';
-            warning.textContent = data.message || 'Host temporarily unreachable';
-            alert.prepend(warning);
-            toggleChallengeUpdate();
-        } else {
-            resetAlert();
-            alert.textContent = data.message;
-            alert.classList.add('alert-danger');
-            alert.style.display = "block";
+            showConnection(data, info);
+            var warn = document.createElement('div');
+            warn.className = 'connection-hint';
+            warn.style.color = '#b58105';
+            warn.textContent = data.message || 'host temporarily unreachable';
+            info.append(warn);
+        } else if (data.message || data.error) {
+            info.textContent = data.message || data.error;
+            info.classList.add('alert-danger');
+            info.style.display = 'block';
         }
     })
-    .catch((error) => console.error("Fetch error:", error));
+    .catch(function(e) { console.error("Fetch error:", e); });
 }
 
 var _requestInFlight = false;
 
 function _isPermanentError(msg) {
     if (!msg) return false;
-    const permanent = ["image not found", "max containers", "challenge not found"];
-    const lower = msg.toLowerCase();
-    return permanent.some(p => lower.includes(p));
+    var permanent = ["image not found", "max containers", "challenge not found"];
+    var lower = msg.toLowerCase();
+    return permanent.some(function(p) { return lower.indexOf(p) !== -1; });
 }
 
 function _doContainerRequest(challengeId, isRetry) {
-    const alert = resetAlert();
-    const btn = document.getElementById("create-chal");
+    var info = resetAlert();
+    var startDiv = document.getElementById("create-chal");
+    var btn = startDiv.querySelector("button");
 
     if (_requestInFlight) return;
     _requestInFlight = true;
 
     btn.disabled = true;
-    btn.innerHTML = isRetry
-        ? '<span class="loading-spinner"></span> Retrying...'
-        : '<span class="loading-spinner"></span> Starting...';
+    btn.innerHTML = '<span class="loading-spinner"></span> ' + (isRetry ? 'Retrying...' : 'Starting...');
 
     fetch("/containers/api/request", {
         method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "CSRF-Token": init.csrfNonce,
-        },
+        headers: { "Content-Type": "application/json", "Accept": "application/json", "CSRF-Token": init.csrfNonce },
         body: JSON.stringify({ chal_id: challengeId }),
     })
-    .then((response) => response.json())
-    .then((data) => {
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
         if (data.error || data.message) {
-            const errMsg = data.error || data.message;
-
+            var errMsg = data.error || data.message;
             if (!isRetry && !_isPermanentError(errMsg)) {
                 btn.innerHTML = '<span class="loading-spinner"></span> Retrying...';
                 _requestInFlight = false;
-                setTimeout(() => _doContainerRequest(challengeId, true), 2000);
+                setTimeout(function() { _doContainerRequest(challengeId, true); }, 2000);
                 return;
             }
-
-            alert.textContent = errMsg;
-            alert.classList.add('alert-danger');
-            alert.style.display = "block";
+            info.textContent = errMsg;
+            info.classList.add('alert-danger');
+            info.style.display = 'block';
             btn.disabled = false;
             btn.innerHTML = '<i class="fas fa-play"></i> Start Instance';
         } else {
-            createChallengeLinkElement(data, alert);
+            showConnection(data, info);
             btn.disabled = false;
             btn.innerHTML = '<i class="fas fa-play"></i> Start Instance';
-            toggleChallengeCreate();
-            toggleChallengeUpdate();
         }
     })
-    .catch((error) => {
-        console.error("Fetch error:", error);
+    .catch(function(e) {
+        console.error("Fetch error:", e);
         btn.disabled = false;
         btn.innerHTML = '<i class="fas fa-play"></i> Start Instance';
     })
-    .finally(() => {
-        _requestInFlight = false;
-    });
+    .finally(function() { _requestInFlight = false; });
+}
+
+function makeCopyField(label, value) {
+    var wrapper = document.createElement('div');
+    wrapper.style.marginBottom = '4px';
+
+    if (label) {
+        var lbl = document.createElement('div');
+        lbl.className = 'connection-label';
+        lbl.textContent = label;
+        wrapper.append(lbl);
+    }
+
+    var row = document.createElement('div');
+    row.className = 'connection-row';
+
+    var code = document.createElement('code');
+    code.textContent = value;
+    row.append(code);
+
+    var btn = document.createElement('button');
+    btn.className = 'copy-btn';
+    btn.innerHTML = '<i class="fas fa-copy"></i>';
+    btn.title = 'Copy';
+    btn.onclick = function() {
+        navigator.clipboard.writeText(value).then(function() {
+            btn.innerHTML = '<i class="fas fa-check"></i>';
+            btn.classList.add('copied');
+            setTimeout(function() {
+                btn.innerHTML = '<i class="fas fa-copy"></i>';
+                btn.classList.remove('copied');
+            }, 1500);
+        });
+    };
+    row.append(btn);
+    wrapper.append(row);
+    return wrapper;
 }
 
 function container_request(challengeId) {
@@ -237,89 +265,73 @@ function container_request(challengeId) {
 }
 
 function container_renew(challengeId) {
-    const alert = resetAlert();
-    const btn = document.getElementById("extend-chal");
+    var btn = document.getElementById("extend-chal");
 
     btn.disabled = true;
-    btn.innerHTML = '<span class="loading-spinner"></span> Extending...';
+    btn.innerHTML = '<span class="loading-spinner"></span>';
 
     fetch("/containers/api/renew", {
         method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "CSRF-Token": init.csrfNonce,
-        },
+        headers: { "Content-Type": "application/json", "Accept": "application/json", "CSRF-Token": init.csrfNonce },
         body: JSON.stringify({ chal_id: challengeId }),
     })
-    .then((response) => response.json())
-    .then((data) => {
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-plus"></i> Extend';
         if (data.error || data.message) {
-            alert.textContent = data.error || data.message;
-            alert.classList.add('alert-danger');
-            alert.style.display = "block";
-            btn.disabled = false;
-            btn.innerHTML = '<i class="fas fa-clock"></i> Extend Time';
+            var info = document.getElementById("deployment-info");
+            info.textContent = data.error || data.message;
+            info.classList.add('alert-danger');
+            info.style.display = 'block';
         } else {
-            createChallengeLinkElement(data, alert);
-            btn.disabled = false;
-            btn.innerHTML = '<i class="fas fa-clock"></i> Extend Time';
+            startTimer(data.expires);
         }
     })
-    .catch((error) => {
-        console.error("Fetch error:", error);
+    .catch(function(e) {
+        console.error("Fetch error:", e);
         btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-clock"></i> Extend Time';
+        btn.innerHTML = '<i class="fas fa-plus"></i> Extend';
     });
 }
 
 function container_stop(challengeId) {
-    const alert = resetAlert();
-    const btn = document.getElementById("terminate-chal");
-    const extendBtn = document.getElementById("extend-chal");
+    var info = resetAlert();
+    var btn = document.getElementById("terminate-chal");
+    var extBtn = document.getElementById("extend-chal");
 
     btn.disabled = true;
-    btn.innerHTML = '<span class="loading-spinner"></span> Terminating...';
-
-    if (extendBtn) {
-        extendBtn.disabled = true;
-    }
+    extBtn.disabled = true;
+    btn.innerHTML = '<span class="loading-spinner"></span>';
 
     fetch("/containers/api/stop", {
         method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "CSRF-Token": init.csrfNonce,
-        },
+        headers: { "Content-Type": "application/json", "Accept": "application/json", "CSRF-Token": init.csrfNonce },
         body: JSON.stringify({ chal_id: challengeId }),
     })
-    .then((response) => response.json())
-    .then((data) => {
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
         btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-power-off"></i> Terminate Instance';
-
-        if (extendBtn) {
-            extendBtn.disabled = false;
-        }
+        extBtn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-stop"></i> Stop';
+        extBtn.innerHTML = '<i class="fas fa-plus"></i> Extend';
 
         if (data.error || data.message) {
-            alert.textContent = data.error || data.message;
-            alert.classList.add('alert-danger');
-            alert.style.display = "block";
+            info.textContent = data.error || data.message;
+            info.classList.add('alert-danger');
+            info.style.display = 'block';
         } else {
-            alert.style.display = "none";
+            info.style.display = 'none';
         }
 
-        toggleChallengeCreate();
-        toggleChallengeUpdate();
+        if (_expiryInterval) { clearInterval(_expiryInterval); _expiryInterval = null; }
+        showStart();
     })
-    .catch((error) => {
-        console.error("Fetch error:", error);
+    .catch(function(e) {
+        console.error("Fetch error:", e);
         btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-power-off"></i> Terminate Instance';
-        if (extendBtn) {
-            extendBtn.disabled = false;
-        }
+        extBtn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-stop"></i> Stop';
+        extBtn.innerHTML = '<i class="fas fa-plus"></i> Extend';
     });
 }

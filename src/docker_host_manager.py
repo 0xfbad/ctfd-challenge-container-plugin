@@ -232,24 +232,38 @@ class DockerHostManager:
 
     def run_container(self, context_name, image, port, command, environment, **kwargs):
         """Create and start a container on the specified context."""
+        import random
+
         client = self._get_client(context_name)
-        try:
-            container = client.containers.run(
-                image,
-                ports={str(port): None},
-                command=command,
-                detach=True,
-                auto_remove=True,
-                cap_drop=["ALL"],
-                security_opt=["no-new-privileges:true"],
-                pids_limit=256,
-                environment=environment,
-                **kwargs,
-            )
-            return container
-        except docker.errors.DockerException:
-            self._clear_client(context_name)
-            raise
+        last_err = None
+        for _ in range(50):
+            host_port = random.randint(40000, 59999)
+            try:
+                container = client.containers.run(
+                    image,
+                    ports={str(port): host_port},
+                    command=command,
+                    detach=True,
+                    auto_remove=True,
+                    cap_drop=["ALL"],
+                    security_opt=["no-new-privileges:true"],
+                    pids_limit=256,
+                    environment=environment,
+                    **kwargs,
+                )
+                return container
+            except docker.errors.APIError as e:
+                # port conflict, retry with a different port
+                if "port is already allocated" in str(e) or "address already in use" in str(e):
+                    last_err = e
+                    continue
+                self._clear_client(context_name)
+                raise
+            except docker.errors.DockerException:
+                self._clear_client(context_name)
+                raise
+
+        raise docker.errors.DockerException(f"failed to find available port after retries: {last_err}")
 
     def kill_container(self, context_name, container_id):
         try:
@@ -307,3 +321,21 @@ class DockerHostManager:
             return True
         except Exception:
             return False
+
+    def get_image_info(self, context_name, image):
+        """Return image metadata (id, size, build time) or None."""
+        try:
+            client = self._get_client(context_name)
+            img = client.images.get(image)
+            attrs = img.attrs or {}
+            size_mb = round((attrs.get("Size") or 0) / 1024 / 1024)
+            created = attrs.get("Created", "")[:19].replace("T", " ")
+            # nix/bazel reproducible builds report 1970/1980, use LastTagTime instead
+            if created.startswith("1970") or created.startswith("1980"):
+                last_tag = (attrs.get("Metadata") or {}).get("LastTagTime", "")
+                if last_tag:
+                    created = last_tag[:19].replace("T", " ")
+            short_id = img.short_id.replace("sha256:", "")
+            return {"id": short_id, "size_mb": size_mb, "created": created}
+        except Exception:
+            return None

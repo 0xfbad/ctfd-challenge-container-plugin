@@ -86,12 +86,22 @@ def build_connection_response(status, challenge, container, context_name):
     }
 
 
+def _request_hostname():
+    try:
+        return request.host.split(":")[0]
+    except Exception:
+        return "localhost"
+
+
 def get_hostname_for_context(context_name):
     if not context_name:
-        try:
-            return request.host.split(":")[0]
-        except Exception:
-            return "localhost"
+        return _request_hostname()
+
+    from ..docker_host_manager import LOCAL_CONTEXT_NAME
+
+    # local context runs on the same machine, use the address users reach CTFd through
+    if context_name == LOCAL_CONTEXT_NAME:
+        return _request_hostname()
 
     context = DockerContextModel.query.filter_by(context_name=context_name).first()
     if context:
@@ -103,10 +113,7 @@ def get_hostname_for_context(context_name):
                 hostname = hostname.split("@")[1]
             return hostname
 
-    try:
-        return request.host.split(":")[0]
-    except Exception:
-        return "localhost"
+    return _request_hostname()
 
 
 def record_history_stop(container_id, reason):
@@ -252,11 +259,18 @@ def _create_container_inner(chal_id, xid, uid, is_team):
             logger.error(f"container status check failed: {err}")
             return {"error": "a server error occurred, please try again"}, 500
 
-    extra_env = None
+    extra_env = {}
     freshness_secret = get_setting("freshness_secret")
     if freshness_secret:
         token = compute_token(freshness_secret, chal_id, xid)
-        extra_env = {"FRESHNESS_TOKEN": token}
+        extra_env["FRESHNESS_TOKEN"] = token
+
+    if challenge.ssh_username:
+        extra_env["SSH_USERNAME"] = challenge.ssh_username
+    if challenge.ssh_password:
+        extra_env["SSH_PASSWORD"] = challenge.ssh_password
+
+    extra_env = extra_env or None
 
     try:
         created_container, context_name = container_manager.create_container(
@@ -271,6 +285,8 @@ def _create_container_inner(chal_id, xid, uid, is_team):
             challenge.max_cpu,
             challenge.docker_context,
             extra_env=extra_env,
+            ctype=challenge.ctype,
+            cap_add=challenge.cap_add,
         )
     except ContainerException as err:
         return {"error": sanitize_container_error(err)}
@@ -369,8 +385,30 @@ def view_container_info(chal_id, xid, is_team):
             )
             response["message"] = "the container host is temporarily unreachable, please wait"
             return response
-    else:
-        return {"status": "instance not started"}
+
+    misconfigured = _check_misconfigured(challenge, container_manager)
+    if misconfigured:
+        return misconfigured
+
+    return {"status": "instance not started"}
+
+
+def _check_misconfigured(challenge, container_manager):
+    if not challenge.image or not challenge.port:
+        logger.warning(f"challenge {challenge.id} ({challenge.name}) missing image or port")
+        return {
+            "status": "misconfigured",
+            "message": "This challenge has a broken configuration. This is on our end, not yours.",
+        }
+
+    if not container_manager.host_manager.has_contexts():
+        logger.warning(f"no docker contexts available for challenge {challenge.id} ({challenge.name})")
+        return {
+            "status": "misconfigured",
+            "message": "This challenge is temporarily unavailable due to a server configuration issue. This is on our end, not yours.",
+        }
+
+    return None
 
 
 def connect_type(chal_id):

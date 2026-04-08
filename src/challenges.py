@@ -1,4 +1,5 @@
 import os
+import secrets
 import time
 import threading
 
@@ -90,8 +91,19 @@ class ContainerChallenge(BaseChallenge):
         return value if value and value != "" else None
 
     @classmethod
+    def _handle_ssh_password(cls, data, existing_password=None):
+        mode = data.pop("ssh_password_mode", None)
+        if mode == "auto":
+            # keep existing password if one exists, otherwise generate
+            data["ssh_password"] = existing_password or secrets.token_urlsafe(8)
+        elif mode == "none":
+            data["ssh_password"] = None
+
+    @classmethod
     def create(cls, request):
         data = request.form or request.get_json()
+
+        cls._handle_ssh_password(data)
 
         for attr in ("docker_context", "max_memory_mb", "max_cpu", "expiration_minutes"):
             if attr in data:
@@ -106,6 +118,8 @@ class ContainerChallenge(BaseChallenge):
     @classmethod
     def update(cls, challenge, request):
         data = request.form or request.get_json()
+
+        cls._handle_ssh_password(data, existing_password=challenge.ssh_password)
 
         for attr, value in data.items():
             if attr in ("docker_context", "max_memory_mb", "max_cpu", "expiration_minutes"):
@@ -166,19 +180,24 @@ class ContainerChallenge(BaseChallenge):
             owner = _find_token_owner(secret, challenge.id, submitted_token, xid, team_mode)
             if owner:
                 source_id, identifier = owner
+                meta = {
+                    "challenge_id": challenge.id,
+                    "challenge_name": challenge.name,
+                    "source_entity": identifier,
+                    "source_id": source_id,
+                    "source_type": "teams" if team_mode else "users",
+                }
+                if team_mode and user.team:
+                    meta["team_id"] = user.team.id
+                    meta["team_name"] = user.team.name
+
                 event_logger.log_event(
                     "flag_sharing",
                     f"user '{user.name}' submitted a flag belonging to '{identifier}' on challenge '{challenge.name}'",
                     user_id=user.id,
                     username=user.name,
                     level="warning",
-                    metadata={
-                        "challenge_id": challenge.id,
-                        "challenge_name": challenge.name,
-                        "source_entity": identifier,
-                        "source_id": source_id,
-                        "source_type": "teams" if team_mode else "users",
-                    },
+                    metadata=meta,
                 )
                 return False, "this flag belongs to another participant. this attempt has been logged."
 
@@ -200,6 +219,7 @@ class ContainerChallenge(BaseChallenge):
             "expiration_minutes": challenge.expiration_minutes,
             "max_memory_mb": challenge.max_memory_mb,
             "max_cpu": challenge.max_cpu,
+            "cap_add": challenge.cap_add,
             "description": challenge.description,
             "connection_info": challenge.connection_info,
             "category": challenge.category,

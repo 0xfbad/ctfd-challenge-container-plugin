@@ -39,16 +39,11 @@
     <label>
         Image<br>
         <small class="form-text text-muted">
-            Name of the Docker image to spin up. Type to search.
+            Name of the Docker image to spin up.
         </small>
     </label>
-    <div style="position: relative;">
-        <input type="text" class="form-control" id="image-search" placeholder="Loading images..." autocomplete="off">
-        <input type="hidden" name="image" id="image-hidden">
-        <div class="list-group" id="image-dropdown"
-            style="display: none; position: absolute; z-index: 1000; width: 100%; max-height: 300px; overflow-y: auto;">
-        </div>
-    </div>
+    <input type="text" class="form-control" name="image" value="{{ challenge.image | default('', true) }}" placeholder="e.g. tcp-example:latest" required>
+    <div id="image-status" style="margin-top: 6px;"></div>
 </div>
 
 <div class="form-group">
@@ -82,11 +77,16 @@
         <label>
             SSH Password<br>
             <small class="form-text text-muted">
-                Password that will be used to connect to the SSH machine.
+                Password shown to users in the connection dialog.
             </small>
         </label>
-        <input type="text" class="form-control" name="ssh_password" value="{{ challenge.ssh_password }}"
-            placeholder="Enter password or leave blank">
+        <select class="form-control" name="ssh_password_mode">
+            <option value="none" {% if not challenge.ssh_password %}selected{% endif %}>No password</option>
+            <option value="auto" {% if challenge.ssh_password %}selected{% endif %}>Auto-generate password</option>
+        </select>
+        {% if challenge.ssh_password %}
+        <small class="form-text text-muted mt-1">Current: <code>{{ challenge.ssh_password }}</code></small>
+        {% endif %}
     </div>
 </div>
 
@@ -172,7 +172,17 @@
         </label>
         <input type="number" class="form-control" name="max_cpu" value="{{ challenge.max_cpu }}" step="0.1" min="0.1">
     </div>
+
+    <div class="form-group">
+        <label>
+            Extra Capabilities<br>
+            <small class="form-text text-muted">
+                Comma-separated Linux capabilities to add (e.g. NET_ADMIN,SYS_ADMIN for network namespace challenges).
+            </small>
+        </label>
+        <input type="text" class="form-control" name="cap_add" value="{{ challenge.cap_add | default('', true) }}" placeholder="Leave blank for defaults">
+    </div>
 </div>
 
-<script src="/plugins/individualized-containers/src/assets/challenge-form-utils.js"></script>
+<script src="/plugins/challenge-containers/src/assets/challenge-form-utils.js"></script>
 {% endblock %}

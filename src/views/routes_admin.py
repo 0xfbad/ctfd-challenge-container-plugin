@@ -100,6 +100,7 @@ def route_get_running_containers():
             "connect_type": container.challenge.ctype,
             "ssh_username": container.challenge.ssh_username,
             "ssh_password": container.challenge.ssh_password,
+            "docker_context": container.docker_context or "local",
         }
         if team_mode:
             container_data["team"] = f"{container.team.name}"
@@ -114,11 +115,60 @@ def route_get_running_containers():
     return jsonify(response_data)
 
 
+@containers_bp.route("/api/stats/summary", methods=["GET"])
+@admins_only
+def route_stats_summary():
+    active = ContainerInfoModel.query.count()
+    total = ContainerHistoryModel.query.count()
+
+    rows = ContainerHistoryModel.query.filter(
+        ContainerHistoryModel.stopped_at.isnot(None),
+    ).all()
+
+    durations = [r.stopped_at - r.created_at for r in rows if r.stopped_at and r.created_at]
+    avg_duration = sum(durations) / len(durations) if durations else 0
+
+    unique_users = db.session.query(db.func.count(db.distinct(ContainerHistoryModel.user_id))).scalar() or 0
+
+    flag_shares = len([e for e in event_logger.get_recent_events(limit=2000) if e.get("type") == "flag_sharing"])
+
+    # peak concurrent via sweep line on history
+    events_list = []
+    for r in ContainerHistoryModel.query.all():
+        if r.created_at:
+            events_list.append((r.created_at, 1))
+        if r.stopped_at:
+            events_list.append((r.stopped_at, -1))
+    events_list.sort()
+    peak = 0
+    current = 0
+    for _, delta in events_list:
+        current += delta
+        peak = max(peak, current)
+
+    return jsonify(
+        active=active,
+        total=total + active,
+        avg_duration=round(avg_duration),
+        unique_users=unique_users,
+        flag_shares=flag_shares,
+        peak_concurrent=peak,
+    )
+
+
 @containers_bp.route("/api/events/recent", methods=["GET"])
 @admins_only
 def route_get_recent_events():
     events = event_logger.get_recent_events(limit=50)
     return jsonify(events=events)
+
+
+@containers_bp.route("/api/flag_sharing", methods=["GET"])
+@admins_only
+def route_get_flag_sharing():
+    all_events = event_logger.get_recent_events(limit=2000)
+    sharing = [e for e in all_events if e.get("type") == "flag_sharing"]
+    return jsonify(events=sharing)
 
 
 @containers_bp.route("/api/events/stream", methods=["GET"])
@@ -188,7 +238,28 @@ def route_kill_container():
     if not container_id:
         return jsonify(error="no container_id specified"), 400
 
+    # get container info before killing for the event log
+    container = ContainerInfoModel.query.filter_by(container_id=container_id).first()
+    user_name = container.user.name if container and container.user else None
+    user_id = container.user_id if container else None
+    chal_name = container.challenge.name if container and container.challenge else None
+
     result = kill_container(container_id)
+
+    if "success" in result:
+        event_logger.log_event(
+            "admin_action",
+            f"admin killed container for {user_name or 'unknown'}",
+            level="warning",
+            metadata={
+                "action": "kill",
+                "target": user_name,
+                "target_id": user_id,
+                "challenge_name": chal_name,
+                "container_id": container_id[:12],
+            },
+        )
+
     status_code = 200 if "success" in result else 400
     return jsonify(result), status_code
 
@@ -202,6 +273,12 @@ def route_purge_containers():
             kill_container(cid)
         except ContainerException:
             pass
+    event_logger.log_event(
+        "admin_action",
+        f"purged {len(container_ids)} containers",
+        level="warning",
+        metadata={"action": "purge", "count": len(container_ids)},
+    )
     return jsonify(success="purged all containers"), 200
 
 
@@ -312,6 +389,12 @@ def route_api_add_context():
     container_manager = current_app.container_manager
     container_manager.load_docker_contexts()
 
+    event_logger.log_event(
+        "context_changed",
+        f"context {context_name} added",
+        level="info",
+        metadata={"action": "added", "context_name": context_name},
+    )
     return jsonify(success="context added", id=new_context.id)
 
 
@@ -350,6 +433,12 @@ def route_api_update_context(context_id):
     container_manager = current_app.container_manager
     container_manager.load_docker_contexts()
 
+    event_logger.log_event(
+        "context_changed",
+        f"context {context.context_name} updated",
+        level="info",
+        metadata={"action": "updated", "context_name": context.context_name},
+    )
     return jsonify(success="context updated")
 
 
@@ -360,12 +449,19 @@ def route_api_delete_context(context_id):
     if not context:
         return jsonify(error="context not found"), 404
 
+    name = context.context_name
     db.session.delete(context)
     db.session.commit()
 
     container_manager = current_app.container_manager
     container_manager.load_docker_contexts()
 
+    event_logger.log_event(
+        "context_changed",
+        f"context {name} deleted",
+        level="warning",
+        metadata={"action": "deleted", "context_name": name},
+    )
     return jsonify(success="context deleted")
 
 
@@ -455,11 +551,14 @@ def route_api_images_matrix():
     if not connected:
         return jsonify(images=challenge_images, contexts=[], matrix={})
 
-    # list images on each context in parallel (one API call per context)
+    # list images and fetch metadata on each context in parallel
     def _list(ctx_name):
         return ctx_name, set(container_manager.host_manager.get_images(ctx_name))
 
-    context_images = {}
+    def _info(ctx_name, image):
+        return ctx_name, image, container_manager.host_manager.get_image_info(ctx_name, image)
+
+    context_images: dict[str, set] = {}
     with ThreadPoolExecutor(max_workers=min(len(connected), 8)) as pool:
         futures = {pool.submit(_list, ctx): ctx for ctx in connected}
         for future in as_completed(futures, timeout=15):
@@ -469,16 +568,78 @@ def route_api_images_matrix():
             except Exception:
                 context_images[futures[future]] = set()
 
-    # build matrix with tag normalization (bare name -> name:latest)
-    matrix = {}
-    for img in challenge_images:
-        normalized = img if ":" in img else f"{img}:latest"
-        matrix[img] = {}
-        for ctx in connected:
-            tags = context_images.get(ctx, set())
-            matrix[img][ctx] = normalized in tags or img in tags
+    # build matrix keyed by display name (strip :latest)
+    matrix: dict[str, dict] = {}
+    pending: list[tuple[str, str, object]] = []
+    max_workers = min(max(len(connected), 1) * max(len(challenge_images), 1), 16)
 
-    return jsonify(images=challenge_images, contexts=connected, matrix=matrix)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for img in challenge_images:
+            normalized = img if ":" in img else f"{img}:latest"
+            display = img.removesuffix(":latest")
+            matrix[display] = {}
+
+            for ctx in connected:
+                tags = context_images.get(ctx, set())
+                present = normalized in tags or img in tags
+                matrix[display][ctx] = {"available": present}
+
+                if present:
+                    docker_name = normalized if normalized in tags else img
+                    pending.append((display, ctx, pool.submit(_info, ctx, docker_name)))
+
+        for display, ctx, future in pending:
+            try:
+                _, _, info = future.result(timeout=15)
+                matrix[display][ctx]["info"] = info
+            except Exception:
+                pass
+
+    display_images = sorted(matrix.keys())
+
+    set_setting("image_cache", json.dumps({"matrix": matrix, "contexts": connected, "scanned_at": time.time()}))
+
+    return jsonify(images=display_images, contexts=connected, matrix=matrix)
+
+
+def _load_image_cache():
+    raw = get_setting("image_cache")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+@containers_bp.route("/api/images/cache", methods=["GET"])
+@admins_only
+def route_api_images_cache():
+    cache = _load_image_cache()
+    if not cache:
+        return jsonify(cached=False)
+
+    return jsonify(
+        cached=True,
+        images=sorted(cache["matrix"].keys()),
+        contexts=cache["contexts"],
+        matrix=cache["matrix"],
+        scanned_at=cache["scanned_at"],
+    )
+
+
+@containers_bp.route("/api/images/status", methods=["GET"])
+@admins_only
+def route_api_image_status():
+    image = request.args.get("image", "").removesuffix(":latest")
+    cache = _load_image_cache()
+
+    if not cache:
+        return jsonify(cached=False)
+
+    contexts = cache["matrix"].get(image, {})
+
+    return jsonify(cached=True, image=image, contexts=contexts, scanned_at=cache["scanned_at"])
 
 
 @containers_bp.route("/api/contexts/reload", methods=["POST"])
@@ -768,3 +929,64 @@ def route_analytics_solve_times():
 
     result.sort(key=lambda x: x["solve_count"], reverse=True)
     return jsonify(result)
+
+
+@containers_bp.route("/api/analytics/flag_sharing", methods=["GET"])
+@admins_only
+def route_analytics_flag_sharing():
+    cutoff = _range_cutoff()
+
+    all_events = event_logger.get_recent_events(limit=2000)
+    sharing = [e for e in all_events if e.get("type") == "flag_sharing" and e.get("timestamp", 0) >= cutoff]
+
+    if not sharing:
+        return jsonify(labels=[], counts=[], by_challenge={})
+
+    # bin by hour
+    bins: dict[int, int] = {}
+    by_challenge: dict[str, int] = {}
+    for e in sharing:
+        hour = int(e["timestamp"]) // 3600 * 3600
+        bins[hour] = bins.get(hour, 0) + 1
+        cname = (e.get("metadata") or {}).get("challenge_name", "unknown")
+        by_challenge[cname] = by_challenge.get(cname, 0) + 1
+
+    if bins:
+        min_t = min(bins)
+        max_t = max(bins)
+        labels = list(range(min_t, max_t + 3600, 3600))
+        counts = [bins.get(t, 0) for t in labels]
+    else:
+        labels, counts = [], []
+
+    return jsonify(labels=labels, counts=counts, by_challenge=by_challenge)
+
+
+@containers_bp.route("/api/analytics/heatmap", methods=["GET"])
+@admins_only
+def route_analytics_heatmap():
+    cutoff = _range_cutoff()
+
+    rows = ContainerHistoryModel.query.filter(ContainerHistoryModel.created_at >= cutoff).all()
+
+    # build hour-of-day x day-of-week matrix
+    from datetime import datetime
+
+    matrix = [[0] * 7 for _ in range(24)]
+    for r in rows:
+        if not r.created_at:
+            continue
+        dt = datetime.fromtimestamp(r.created_at)
+        matrix[dt.hour][dt.weekday()] += 1
+
+    # echarts heatmap format: [[day, hour, value], ...]
+    data = []
+    for hour in range(24):
+        for day in range(7):
+            if matrix[hour][day] > 0:
+                data.append([day, hour, matrix[hour][day]])
+
+    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    hours = [f"{h:02d}:00" for h in range(24)]
+
+    return jsonify(data=data, days=days, hours=hours)

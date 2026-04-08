@@ -17,6 +17,7 @@ class ContainerChallengeModel(Challenges):
     max_memory_mb = db.Column(db.Integer, nullable=True)
     max_cpu = db.Column(db.Float, nullable=True)
     docker_context = db.Column(db.String(512), nullable=True)
+    cap_add = db.Column(db.Text, default="")
 
 
 class ContainerInfoModel(db.Model):
