@@ -641,6 +641,7 @@
 		'admin_action': 'Admin',
 		'context_changed': 'Context',
 		'container_requested': 'Requested',
+		'request_failed': 'Failed',
 		'solved': 'Solved',
 	};
 
@@ -653,6 +654,7 @@
 		'host_unhealthy': 'badge-evt-host-down',
 		'flag_sharing': 'badge-evt-flag-share',
 		'container_error': 'badge-evt-error',
+		'request_failed': 'badge-evt-error',
 		'admin_action': 'badge-evt-admin',
 		'context_changed': 'badge-evt-context',
 		'container_requested': 'badge-evt-requested',
@@ -698,6 +700,16 @@
 					return `${escapeHtml(name)}: ${status}`;
 				});
 				return hostParts.join(' | ');
+			}
+			case 'request_failed': {
+				const parts = [];
+				if (m.challenge_name) {
+					parts.push(m.challenge_id
+						? '<a href="/admin/challenges/' + safeId(m.challenge_id) + '">' + escapeHtml(m.challenge_name) + '</a>'
+						: escapeHtml(m.challenge_name));
+				}
+				if (m.reason) parts.push(escapeHtml(m.reason));
+				return parts.join(': ');
 			}
 			case 'solved':
 				return m.challenge_name

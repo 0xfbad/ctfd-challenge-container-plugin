@@ -26,6 +26,8 @@ class EventLogger:
 
                 user = Users.query.filter_by(id=user_id).first()
                 if user:
+                    if not username:
+                        username = user.name
                     if user.type == "admin":
                         user_flags["is_admin"] = True
                     if getattr(user, "hidden", False):

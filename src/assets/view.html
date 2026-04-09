@@ -277,6 +277,43 @@
 			color: #ff6b6b;
 		}
 	}
+
+	.server-error-banner {
+		padding: 16px 20px;
+		background: #fff3cd;
+		border: 1px solid #ffecb5;
+		border-radius: 6px;
+		text-align: center;
+		color: #664d03;
+		line-height: 1.6;
+	}
+
+	.server-error-banner i.banner-icon {
+		font-size: 22px;
+		display: block;
+		margin-bottom: 6px;
+		color: #997404;
+	}
+
+	.server-error-banner .error-title {
+		font-weight: 600;
+		font-size: 14px;
+		margin-bottom: 2px;
+	}
+
+	.server-error-banner .error-detail {
+		opacity: 0.75;
+		font-size: 12px;
+	}
+
+	@media (prefers-color-scheme: dark) {
+		.server-error-banner {
+			background: rgba(255, 193, 7, 0.1);
+			border-color: rgba(255, 193, 7, 0.25);
+			color: #ffc107;
+		}
+		.server-error-banner i.banner-icon { color: #ffc107; }
+	}
 </style>
 
 <div class="instance-container">

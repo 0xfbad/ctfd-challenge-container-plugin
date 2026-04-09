@@ -162,9 +162,14 @@ function view_container_info(challengeId) {
             warn.textContent = data.message || 'host temporarily unreachable';
             info.append(warn);
         } else if (data.message || data.error) {
-            info.textContent = data.message || data.error;
-            info.classList.add('alert-danger');
-            info.style.display = 'block';
+            var errMsg = data.message || data.error;
+            if (_isPermanentError(errMsg)) {
+                _showServerError(info);
+            } else {
+                info.textContent = errMsg;
+                info.classList.add('alert-danger');
+                info.style.display = 'block';
+            }
         }
     })
     .catch(function(e) { console.error("Fetch error:", e); });
@@ -177,6 +182,17 @@ function _isPermanentError(msg) {
     var permanent = ["image not found", "max containers", "challenge not found"];
     var lower = msg.toLowerCase();
     return permanent.some(function(p) { return lower.indexOf(p) !== -1; });
+}
+
+function _showServerError(container) {
+    container.innerHTML = '<div class="server-error-banner">' +
+        '<i class="fas fa-exclamation-triangle banner-icon"></i>' +
+        '<div class="error-title">This challenge isn\'t available right now</div>' +
+        '<div class="error-detail">Something is wrong on our end, not yours. Please let an admin know so we can fix it.</div>' +
+        '</div>';
+    container.style.display = 'block';
+    container.classList.remove('alert-danger');
+    hideAll();
 }
 
 function _doContainerRequest(challengeId, isRetry) {
@@ -205,9 +221,13 @@ function _doContainerRequest(challengeId, isRetry) {
                 setTimeout(function() { _doContainerRequest(challengeId, true); }, 2000);
                 return;
             }
-            info.textContent = errMsg;
-            info.classList.add('alert-danger');
-            info.style.display = 'block';
+            if (_isPermanentError(errMsg)) {
+                _showServerError(info);
+            } else {
+                info.textContent = errMsg;
+                info.classList.add('alert-danger');
+                info.style.display = 'block';
+            }
             btn.disabled = false;
             btn.innerHTML = '<i class="fas fa-play"></i> Start Instance';
         } else {

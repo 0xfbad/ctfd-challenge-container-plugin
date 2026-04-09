@@ -302,6 +302,8 @@ class ContainerManager:
             self.host_manager.release_semaphore(context_name)
 
     def _create_load_balanced(self, image, port, command, environment, kwargs):
+        from .event_logger import event_logger
+
         tried: set[str] = set()
         last_error = None
 
@@ -326,6 +328,12 @@ class ContainerManager:
                 return container, selected
             except docker.errors.ImageNotFound:
                 self.orchestrator.release_slot(selected)
+                event_logger.log_event(
+                    "container_error",
+                    f"image {image} not found on {selected}",
+                    level="error",
+                    metadata={"context_name": selected, "image": image, "reason": "image not found"},
+                )
                 raise ContainerException("docker image not found")
             except docker.errors.DockerException as e:
                 self.orchestrator.release_slot(selected)

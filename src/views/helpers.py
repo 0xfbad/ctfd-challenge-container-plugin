@@ -332,6 +332,17 @@ def _create_container_inner(chal_id, xid, uid, is_team):
                 cap_add=challenge.cap_add,
             )
         except ContainerException as err:
+            event_logger.log_event(
+                "request_failed",
+                f"container request failed for {challenge.name}: {err}",
+                level="error",
+                user_id=uid,
+                metadata={
+                    "challenge_id": challenge.id,
+                    "challenge_name": challenge.name,
+                    "reason": str(err),
+                },
+            )
             return {"error": sanitize_container_error(err)}
 
         if host_port is None:
@@ -420,6 +431,17 @@ def _create_container_inner(chal_id, xid, uid, is_team):
                 cap_add=challenge.cap_add,
             )
         except ContainerException as err:
+            event_logger.log_event(
+                "request_failed",
+                f"container request failed for {challenge.name}: {err}",
+                level="error",
+                user_id=uid,
+                metadata={
+                    "challenge_id": challenge.id,
+                    "challenge_name": challenge.name,
+                    "reason": str(err),
+                },
+            )
             return {"error": sanitize_container_error(err)}
 
         port = container_manager.get_container_port(created_container.id, context_name)
