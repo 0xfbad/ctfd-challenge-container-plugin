@@ -77,6 +77,9 @@ def log_container_event(
 
 
 def build_connection_response(status, challenge, container, context_name):
+    max_renewals = challenge.max_renewals
+    if max_renewals is None:
+        max_renewals = get_setting("default_max_renewals", 2)
     return {
         "status": status,
         "hostname": get_hostname_for_context(context_name),
@@ -85,6 +88,8 @@ def build_connection_response(status, challenge, container, context_name):
         "ssh_password": challenge.ssh_password,
         "connect": challenge.ctype,
         "expires": container.expires,
+        "renewals_used": container.renewals_used or 0,
+        "max_renewals": max_renewals,
     }
 
 
@@ -195,12 +200,27 @@ def renew_container(chal_id, xid, is_team):
     if running_container is None:
         return {"error": "container not found, try resetting the container"}
 
+    max_renewals = challenge.max_renewals
+    if max_renewals is None:
+        max_renewals = get_setting("default_max_renewals", 2)
+    renewals_used = running_container.renewals_used or 0
+
+    if renewals_used >= max_renewals:
+        return {"error": "no renewals remaining"}
+
+    now = int(time.time())
+    time_remaining = max(0, (running_container.expires or 0) - now)
+
     try:
-        expiration_seconds = (challenge.expiration_minutes or 0) * 60
-        new_expires = int(time.time() + expiration_seconds) if expiration_seconds > 0 else 0
+        expiration_minutes = challenge.expiration_minutes or get_setting("default_expiration_minutes", 30)
+        expiration_seconds = expiration_minutes * 60
+        new_expires = now + expiration_seconds
         running_container.expires = new_expires
+        running_container.renewals_used = renewals_used + 1
         if running_container.stack_id:
-            ContainerInfoModel.query.filter_by(stack_id=running_container.stack_id).update({"expires": new_expires})
+            ContainerInfoModel.query.filter_by(stack_id=running_container.stack_id).update(
+                {"expires": new_expires, "renewals_used": renewals_used + 1}
+            )
         db.session.commit()
     except Exception:
         return {"error": "database error occurred, please try again"}
@@ -210,16 +230,20 @@ def renew_container(chal_id, xid, is_team):
     team_id = running_container.team_id
     team_name = running_container.team.name if running_container.team else None
 
-    log_container_event(
+    event_logger.log_event(
         event_type="renewed",
-        container_id=running_container.container_id,
-        challenge_id=challenge.id,
-        challenge_name=challenge.name,
-        user_id=user_id,
-        user_name=user_name,
-        team_id=team_id,
-        team_name=team_name,
         message=f"container renewed for {challenge.name}",
+        user_id=user_id,
+        username=user_name,
+        metadata={
+            "container_id": running_container.container_id,
+            "challenge_id": challenge.id,
+            "challenge_name": challenge.name,
+            "team_id": team_id,
+            "team_name": team_name,
+            "time_remaining": time_remaining,
+            "renewal": f"{renewals_used + 1}/{max_renewals}",
+        },
     )
 
     response = build_connection_response("success", challenge, running_container, running_container.docker_context)
@@ -287,8 +311,9 @@ def _create_container_inner(chal_id, xid, uid, is_team):
 
     extra_env = extra_env or None
 
-    expiration_seconds = (challenge.expiration_minutes or 0) * 60
-    expires = int(time.time() + expiration_seconds) if expiration_seconds > 0 else 0
+    expiration_minutes = challenge.expiration_minutes or get_setting("default_expiration_minutes", 30)
+    expiration_seconds = expiration_minutes * 60
+    expires = int(time.time() + expiration_seconds)
     now = int(time.time())
 
     host_status = container_manager.orchestrator.get_status()

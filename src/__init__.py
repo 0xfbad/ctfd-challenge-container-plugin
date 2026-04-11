@@ -105,8 +105,42 @@ def _reconcile_containers(app, container_manager):
         logger.info(f"reconciled containers on startup: {kept} recovered, {removed} stale records removed")
 
 
+def _ensure_columns(app: Flask):
+    from CTFd.models import db
+    from sqlalchemy import inspect, text
+
+    with app.app_context():
+        insp = inspect(db.engine)
+        for table, col, col_type, default in [
+            ("container_challenges", "max_renewals", "INTEGER", "2"),
+            ("container_info", "renewals_used", "INTEGER", "0"),
+        ]:
+            try:
+                cols = {c["name"] for c in insp.get_columns(table)}
+            except Exception:
+                continue
+            if col not in cols:
+                db.session.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type} DEFAULT {default}"))
+                logger.info(f"added {col} column to {table}")
+
+        # float(32-bit) rounds unix timestamps, need double
+        try:
+            hist_cols = {c["name"]: c for c in insp.get_columns("container_history")}
+            for col in ("created_at", "stopped_at"):
+                col_info = hist_cols.get(col)
+                if col_info and str(col_info["type"]).upper() == "FLOAT":
+                    nullable = "NULL" if col_info.get("nullable", True) else "NOT NULL"
+                    db.session.execute(text(f"ALTER TABLE container_history MODIFY {col} DOUBLE {nullable}"))
+                    logger.info(f"upgraded container_history.{col} from FLOAT to DOUBLE")
+        except Exception as e:
+            logger.debug(f"float upgrade check for container_history: {e}")
+
+        db.session.commit()
+
+
 def load(app: Flask):
     app.db.create_all()
+    _ensure_columns(app)
     CHALLENGE_CLASSES["container"] = ContainerChallenge
     register_freshness_flag()
 

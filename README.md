@@ -71,6 +71,8 @@ Pass `context_name` in the body to pull to a specific context only
 
 The plugin creates its tables automatically on first load, no manual migration needed. It creates `docker_contexts` for the context pool, `container_challenges` for challenge definitions, `container_info` for active container metadata, `container_settings` for plugin configuration, and `container_history` for permanent lifecycle records
 
+When upgrading from a version without renewal tracking, the plugin auto-adds `max_renewals` to `container_challenges` and `renewals_used` to `container_info` via ALTER TABLE on startup. Existing challenges default to 2 max renewals, existing containers default to 0 renewals used
+
 ## Container lifecycle
 
 ### Creation
@@ -93,11 +95,13 @@ User clicks "Stop Instance" or admin force-kills from the dashboard. Plugin kill
 
 ### Expiration
 
-Each challenge has a configurable expiration in minutes (default 30, 0 means never expire). An APScheduler job runs on a configurable interval (default 5s) to query the database for containers past their expiration timestamp and kills them. Users can renew their session from the UI which resets the timer to the challenge's configured duration
+Each challenge has a configurable expiration in minutes (default 30, pulled from the global `default_expiration_minutes` setting). All containers must have an expiration, there is no "never expire" option. An APScheduler job runs on a configurable interval (default 5s) to query the database for containers past their expiration timestamp and kills them
+
+Users can renew their container from the UI which resets the timer to the challenge's configured duration. Renewals are limited by a per-challenge `max_renewals` setting (default 2, pulled from the global `default_max_renewals` setting). The user-facing UI shows remaining renewals as a counter on the Renew button and disables it when exhausted. Each renewal is tracked per-container via the `renewals_used` column on `ContainerInfoModel`, the counter resets when a new container is created
 
 ### Post-solve auto-expiry
 
-When a player submits a correct flag the plugin shortens their running container's expiration to 90 seconds from now. This frees resources quickly after a solve without killing the container instantly, giving the player a moment to see the result. The delay is configurable via the `post_solve_expiry_seconds` setting, set it to 0 to disable. Containers with no expiration (`expires = 0`) are left alone
+When a player submits a correct flag the plugin shortens their running container's expiration to 90 seconds from now. This frees resources quickly after a solve without killing the container instantly, giving the player a moment to see the result. The delay is configurable via the `post_solve_expiry_seconds` setting, set it to 0 to disable. The solve time (seconds from container creation to flag submission) is logged in the event metadata and shown in the admin activity feed
 
 ### Container history
 
@@ -205,9 +209,9 @@ The admin dashboard has a logs button (terminal icon) on each running container 
 
 ## Analytics dashboard
 
-The Container Stats page (`/containers/admin/stats`, linked from the admin plugin menu) provides four ECharts visualizations built from `ContainerHistoryModel` data. All charts accept a time range selector (24h, 7d, 30d, all time)
+The Container Stats page (`/containers/admin/stats`, linked from the admin plugin menu) provides ECharts visualizations built from `ContainerHistoryModel` data. All charts accept a time range selector (24h, 7d, 30d, all time)
 
-The activity chart shows container creates and stops over time, bucketed hourly for the 24h view and daily for longer ranges. The top users chart ranks users by total container time with container count and unique challenge count in tooltips. The challenge stats chart shows containers per challenge with a restart rate overlay (containers per unique user, useful for spotting challenges that crash frequently). The solve times chart cross-references CTFd's `Solves` table with container history to compute how long each player took from container creation to flag submission, displayed as average bars with individual solve times as scatter points
+The top users chart ranks users by total container time with container count and unique challenge count in tooltips. The challenge stats chart shows containers per challenge with a restart rate overlay (containers per unique user, useful for spotting challenges that crash frequently). The solve times chart cross-references CTFd's `Solves` table with container history to compute how long each player took from container creation to flag submission, displayed as average bars with individual solve times as scatter points
 
 ## Configuration
 
@@ -226,7 +230,8 @@ Core fields sit at the top, runner fields like context and expiration come next,
 - Volumes: JSON object for volume mounts
 - Connection Type: `tcp`, `ssh`, or `web` (default web)
 - SSH Credentials: username/password for ssh type
-- Expiration: minutes until auto-kill (0 means never, default 30)
+- Expiration: container lifetime as hours/minutes, defaults to the global `default_expiration_minutes` setting
+- Max Renewals: how many times users can reset the timer, defaults to the global `default_max_renewals` setting (0 disables renewals)
 - Max Memory: MB limit per container
 - Max CPU: core limit as decimal (1.5 means 1.5 cores)
 
@@ -242,6 +247,8 @@ Managed through the admin settings page, no config files needed
 | expiration_check_interval | 5 | seconds between expiry sweeps |
 | rate_limit_requests | 45 | max requests per rate limit interval |
 | rate_limit_interval | 60 | rate limit window in seconds |
+| default_expiration_minutes | 30 | default container lifetime for new challenges |
+| default_max_renewals | 2 | default renewal limit for new challenges (0 disables renewals) |
 | freshness_secret | (auto-generated) | HMAC key for freshness tokens, clear to disable |
 | post_solve_expiry_seconds | 90 | seconds until container expires after a correct solve, 0 to disable |
 
@@ -258,7 +265,7 @@ Managed through the admin config page at `/admin/config`. Contexts get imported 
 - `POST /containers/api/request` request container instance
 - `POST /containers/api/view_info` check container status and connection info
 - `POST /containers/api/stop` stop your container
-- `POST /containers/api/renew` extend expiration time
+- `POST /containers/api/renew` renew container timer (limited by max_renewals)
 - `GET /containers/api/get_connect_type/<challenge_id>` get connection type for a challenge
 
 ### Admin
@@ -275,7 +282,6 @@ Managed through the admin config page at `/admin/config`. Contexts get imported 
 ### Analytics
 
 - `GET /containers/admin/stats` analytics dashboard page
-- `GET /containers/api/analytics/activity` container creates/stops over time
 - `GET /containers/api/analytics/top_users` top 20 users by total container time
 - `GET /containers/api/analytics/challenges` per-challenge container stats
 - `GET /containers/api/analytics/solve_times` time-to-solve per challenge
@@ -312,7 +318,7 @@ All analytics endpoints accept `?range=24h|7d|30d|all` (default `7d`)
 
 **Images not found**: images must exist on the challenge's assigned context before users can start instances, use the Image Availability scan on the config page to see what's where and pull what's missing. For private images you'll need to `docker save` / `docker load` onto each host or push to a private registry the hosts can reach
 
-**Containers not expiring**: check that `expiration_minutes` is set to non-zero for the challenge, `expires = 0` means never expire which is intentional, verify the scheduler is running by checking CTFd logs for expiry job messages
+**Containers not expiring**: verify the scheduler is running by checking CTFd logs for expiry job messages, all containers have a mandatory expiration timestamp calculated from the challenge's `expiration_minutes` or the global `default_expiration_minutes` setting
 
 **Containers piling up on one host**: the load balancer uses weighted least-connections scoring, check that your context weights are set appropriately in the admin UI, a context with weight 2 gets twice the score bonus compared to weight 1
 
@@ -360,8 +366,10 @@ When `services` is present the plugin creates a Docker network named `chal-u{uid
 
 ### Model fields
 
+- `ContainerChallengeModel.max_renewals` (Integer, default 2): per-challenge renewal limit
 - `ContainerChallengeModel.services_json` (Text, nullable): JSON string of companion service definitions
 - `ContainerChallengeModel.network_json` (Text, nullable): JSON string with optional subnet and static IPs
+- `ContainerInfoModel.renewals_used` (Integer, default 0): how many times this container has been renewed
 - `ContainerInfoModel.stack_id` (String(64), nullable, indexed): groups containers in a compose stack
 - `ContainerInfoModel.is_entry` (Boolean, default True): marks the user-facing container
 
@@ -371,7 +379,7 @@ When `services` is present the plugin creates a Docker network named `chal-u{uid
 
 ### Lifecycle
 
-Kill/extend/expire operations work on the entire stack. When the entry container is killed or expires, the plugin finds all `ContainerInfoModel` rows sharing the same `stack_id`, kills all containers via Docker labels, removes the network, and deletes all DB rows. Extending renews the `expires` timestamp on all rows in the stack
+Kill/renew/expire operations work on the entire stack. When the entry container is killed or expires, the plugin finds all `ContainerInfoModel` rows sharing the same `stack_id`, kills all containers via Docker labels, removes the network, and deletes all DB rows. Renewing resets the `expires` timestamp and increments `renewals_used` on all rows in the stack
 
 ### Stats
 
@@ -379,7 +387,7 @@ Active Now, Total Sessions, Peak Concurrent, and Avg Duration all count stacks a
 
 ### Dashboard
 
-The Active Containers table shows one row per stack with the entry container's info. The container name column shows `(+N)` next to stack entries indicating companion count. Kill and extend buttons operate on the whole stack. Logs button shows the entry container's stdout/stderr
+The Active Containers table shows one row per stack with the entry container's info. The container name column shows `(+N)` next to stack entries indicating companion count. Kill and renew buttons operate on the whole stack. Logs button shows the entry container's stdout/stderr
 
 ## SSH auto-password
 
@@ -436,8 +444,8 @@ Six stat cards at the top of the dashboard: Active Now, Total Sessions, Avg Dura
 | Created | green | context / challenge link |
 | Killed | red | context / challenge link |
 | Expired | yellow | context / challenge link |
-| Renewed | cyan | context / challenge link |
-| Solved | green | challenge link, timer shortened |
+| Renewed | cyan | challenge link, renewal count (e.g. 1/2), time remaining at renewal |
+| Solved | green | challenge link, solve time, timer shortened |
 | Error | red | context, image, reason |
 | Admin | yellow | who did what to whose container |
 | Context | cyan | context added/updated/deleted |
@@ -445,7 +453,7 @@ Six stat cards at the top of the dashboard: Active Now, Total Sessions, Avg Dura
 | Host Down | red | context, reason |
 | Flag Share | yellow | submitter, flag owner, challenge |
 
-Admin actions (kill, extend, purge, clear history) show the admin who performed them in the User column
+Admin actions (kill, renew, purge, clear history) show the admin who performed them in the User column
 
 ## Flag sharing
 
@@ -455,11 +463,11 @@ The Flag Sharing Over Time chart shows detections binned hourly with a pie break
 
 ## Usage heatmap
 
-Hour-of-day by day-of-week heatmap with GitHub-style green color scale showing when container launches are busiest. Accepts the same time range selector as other charts
+Hour-of-day by day-of-week heatmap with GitHub-style green color scale showing when container launches are busiest. The backend sends UTC data, the frontend converts to the client's local timezone before rendering. The 7-day range shows rolling dates (e.g. "Fri 4/4" through "Thu 4/10") with today on the right, while 30-day and all-time ranges aggregate by weekday (Mon-Sun). Y-axis starts at 12 AM at the top
 
 ## Admin endpoints added
 
-- `POST /containers/api/admin_extend` extend a container by container_id (admin only)
+- `POST /containers/api/admin_extend` renew a container by container_id (admin only)
 - `POST /containers/api/clear_history` delete all container history records (admin only)
 - `GET /containers/api/stats/summary` stat card data (active, total, avg duration, peak, users, flag shares)
 - `GET /containers/api/flag_sharing` all flag sharing events from the event log

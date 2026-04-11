@@ -4,37 +4,55 @@
             <h5>Container Limits</h5>
             <div class="form-group">
                 <label>Max containers per user <span class="cfg-help" data-tip="The most containers one person can have running at once. If someone hits this limit, they'll need to stop a container before starting another.">?</span></label>
-                <input type="number" class="form-control cc-setting-input" data-key="max_containers_per_user" min="1">
+                <input type="number" class="form-control no-spin cc-setting-input" data-key="max_containers_per_user" min="1">
             </div>
             <div class="form-group">
                 <label>Concurrent creates <span class="cfg-help" data-tip="Limits how many containers can be created at the same time on a single server. Prevents overload when many players start challenges at once.">?</span></label>
-                <input type="number" class="form-control cc-setting-input" data-key="max_concurrent_creates" min="1" max="32">
+                <input type="number" class="form-control no-spin cc-setting-input" data-key="max_concurrent_creates" min="1" max="32">
             </div>
             <div class="form-group">
                 <label>Thread pool size <span class="cfg-help" data-tip="Controls how many background tasks (starting, stopping, checking containers) run in parallel. More threads handle higher traffic but use more memory.">?</span></label>
-                <input type="number" class="form-control cc-setting-input" data-key="thread_pool_size" min="1" max="32">
+                <input type="number" class="form-control no-spin cc-setting-input" data-key="thread_pool_size" min="1" max="32">
             </div>
         </div>
         <div class="col-md-4">
             <h5>Timers</h5>
             <div class="form-group">
-                <label>Check interval (s) <span class="cfg-help" data-tip="How often the system checks for expired containers, in seconds. Lower means expired containers get cleaned up faster.">?</span></label>
-                <input type="number" class="form-control cc-setting-input" data-key="expiration_check_interval" min="1">
+                <label>Default expiration <span class="cfg-help" data-tip="Default container lifetime for new challenges. Each challenge can override this.">?</span></label>
+                <div class="input-group">
+                    <input type="number" class="form-control no-spin" id="cc-duration-default-h" min="0" placeholder="0">
+                    <div class="input-group-append"><span class="input-group-text">h</span></div>
+                    <input type="number" class="form-control no-spin" id="cc-duration-default-m" min="0" max="59" placeholder="30">
+                    <div class="input-group-append"><span class="input-group-text">m</span></div>
+                </div>
             </div>
             <div class="form-group">
-                <label>Post-solve expiry (seconds) <span class="cfg-help" data-tip="After a correct flag submission, how long before the container is killed. Set to 0 to disable.">?</span></label>
-                <input type="number" class="form-control cc-setting-input" data-key="post_solve_expiry_seconds" min="0">
+                <label>Max renewals <span class="cfg-help" data-tip="Default number of times a user can renew their container timer. Each challenge can override this. Set to 0 to disable renewals.">?</span></label>
+                <input type="number" class="form-control no-spin cc-setting-input" data-key="default_max_renewals" min="0">
+            </div>
+            <div class="form-group">
+                <label>Check interval (s) <span class="cfg-help" data-tip="How often the system checks for expired containers, in seconds. Lower means expired containers get cleaned up faster.">?</span></label>
+                <input type="number" class="form-control no-spin cc-setting-input" data-key="expiration_check_interval" min="1">
+            </div>
+            <div class="form-group">
+                <label>Post-solve expiry <span class="cfg-help" data-tip="After a correct flag submission, how long before the container is killed. Set to 0 to disable.">?</span></label>
+                <div class="input-group">
+                    <input type="number" class="form-control no-spin" id="cc-duration-post-m" min="0" placeholder="0">
+                    <div class="input-group-append"><span class="input-group-text">m</span></div>
+                    <input type="number" class="form-control no-spin" id="cc-duration-post-s" min="0" max="59" placeholder="0">
+                    <div class="input-group-append"><span class="input-group-text">s</span></div>
+                </div>
             </div>
         </div>
         <div class="col-md-4">
             <h5>Rate Limiting <span class="badge badge-warning">restart required</span></h5>
             <div class="form-group">
                 <label>Requests per interval <span class="cfg-help" data-tip="How many times a user can check container status within the rate limit window. Start, stop, and renew have their own stricter limit.">?</span></label>
-                <input type="number" class="form-control cc-setting-input" data-key="rate_limit_requests" min="1">
+                <input type="number" class="form-control no-spin cc-setting-input" data-key="rate_limit_requests" min="1">
             </div>
             <div class="form-group">
                 <label>Interval (seconds) <span class="cfg-help" data-tip="The time window for rate limiting, in seconds. Combined with the requests setting above, this defines the throttle.">?</span></label>
-                <input type="number" class="form-control cc-setting-input" data-key="rate_limit_interval" min="1">
+                <input type="number" class="form-control no-spin cc-setting-input" data-key="rate_limit_interval" min="1">
             </div>
         </div>
     </div>
@@ -119,7 +137,7 @@
                 </div>
                 <div class="form-group">
                     <label>Weight</label>
-                    <input type="number" class="form-control" id="cc-edit-weight" min="1">
+                    <input type="number" class="form-control no-spin" id="cc-edit-weight" min="1">
                     <small class="form-text text-muted">Higher weight means more containers are scheduled to this context</small>
                 </div>
                 <div class="form-check">
@@ -190,6 +208,32 @@
     }
 
 
+    var durationFieldsSecs = [
+        { key: 'post_solve_expiry_seconds', m: 'cc-duration-post-m', s: 'cc-duration-post-s' }
+    ];
+
+    var durationFieldsMins = [
+        { key: 'default_expiration_minutes', h: 'cc-duration-default-h', m: 'cc-duration-default-m' }
+    ];
+
+    function secsToMS(secs) {
+        secs = parseInt(secs) || 0;
+        return { m: Math.floor(secs / 60), s: secs % 60 };
+    }
+
+    function msToSecs(m, s) {
+        return (parseInt(m) || 0) * 60 + (parseInt(s) || 0);
+    }
+
+    function minsToHM(mins) {
+        mins = parseInt(mins) || 0;
+        return { h: Math.floor(mins / 60), m: mins % 60 };
+    }
+
+    function hmToMins(h, m) {
+        return (parseInt(h) || 0) * 60 + (parseInt(m) || 0);
+    }
+
     function loadSettings() {
         ccFetch('/api/settings').then(function(data) {
             var s = data.settings;
@@ -199,13 +243,40 @@
                     el.placeholder = s[el.dataset.key].default;
                 }
             });
+            durationFieldsSecs.forEach(function(df) {
+                if (s[df.key]) {
+                    var ms = secsToMS(s[df.key].value);
+                    document.getElementById(df.m).value = ms.m;
+                    document.getElementById(df.s).value = ms.s;
+                }
+            });
+            durationFieldsMins.forEach(function(df) {
+                if (s[df.key]) {
+                    var hm = minsToHM(s[df.key].value);
+                    document.getElementById(df.h).value = hm.h;
+                    document.getElementById(df.m).value = hm.m;
+                }
+            });
         });
     }
 
     document.getElementById('cc-save-btn').addEventListener('click', function() {
+        if (!document.getElementById('cc-settings-form').reportValidity()) return;
         var payload = {};
         document.querySelectorAll('.cc-setting-input').forEach(function(el) {
             if (el.value !== '') payload[el.dataset.key] = el.type === 'number' ? Number(el.value) : el.value;
+        });
+        durationFieldsSecs.forEach(function(df) {
+            payload[df.key] = msToSecs(
+                document.getElementById(df.m).value,
+                document.getElementById(df.s).value
+            );
+        });
+        durationFieldsMins.forEach(function(df) {
+            payload[df.key] = hmToMins(
+                document.getElementById(df.h).value,
+                document.getElementById(df.m).value
+            );
         });
         ccFetch('/api/settings', { method: 'PUT', body: JSON.stringify(payload) })
             .then(function(res) {

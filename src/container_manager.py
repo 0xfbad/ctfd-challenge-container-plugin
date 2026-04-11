@@ -546,8 +546,6 @@ class ContainerManager:
             released_stacks = set()
 
             for container in entries:
-                if container.expires == 0:
-                    continue
                 if container.expires >= int(time.time()):
                     continue
 

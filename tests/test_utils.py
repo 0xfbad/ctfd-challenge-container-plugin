@@ -59,6 +59,8 @@ def test_defaults_dict_has_expected_keys():
         "max_concurrent_creates",
         "freshness_secret",
         "post_solve_expiry_seconds",
+        "default_expiration_minutes",
+        "default_max_renewals",
     }
     assert set(DEFAULTS.keys()) == expected
 

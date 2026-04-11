@@ -337,16 +337,16 @@
 		<div class="col-md-12">
 			<div class="card">
 				<div class="card-header">
-					<h3 class="card-title">Container Activity <span class="cfg-help" data-tip="Creates vs stops over time. A spike in creates with no matching stops could mean containers are piling up. A sudden drop in creates might mean a Docker host went down.">?</span></h3>
+					<h3 class="card-title">Usage Heatmap <span class="cfg-help" data-tip="Container launches by hour and day of week. Spot peak usage windows for capacity planning.">?</span></h3>
 					<select class="form-control form-control-sm chart-range-select" style="width: auto;" onchange="syncRangeAndLoad(this)">
-						<option value="24h">Last 24 hours</option>
-						<option value="7d" selected>Last 7 days</option>
-						<option value="30d">Last 30 days</option>
-						<option value="all">All time</option>
+						<option value="24h">Past day</option>
+						<option value="7d" selected>Past week</option>
+						<option value="30d">Past month</option>
+						<option value="all">All</option>
 					</select>
 				</div>
 				<div class="card-body">
-					<div class="chart-container" id="activity-chart"></div>
+					<div class="chart-container" id="heatmap-chart"></div>
 				</div>
 			</div>
 		</div>
@@ -358,10 +358,10 @@
 				<div class="card-header">
 					<h3 class="card-title">Top Users by Container Time <span class="cfg-help" data-tip="Total time each user has had containers running. Unusually high values compared to peers could mean someone is hoarding containers or forgot to stop them.">?</span></h3>
 					<select class="form-control form-control-sm chart-range-select" style="width: auto;" onchange="syncRangeAndLoad(this)">
-						<option value="24h">Last 24 hours</option>
-						<option value="7d" selected>Last 7 days</option>
-						<option value="30d">Last 30 days</option>
-						<option value="all">All time</option>
+						<option value="24h">Past day</option>
+						<option value="7d" selected>Past week</option>
+						<option value="30d">Past month</option>
+						<option value="all">All</option>
 					</select>
 				</div>
 				<div class="card-body">
@@ -377,10 +377,10 @@
 				<div class="card-header">
 					<h3 class="card-title">Challenge Statistics <span class="cfg-help" data-tip="Container count and restarts per user for each challenge. High restarts/user on a challenge usually means the image is crashing or players are brute-forcing something.">?</span></h3>
 					<select class="form-control form-control-sm chart-range-select" style="width: auto;" onchange="syncRangeAndLoad(this)">
-						<option value="24h">Last 24 hours</option>
-						<option value="7d" selected>Last 7 days</option>
-						<option value="30d">Last 30 days</option>
-						<option value="all">All time</option>
+						<option value="24h">Past day</option>
+						<option value="7d" selected>Past week</option>
+						<option value="30d">Past month</option>
+						<option value="all">All</option>
 					</select>
 				</div>
 				<div class="card-body">
@@ -395,12 +395,15 @@
 			<div class="card">
 				<div class="card-header">
 					<h3 class="card-title">Solve Times <span class="cfg-help" data-tip="Time from container start to correct flag submission. Each dot is one solve. Clusters of very fast solves on a challenge could indicate flag leaking or an unintended shortcut.">?</span></h3>
-					<select class="form-control form-control-sm chart-range-select" style="width: auto;" onchange="syncRangeAndLoad(this)">
-						<option value="24h">Last 24 hours</option>
-						<option value="7d" selected>Last 7 days</option>
-						<option value="30d">Last 30 days</option>
-						<option value="all">All time</option>
-					</select>
+					<div style="display:flex;gap:6px;align-items:center;">
+						<span id="solve-toggle-points" onclick="toggleSolvePoints()" style="font-size:12px;color:#adb5bd;cursor:pointer;user-select:none;padding:4px 10px;border-radius:3px;" title="Overlay individual solve times on the chart" onmouseover="this.style.color='#6c757d';this.style.background='rgba(0,0,0,0.03)'" onmouseout="this.style.color=_solvePointsVisible?'#495057':'#adb5bd';this.style.background='none'">Show solves</span>
+						<select class="form-control form-control-sm chart-range-select" style="width: auto;" onchange="syncRangeAndLoad(this)">
+							<option value="24h">Past day</option>
+							<option value="7d" selected>Past week</option>
+							<option value="30d">Past month</option>
+							<option value="all">All</option>
+						</select>
+					</div>
 				</div>
 				<div class="card-body">
 					<div class="chart-container" id="solve-chart"></div>
@@ -415,10 +418,10 @@
 				<div class="card-header">
 					<h3 class="card-title">Flag Sharing Over Time <span class="cfg-help" data-tip="Timeline of flag sharing detections. Spikes might indicate organized answer sharing during a challenge release.">?</span></h3>
 					<select class="form-control form-control-sm chart-range-select" style="width: auto;" onchange="syncRangeAndLoad(this)">
-						<option value="24h">Last 24 hours</option>
-						<option value="7d" selected>Last 7 days</option>
-						<option value="30d">Last 30 days</option>
-						<option value="all">All time</option>
+						<option value="24h">Past day</option>
+						<option value="7d" selected>Past week</option>
+						<option value="30d">Past month</option>
+						<option value="all">All</option>
 					</select>
 				</div>
 				<div class="card-body">
@@ -428,24 +431,6 @@
 		</div>
 	</div>
 
-	<div class="row">
-		<div class="col-md-12">
-			<div class="card">
-				<div class="card-header">
-					<h3 class="card-title">Usage Heatmap <span class="cfg-help" data-tip="Container launches by hour and day of week. Helps you plan maintenance windows and capacity.">?</span></h3>
-					<select class="form-control form-control-sm chart-range-select" style="width: auto;" onchange="syncRangeAndLoad(this)">
-						<option value="24h">Last 24 hours</option>
-						<option value="7d" selected>Last 7 days</option>
-						<option value="30d">Last 30 days</option>
-						<option value="all">All time</option>
-					</select>
-				</div>
-				<div class="card-body">
-					<div class="chart-container" id="heatmap-chart"></div>
-				</div>
-			</div>
-		</div>
-	</div>
 </div>
 </div>
 
@@ -473,7 +458,8 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<!-- ctfd core pins echarts 5, we load 6 separately for scatter jitter support on category axes -->
+<script src="https://cdn.jsdelivr.net/npm/echarts@6/dist/echarts.min.js"></script>
 <script>
 	let autoRefreshInterval = null;
 	let eventSource = null;
@@ -577,7 +563,7 @@
 					<button class="btn" onclick="killContainer('${cidJs}')" title="Kill">
 						<i class="fas fa-times icon-kill"></i>
 					</button>
-					<button class="btn" onclick="adminExtend('${cidJs}')" title="Extend">
+					<button class="btn" onclick="adminExtend('${cidJs}')" title="Renew">
 						<i class="fas fa-clock icon-extend"></i>
 					</button>
 					<button class="btn" onclick="navigator.clipboard.writeText('${connCmd}')" title="${connCmd}">
@@ -687,7 +673,7 @@
 					: escapeHtml(m.target || '');
 				if (m.action === 'purge') return `purged ${m.count} containers`;
 				if (m.action === 'kill') return `killed ${target}'s container`;
-				if (m.action === 'extend') return `extended ${target}'s container`;
+				if (m.action === 'extend') return `renewed ${target}'s container`;
 				if (m.action === 'clear_history') return `cleared ${m.count} history records`;
 				return m.action || '';
 			}
@@ -711,10 +697,28 @@
 				if (m.reason) parts.push(escapeHtml(m.reason));
 				return parts.join(': ');
 			}
-			case 'solved':
-				return m.challenge_name
-					? (m.challenge_id ? '<a href="/admin/challenges/' + safeId(m.challenge_id) + '">' + escapeHtml(m.challenge_name) + '</a>' : escapeHtml(m.challenge_name)) + ', timer shortened'
-					: 'timer shortened';
+			case 'renewed': {
+				const rParts = [];
+				if (m.challenge_name) {
+					rParts.push(m.challenge_id
+						? '<a href="/admin/challenges/' + safeId(m.challenge_id) + '">' + escapeHtml(m.challenge_name) + '</a>'
+						: escapeHtml(m.challenge_name));
+				}
+				if (m.renewal) rParts.push(escapeHtml(m.renewal));
+				if (m.time_remaining != null) rParts.push('timer: ' + formatDuration(m.time_remaining));
+				return rParts.join(', ');
+			}
+			case 'solved': {
+				const sParts = [];
+				if (m.challenge_name) {
+					sParts.push(m.challenge_id
+						? '<a href="/admin/challenges/' + safeId(m.challenge_id) + '">' + escapeHtml(m.challenge_name) + '</a>'
+						: escapeHtml(m.challenge_name));
+				}
+				if (m.solve_time != null) sParts.push('solve time: ' + formatDuration(m.solve_time));
+				sParts.push('timer shortened');
+				return sParts.join(', ');
+			}
 			case 'flag_sharing': {
 				const parts = [];
 				if (m.source_entity) {
@@ -933,7 +937,7 @@
 		.then(r => r.json())
 		.then(data => {
 			if (data.error) {
-				alert('Extend failed: ' + data.error);
+				alert('Renew failed: ' + data.error);
 			} else {
 				refreshContainers();
 			}
@@ -979,7 +983,6 @@
 		if (!chart) return;
 		const id = chart.id;
 		const loaders = {
-			'activity-chart': loadActivityChart,
 			'users-chart': loadUsersChart,
 			'challenges-chart': loadChallengesChart,
 			'solve-chart': loadSolveChart,
@@ -1000,35 +1003,6 @@
 		if (seconds < 60) return Math.round(seconds) + 's';
 		if (seconds < 3600) return Math.round(seconds / 60) + 'm';
 		return (seconds / 3600).toFixed(1) + 'h';
-	}
-
-	function loadActivityChart() {
-		const range = getRangeFor('activity-chart');
-		fetch(`/containers/api/analytics/activity?range=${range}`)
-			.then(r => r.json())
-			.then(data => {
-				const chart = initChart('activity-chart');
-				const labels = data.labels.map(ts => {
-					const d = new Date(ts * 1000);
-					if (range === '24h') {
-						return d.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-					}
-					return d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-				});
-
-				chart.setOption({
-					tooltip: { trigger: 'axis' },
-					legend: { data: ['Creates', 'Stops'] },
-					toolbox: { feature: { saveAsImage: {} } },
-					dataZoom: [{ type: 'inside' }, { type: 'slider' }],
-					xAxis: { type: 'category', data: labels },
-					yAxis: { type: 'value', name: 'Containers' },
-					series: [
-						{ name: 'Creates', type: 'line', data: data.creates, smooth: true, itemStyle: { color: '#28a745' } },
-						{ name: 'Stops', type: 'line', data: data.stops, smooth: true, itemStyle: { color: '#dc3545' } }
-					]
-				});
-			});
 	}
 
 	function loadUsersChart() {
@@ -1053,9 +1027,9 @@
 						}
 					},
 					toolbox: { feature: { saveAsImage: {} } },
-					grid: { left: '20%' },
-					xAxis: { type: 'value', name: 'Total Time', axisLabel: { formatter: v => formatDuration(v) } },
-					yAxis: { type: 'category', data: names.reverse(), axisLabel: { width: 120, overflow: 'truncate' } },
+					grid: { left: 100, top: 10, bottom: 30, right: 30 },
+					xAxis: { type: 'value', axisLabel: { formatter: v => formatDuration(v) } },
+					yAxis: { type: 'category', data: names.reverse() },
 					series: [{ type: 'bar', data: times.reverse(), itemStyle: { color: '#007bff' } }]
 				});
 			});
@@ -1079,52 +1053,111 @@
 					},
 					toolbox: { feature: { saveAsImage: {} } },
 					dataZoom: [{ type: 'inside' }, { type: 'slider' }],
+					grid: { left: 50, right: 30, top: 10, bottom: 60 },
 					xAxis: { type: 'category', data: names, axisLabel: { rotate: 30, overflow: 'truncate' } },
-					yAxis: [
-						{ type: 'value', name: 'Containers' },
-						{ type: 'value', name: 'Restarts/user', splitLine: { show: false } }
-					],
+					yAxis: { type: 'value', name: 'Containers' },
 					series: [
-						{ name: 'Containers', type: 'bar', data: data.map(c => c.container_count), itemStyle: { color: '#17a2b8' } },
-						{ name: 'Restarts/user', type: 'line', yAxisIndex: 1, data: data.map(c => c.restarts_per_user), itemStyle: { color: '#ffc107' } }
+						{ name: 'Containers', type: 'bar', data: data.map(c => c.container_count), itemStyle: { color: '#17a2b8' } }
 					]
 				});
 			});
 	}
 
+	function computeBoxplot(times) {
+		if (!times.length) return [0, 0, 0, 0, 0];
+		const sorted = times.slice().sort((a, b) => a - b);
+		const q = p => {
+			const i = (sorted.length - 1) * p;
+			const lo = Math.floor(i);
+			const hi = Math.ceil(i);
+			return sorted[lo] + (sorted[hi] - sorted[lo]) * (i - lo);
+		};
+		const q1 = q(0.25), q3 = q(0.75);
+		const iqr = q3 - q1;
+		const lo = q1 - 1.5 * iqr;
+		const hi = q3 + 1.5 * iqr;
+		const wLo = sorted.find(v => v >= lo) || sorted[0];
+		const wHi = sorted.slice().reverse().find(v => v <= hi) || sorted[sorted.length - 1];
+		return [wLo, q1, q(0.5), q3, wHi];
+	}
+
 	function loadSolveChart() {
+		_solvePointsVisible = false;
+		var btn = document.getElementById('solve-toggle-points');
+		if (btn) btn.textContent = 'Show solves';
 		fetch(`/containers/api/analytics/solve_times?range=${getRangeFor('solve-chart')}`)
 			.then(r => r.json())
 			.then(data => {
 				const chart = initChart('solve-chart');
+				if (!data.length) {
+					chart.setOption({
+						title: { text: 'No solve data yet', left: 'center', top: 'center', textStyle: { color: '#999', fontSize: 14 } }
+					});
+					return;
+				}
 				const names = data.map(c => c.name);
 
-				const scatterData = [];
+				const boxData = data.map(c => computeBoxplot(c.times));
+
+				const allPoints = [];
 				data.forEach((chal, idx) => {
-					chal.times.forEach(t => {
-						scatterData.push([idx, t]);
+					(chal.solves || []).forEach(s => {
+						if (s.time > 0) {
+							allPoints.push({ value: [s.time, idx], username: s.username, user_id: s.user_id });
+						}
 					});
 				});
+
+				_solveMaxWhisker = Math.max(...boxData.map(b => b[4]));
+				_solveGlobalMax = Math.max(...data.flatMap(c => c.times));
+				var maxWhisker = _solveMaxWhisker;
 
 				chart.setOption({
 					tooltip: {
 						trigger: 'item',
 						formatter: function(params) {
 							if (params.seriesType === 'scatter') {
-								const chal = data[params.data[0]];
-								return `${escapeHtml(chal.name)}<br/>Solve time: ${formatDuration(params.data[1])}`;
+								const d = params.data;
+								const uid = safeId(d.user_id);
+								const flags = _userFlags[uid] || {};
+								const userLink = uid
+									? '<a href="/admin/users/' + uid + '" style="color:inherit;text-decoration:underline">' + escapeHtml(d.username || '?') + '</a>'
+									: escapeHtml(d.username || '?');
+								return userLink + userBadges(flags) + '<br/>' + formatDuration(d.value[0]);
 							}
+							const d = params.data;
 							const chal = data[params.dataIndex];
-							return `${escapeHtml(chal.name)}<br/>Avg: ${formatDuration(chal.avg_time)}<br/>Median: ${formatDuration(chal.median_time)}<br/>Fastest: ${formatDuration(chal.fastest_time)}<br/>Solves: ${chal.solve_count}`;
+							return '<b>' + escapeHtml(chal.name) + '</b><br/>' +
+								'Min: ' + formatDuration(d[1]) + '<br/>' +
+								'Q1: ' + formatDuration(d[2]) + '<br/>' +
+								'Median: ' + formatDuration(d[3]) + '<br/>' +
+								'Q3: ' + formatDuration(d[4]) + '<br/>' +
+								'Max: ' + formatDuration(d[5]) + '<br/>' +
+								'Solves: ' + chal.solve_count;
 						}
 					},
 					toolbox: { feature: { saveAsImage: {} } },
-					dataZoom: [{ type: 'inside' }, { type: 'slider' }],
-					xAxis: { type: 'category', data: names, axisLabel: { rotate: 30, overflow: 'truncate' } },
-					yAxis: { type: 'value', name: 'Solve Time', axisLabel: { formatter: v => formatDuration(v) } },
+					dataZoom: [{ type: 'inside', xAxisIndex: 0, filterMode: 'none' }, { type: 'slider', xAxisIndex: 0, filterMode: 'none', labelFormatter: function(v) { return formatDuration(v); } }],
+					grid: { left: 120, right: 40, top: 10, bottom: 50 },
+					yAxis: { type: 'category', data: names, axisTick: { alignWithLabel: true }, jitter: 30 },
+					xAxis: { type: 'value', min: 0, max: maxWhisker * 1.1, axisLabel: { formatter: v => formatDuration(v) } },
 					series: [
-						{ name: 'Avg solve time', type: 'bar', data: data.map(c => c.avg_time), itemStyle: { color: '#6f42c1' } },
-						{ name: 'Individual solves', type: 'scatter', data: scatterData, symbolSize: 6, itemStyle: { color: '#fd7e14', opacity: 0.6 } }
+						{
+							name: 'Solve times',
+							type: 'boxplot',
+							data: boxData,
+							itemStyle: { color: 'rgba(23, 162, 184, 0.2)', borderColor: '#17a2b8' },
+							emphasis: { itemStyle: { borderColor: '#117a8b' } }
+						},
+						{
+							name: 'Individual solves',
+							type: 'scatter',
+							data: allPoints,
+							symbolSize: 6,
+							itemStyle: { color: '#fd7e14', opacity: 0 },
+							silent: true,
+							zlevel: 1
+						}
 					]
 				});
 			});
@@ -1189,18 +1222,40 @@
 					return;
 				}
 
-				const maxVal = Math.max(...data.data.map(d => d[2]));
+				const tzOffset = -(new Date().getTimezoneOffset() / 60);
+				const localData = data.data.map(d => {
+					const localHour = (d[1] + tzOffset + 24) % 24;
+					const dayShift = Math.floor((d[1] + tzOffset) / 24);
+					const localDay = (d[0] + dayShift + 7) % 7;
+					return [localDay, localHour, d[2]];
+				});
+				const hours = Array.from({length: 24}, (_, h) => (h % 12 || 12) + (h < 12 ? ' AM' : ' PM'));
+
+				var dayLabels;
+				const wdNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+				if (data.start_ts != null) {
+					dayLabels = [];
+					for (let i = 0; i < 7; i++) {
+						const d = new Date((data.start_ts + i * 86400) * 1000);
+						dayLabels.push(wdNames[d.getDay()] + ' ' + (d.getMonth()+1) + '/' + d.getDate());
+					}
+				} else {
+					dayLabels = data.days;
+				}
+
+				const maxVal = Math.max(...localData.map(d => d[2]));
 
 				chart.setOption({
 					tooltip: {
 						position: 'top',
 						formatter: function(p) {
-							return data.days[p.data[0]] + ' ' + data.hours[p.data[1]] + ': ' + p.data[2] + ' containers';
+							return '<b>' + dayLabels[p.data[0]] + ' ' + hours[p.data[1]] + '</b><br/>' +
+								p.data[2] + ' containers';
 						}
 					},
 					grid: { left: 50, right: 30, top: 10, bottom: 40 },
-					xAxis: { type: 'category', data: data.days, splitArea: { show: true } },
-					yAxis: { type: 'category', data: data.hours, splitArea: { show: true } },
+					xAxis: { type: 'category', data: dayLabels, splitArea: { show: true } },
+					yAxis: { type: 'category', data: hours, splitArea: { show: true }, inverse: true },
 					visualMap: {
 						min: 0,
 						max: maxVal || 1,
@@ -1214,7 +1269,7 @@
 					},
 					series: [{
 						type: 'heatmap',
-						data: data.data,
+						data: localData,
 						label: { show: false },
 						emphasis: { itemStyle: { shadowBlur: 5, shadowColor: 'rgba(0, 0, 0, 0.3)' } }
 					}]
@@ -1222,8 +1277,23 @@
 			});
 	}
 
+	var _solvePointsVisible = false;
+	var _solveMaxWhisker = 0;
+	var _solveGlobalMax = 0;
+	function toggleSolvePoints() {
+		var chart = charts['solve-chart'];
+		if (!chart) return;
+		_solvePointsVisible = !_solvePointsVisible;
+		var btn = document.getElementById('solve-toggle-points');
+		btn.textContent = _solvePointsVisible ? 'Hide solves' : 'Show solves';
+		btn.style.color = _solvePointsVisible ? '#495057' : '#adb5bd';
+		chart.setOption({
+			xAxis: { max: _solvePointsVisible ? _solveGlobalMax * 1.05 : _solveMaxWhisker * 1.1 },
+			series: [{}, { itemStyle: { opacity: _solvePointsVisible ? 0.7 : 0 }, silent: !_solvePointsVisible }]
+		});
+	}
+
 	function loadAllCharts() {
-		loadActivityChart();
 		loadUsersChart();
 		loadChallengesChart();
 		loadSolveChart();

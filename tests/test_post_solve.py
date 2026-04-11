@@ -148,7 +148,7 @@ def test_post_solve_no_container_running():
         assert message == "correct"
 
 
-def test_post_solve_skips_no_expiration_container():
+def test_post_solve_shortens_zero_expiration_container():
     secret = "testsecret"
     challenge_id = 1
     template = "ctf{%TOKEN%}"
@@ -170,6 +170,7 @@ def test_post_solve_skips_no_expiration_container():
     mock_container = MagicMock()
     mock_container.container_id = "abc123"
     mock_container.expires = 0
+    mock_container.timestamp = int(time.time()) - 300
 
     with (
         patch(
@@ -188,5 +189,6 @@ def test_post_solve_skips_no_expiration_container():
         result, message = ContainerChallenge.attempt(challenge, mock_request)
 
         assert result is True
-        # expires=0 means no expiration, should not be changed
-        assert mock_container.expires == 0
+        # expires=0 containers now get shortened like any other
+        assert mock_container.expires != 0
+        assert mock_container.expires > int(time.time())

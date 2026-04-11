@@ -96,9 +96,23 @@ function startTimer(expiresAt) {
     _expiryInterval = setInterval(tick, 1000);
 }
 
+function updateRenewButton(renewalsUsed, maxRenewals) {
+    var btn = document.getElementById("extend-chal");
+    var counter = document.getElementById("renewals-counter");
+    if (!btn || !counter) return;
+    var remaining = Math.max(0, maxRenewals - renewalsUsed);
+    counter.textContent = '(' + remaining + ')';
+    btn.disabled = remaining <= 0;
+    btn.setAttribute('data-tip', remaining <= 0 ? 'All ' + maxRenewals + ' renewals used' : 'Reset the container timer');
+}
+
 function showConnection(data, container) {
     container.innerHTML = '';
     container.style.display = 'block';
+
+    var renewBtn = document.getElementById("extend-chal");
+    if (renewBtn) renewBtn.innerHTML = '<i class="fas fa-redo"></i> Renew <span id="renewals-counter"></span>';
+    if (data.max_renewals != null) updateRenewButton(data.renewals_used || 0, data.max_renewals);
 
     if (data.connect === "web") {
         var url = "http://" + data.hostname + ":" + data.port;
@@ -298,21 +312,22 @@ function container_renew(challengeId) {
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-plus"></i> Extend';
+        btn.innerHTML = '<i class="fas fa-redo"></i> Renew <span id="renewals-counter"></span>';
         if (data.error || data.message) {
+            btn.disabled = false;
             var info = document.getElementById("deployment-info");
             info.textContent = data.error || data.message;
             info.classList.add('alert-danger');
             info.style.display = 'block';
         } else {
             startTimer(data.expires);
+            if (data.max_renewals != null) updateRenewButton(data.renewals_used || 0, data.max_renewals);
         }
     })
     .catch(function(e) {
         console.error("Fetch error:", e);
         btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-plus"></i> Extend';
+        btn.innerHTML = '<i class="fas fa-redo"></i> Renew <span id="renewals-counter"></span>';
     });
 }
 

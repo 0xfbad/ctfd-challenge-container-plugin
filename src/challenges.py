@@ -51,22 +51,27 @@ _assets = f"/plugins/{_plugin_dir}/src/assets"
 def _shorten_after_solve(challenge_id, xid, team_mode):
     expiry_seconds = get_setting("post_solve_expiry_seconds")
     if not expiry_seconds:
-        return
+        return None
 
     filter_args = {"challenge_id": challenge_id}
     filter_args["team_id" if team_mode else "user_id"] = xid
     container = ContainerInfoModel.query.filter_by(**filter_args).first()
 
-    if not container or container.expires == 0:
-        return
+    if not container:
+        return None
 
-    container.expires = int(time.time()) + expiry_seconds
+    now = int(time.time())
+    solve_time = now - container.timestamp if container.timestamp else None
+
+    container.expires = now + expiry_seconds
     db.session.commit()
 
     history = ContainerHistoryModel.query.filter_by(container_id=container.container_id).first()
     if history:
         history.reason = "solved"
         db.session.commit()
+
+    return solve_time
 
 
 class ContainerChallenge(BaseChallenge):
@@ -105,7 +110,7 @@ class ContainerChallenge(BaseChallenge):
 
         cls._handle_ssh_password(data)
 
-        for attr in ("docker_context", "max_memory_mb", "max_cpu", "expiration_minutes"):
+        for attr in ("docker_context", "max_memory_mb", "max_cpu", "expiration_minutes", "max_renewals"):
             if attr in data:
                 data[attr] = cls.sanitize_value(data[attr])
 
@@ -122,7 +127,7 @@ class ContainerChallenge(BaseChallenge):
         cls._handle_ssh_password(data, existing_password=challenge.ssh_password)
 
         for attr, value in data.items():
-            if attr in ("docker_context", "max_memory_mb", "max_cpu", "expiration_minutes"):
+            if attr in ("docker_context", "max_memory_mb", "max_cpu", "expiration_minutes", "max_renewals"):
                 value = cls.sanitize_value(value)
             setattr(challenge, attr, value)
 
@@ -170,7 +175,7 @@ class ContainerChallenge(BaseChallenge):
                 match = expected == submission
 
             if match:
-                _shorten_after_solve(challenge.id, xid, team_mode)
+                solve_time = _shorten_after_solve(challenge.id, xid, team_mode)
                 event_logger.log_event(
                     "solved",
                     f"user '{user.name}' solved '{challenge.name}', timer shortened",
@@ -179,6 +184,7 @@ class ContainerChallenge(BaseChallenge):
                     metadata={
                         "challenge_id": challenge.id,
                         "challenge_name": challenge.name,
+                        "solve_time": solve_time,
                     },
                 )
                 return True, "correct"

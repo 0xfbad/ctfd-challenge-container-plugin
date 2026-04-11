@@ -192,7 +192,6 @@
 		text-align: center;
 		padding: 0 4px;
 		color: var(--bs-body-color, #212529);
-		opacity: 0.7;
 		cursor: default;
 		user-select: none;
 	}
@@ -227,8 +226,26 @@
 
 	.bar-btn:hover { background: rgba(128, 128, 128, 0.15); color: var(--bs-body-color, #212529); }
 	.bar-btn.stop:hover { color: #dc3545; background: rgba(220, 53, 69, 0.1); }
-	.bar-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+	.bar-btn:disabled { color: rgba(108, 117, 125, 0.4); cursor: not-allowed; }
 	.bar-btn:disabled:hover { background: none; }
+
+	[data-tip] { position: relative; }
+	[data-tip]:hover::after {
+		content: attr(data-tip);
+		position: absolute;
+		bottom: calc(100% + 6px);
+		left: 50%;
+		transform: translateX(-50%);
+		background: #1a1e21;
+		color: #e9ecef;
+		padding: 4px 8px;
+		border-radius: 3px;
+		font-size: 11px;
+		white-space: nowrap;
+		z-index: 100;
+		pointer-events: none;
+		opacity: 1;
+	}
 
 	.instance-start {
 		margin-top: 4px;
@@ -330,7 +347,7 @@
 				</div>
 				<div class="tip-item">
 					<i class="fas fa-clock"></i>
-					<span>Expires after a time limit, extend if you need more</span>
+					<span>Expires after a time limit, renew if you need more</span>
 				</div>
 				<div class="tip-item">
 					<i class="fas fa-flag"></i>
@@ -358,12 +375,12 @@
 		</div>
 
 		<div class="instance-bar d-none" id="running-bar">
-			<span class="bar-timer" id="instance-timer">--:--</span>
+			<span class="bar-timer" id="instance-timer" data-tip="Time remaining before container expires">--:--</span>
 			<span class="bar-divider"></span>
-			<button onclick="container_renew({{ challenge.id }})" class="bar-btn" id="extend-chal">
-				<i class="fas fa-plus"></i> Extend
+			<button onclick="container_renew({{ challenge.id }})" class="bar-btn" id="extend-chal" data-tip="Reset the container timer">
+				<i class="fas fa-redo"></i> Renew <span id="renewals-counter"></span>
 			</button>
-			<button onclick="container_stop({{ challenge.id }})" class="bar-btn stop" id="terminate-chal">
+			<button onclick="container_stop({{ challenge.id }})" class="bar-btn stop" id="terminate-chal" data-tip="Stop container, you can start a new one after">
 				<i class="fas fa-stop"></i> Stop
 			</button>
 		</div>

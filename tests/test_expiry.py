@@ -49,21 +49,27 @@ def test_kill_failure_skips_db_delete():
         mock_db.session.commit.assert_not_called()
 
 
-def test_expires_zero_never_expired():
+def test_expires_zero_gets_killed():
+    """containers with expires=0 are treated as already expired and get killed"""
     cm = make_manager()
 
-    never_expire = _make_container("abc", 0)
+    zero_expire = _make_container("abc", 0)
 
     mock_app = MagicMock()
 
-    with patch("container_manager.ContainerInfoModel") as mock_model, patch("container_manager.db") as mock_db:
-        mock_model.query.filter.return_value.all.return_value = [never_expire]
+    with (
+        patch("container_manager.ContainerInfoModel") as mock_model,
+        patch("container_manager.ContainerHistoryModel") as mock_history,
+        patch("container_manager.db") as mock_db,
+    ):
+        mock_model.query.filter.return_value.all.return_value = [zero_expire]
+        mock_history.query.filter_by.return_value.first.return_value = None
         cm.kill_container = MagicMock()
 
         cm.kill_expired_containers(mock_app)
 
-        cm.kill_container.assert_not_called()
-        mock_db.session.delete.assert_not_called()
+        cm.kill_container.assert_called_once()
+        mock_db.session.delete.assert_called()
 
 
 def test_successful_kill_deletes_db_row():

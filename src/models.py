@@ -14,6 +14,7 @@ class ContainerChallengeModel(Challenges):
     ssh_username = db.Column(db.Text, nullable=True)
     ssh_password = db.Column(db.Text, nullable=True)
     expiration_minutes = db.Column(db.Integer, default=30)
+    max_renewals = db.Column(db.Integer, default=2)
     max_memory_mb = db.Column(db.Integer, nullable=True)
     max_cpu = db.Column(db.Float, nullable=True)
     docker_context = db.Column(db.String(512), nullable=True)
@@ -31,6 +32,7 @@ class ContainerInfoModel(db.Model):
     port = db.Column(db.Integer)
     timestamp = db.Column(db.Integer)
     expires = db.Column(db.Integer)
+    renewals_used = db.Column(db.Integer, default=0)
     docker_context = db.Column(db.String(512), nullable=True)
     stack_id = db.Column(db.String(64), nullable=True, index=True)
     is_entry = db.Column(db.Boolean, default=True)
@@ -54,8 +56,8 @@ class ContainerHistoryModel(db.Model):
     team_id = db.Column(db.Integer, db.ForeignKey("teams.id", ondelete="SET NULL"), nullable=True)
     docker_context = db.Column(db.String(512), nullable=True)
     stack_id = db.Column(db.String(64), nullable=True)
-    created_at = db.Column(db.Float)
-    stopped_at = db.Column(db.Float, nullable=True)
+    created_at = db.Column(db.Float(precision=53))
+    stopped_at = db.Column(db.Float(precision=53), nullable=True)
     reason = db.Column(db.String(32), nullable=True)
 
 

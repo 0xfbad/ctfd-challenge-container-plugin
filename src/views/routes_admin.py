@@ -7,7 +7,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 from statistics import median
 
 import docker
@@ -338,8 +338,8 @@ def route_admin_extend():
     if not challenge:
         return jsonify(error="challenge not found"), 404
 
-    expiration_seconds = (challenge.expiration_minutes or 0) * 60
-    new_expires = int(time.time() + expiration_seconds) if expiration_seconds > 0 else 0
+    expiration_minutes = challenge.expiration_minutes or get_setting("default_expiration_minutes", 30)
+    new_expires = int(time.time() + expiration_minutes * 60)
 
     container.expires = new_expires
     if container.stack_id:
@@ -997,7 +997,9 @@ def route_analytics_solve_times():
         solve_query = solve_query.filter(Solves.date >= cutoff)
     solves = solve_query.order_by(Solves.date.desc()).limit(_MAX_ANALYTICS_ROWS).all()
 
-    chal_times = defaultdict(lambda: {"times": [], "solve_count": 0})
+    from CTFd.models import Users
+
+    chal_times = defaultdict(lambda: {"solves": [], "solve_count": 0})
 
     for solve in solves:
         solve_ts = solve.date.timestamp() if hasattr(solve.date, "timestamp") else float(solve.date)
@@ -1020,21 +1022,32 @@ def route_analytics_solve_times():
             continue
 
         solve_time = solve_ts - history.created_at
+        if solve_time <= 0:
+            continue
         stats = chal_times[challenge_id]
-        stats["times"].append(round(solve_time, 1))
+        stats["solves"].append({"time": round(solve_time, 1), "user_id": user_id})
         stats["solve_count"] += 1
 
     chal_names = {c.id: c.name for c in Challenges.query.filter(Challenges.id.in_(chal_times.keys())).all()}
 
+    all_user_ids = set()
+    for stats in chal_times.values():
+        for s in stats["solves"]:
+            all_user_ids.add(s["user_id"])
+    user_names = {u.id: u.name for u in Users.query.filter(Users.id.in_(all_user_ids)).all()} if all_user_ids else {}
+
     result = []
     for chal_id, stats in chal_times.items():
-        times = stats["times"]
+        times = [s["time"] for s in stats["solves"]]
+        for s in stats["solves"]:
+            s["username"] = user_names.get(s["user_id"], f"user#{s['user_id']}")
         result.append(
             {
                 "challenge_id": chal_id,
                 "name": chal_names.get(chal_id, f"challenge#{chal_id}"),
                 "solve_count": stats["solve_count"],
                 "times": times,
+                "solves": stats["solves"],
                 "avg_time": round(sum(times) / len(times), 1) if times else 0,
                 "median_time": round(median(times), 1) if times else 0,
                 "fastest_time": round(min(times), 1) if times else 0,
@@ -1080,15 +1093,28 @@ def route_analytics_flag_sharing():
 @admins_only
 def route_analytics_heatmap():
     cutoff = _range_cutoff()
+    range_param = request.args.get("range", "7d")
+    week_mode = range_param == "7d"
 
     rows = ContainerHistoryModel.query.filter(ContainerHistoryModel.created_at >= cutoff).all()
 
     matrix = [[0] * 7 for _ in range(24)]
+
+    if week_mode:
+        utc_now = datetime.utcnow()
+        start_date = (utc_now - timedelta(days=6)).date()
+
     for r in rows:
         if not r.created_at:
             continue
-        dt = datetime.fromtimestamp(r.created_at)
-        matrix[dt.hour][dt.weekday()] += 1
+        dt = datetime.utcfromtimestamp(r.created_at)
+        if week_mode:
+            day_idx = (dt.date() - start_date).days
+            if not (0 <= day_idx < 7):
+                continue
+        else:
+            day_idx = dt.weekday()
+        matrix[dt.hour][day_idx] += 1
 
     # echarts heatmap format: [[day, hour, value], ...]
     data = []
@@ -1097,7 +1123,10 @@ def route_analytics_heatmap():
             if matrix[hour][day] > 0:
                 data.append([day, hour, matrix[hour][day]])
 
-    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    hours = [f"{h % 12 or 12} {'AM' if h < 12 else 'PM'}" for h in range(24)]
-
-    return jsonify(data=data, days=days, hours=hours)
+    result: dict = {"data": data}
+    if week_mode:
+        epoch = datetime(1970, 1, 1)
+        result["start_ts"] = int((datetime.combine(start_date, datetime.min.time()) - epoch).total_seconds())
+    else:
+        result["days"] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    return jsonify(result)
