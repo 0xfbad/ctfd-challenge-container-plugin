@@ -607,7 +607,8 @@ def route_api_test_context(context_id):
         client.ping()
         return jsonify(success="context is reachable")
     except Exception as e:
-        return jsonify(error=f"context unreachable: {str(e)}"), 500
+        logger.error(f"context test failed: {e}")
+        return jsonify(error="context unreachable"), 500
     finally:
         if client:
             try:
@@ -659,7 +660,7 @@ def route_api_discover_contexts():
         return jsonify(contexts=available)
     except Exception as e:
         logger.error(f"error discovering contexts: {e}")
-        return jsonify(error=str(e)), 500
+        return jsonify(error="failed to discover contexts"), 500
 
 
 @containers_bp.route("/api/images/matrix", methods=["GET"])
@@ -776,7 +777,8 @@ def route_api_reload_contexts():
         container_manager.load_docker_contexts()
         return jsonify(success="contexts reloaded")
     except Exception as e:
-        return jsonify(error=str(e)), 500
+        logger.error(f"error reloading contexts: {e}")
+        return jsonify(error="failed to reload contexts"), 500
 
 
 @containers_bp.route("/api/pull", methods=["POST"])

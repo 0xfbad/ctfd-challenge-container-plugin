@@ -15,13 +15,13 @@
 
 {% block value %}
 <script>
-    var container_context_selected = "{{ challenge.docker_context | default('', true) }}";
-    var container_image_selected = "{{ challenge.image | default('', true) }}";
+    var container_context_selected = {{ (challenge.docker_context or '') | tojson }};
+    var container_image_selected = {{ (challenge.image or '') | tojson }};
     var container_advanced_values = {
-        command: "{{ challenge.command | default('', true) }}",
-        volumes: "{{ challenge.volumes | default('', true) }}",
-        max_memory_mb: "{{ challenge.max_memory_mb | default('', true) }}",
-        max_cpu: "{{ challenge.max_cpu | default('', true) }}"
+        command: {{ (challenge.command or '') | tojson }},
+        volumes: {{ (challenge.volumes or '') | tojson }},
+        max_memory_mb: {{ (challenge.max_memory_mb or '') | tojson }},
+        max_cpu: {{ (challenge.max_cpu or '') | tojson }}
     };
 </script>
 

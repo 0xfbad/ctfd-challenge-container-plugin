@@ -277,6 +277,12 @@ window.ContainerFormUtils = (function () {
 		}
 	}
 
+	function esc(s) {
+		var d = document.createElement("div");
+		d.textContent = s;
+		return d.innerHTML;
+	}
+
 	function renderImageStatus(data, pinnedCtx) {
 		if (!data.cached) {
 			return '<small class="text-muted"><i class="fas fa-info-circle"></i> No scan data yet. Scan from plugin config.</small>';
@@ -294,18 +300,18 @@ window.ContainerFormUtils = (function () {
 			html = '<small class="text-warning"><i class="fas fa-question-circle"></i> Image not in last scan</small>';
 		} else if (pinnedCtx) {
 			if (ctxs[pinnedCtx] && ctxs[pinnedCtx].available) {
-				html = '<small class="text-success"><i class="fas fa-check-circle"></i> Available on ' + pinnedCtx + '</small>';
+				html = '<small class="text-success"><i class="fas fa-check-circle"></i> Available on ' + esc(pinnedCtx) + '</small>';
 			} else if (ctxs[pinnedCtx]) {
-				html = '<small class="text-danger"><i class="fas fa-times-circle"></i> Not found on ' + pinnedCtx + '</small>';
+				html = '<small class="text-danger"><i class="fas fa-times-circle"></i> Not found on ' + esc(pinnedCtx) + '</small>';
 			} else {
-				html = '<small class="text-muted"><i class="fas fa-question-circle"></i> Context ' + pinnedCtx + ' not in last scan</small>';
+				html = '<small class="text-muted"><i class="fas fa-question-circle"></i> Context ' + esc(pinnedCtx) + ' not in last scan</small>';
 			}
 		} else if (missing.length === 0 && available.length > 0) {
 			html = '<small class="text-success"><i class="fas fa-check-circle"></i> Available on all contexts</small>';
 		} else if (available.length === 0) {
 			html = '<small class="text-danger"><i class="fas fa-times-circle"></i> Not found on any context</small>';
 		} else {
-			html = '<small class="text-warning"><i class="fas fa-exclamation-circle"></i> Missing on ' + missing.join(", ") + '</small>';
+			html = '<small class="text-warning"><i class="fas fa-exclamation-circle"></i> Missing on ' + missing.map(esc).join(", ") + '</small>';
 		}
 
 		html += ' <small class="text-muted">(' + new Date(data.scanned_at * 1000).toLocaleString('en-US', {month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit',hour12:true}) + ')</small>';
