@@ -162,6 +162,8 @@ def route_stats_summary():
     entry_filter = db.or_(ContainerInfoModel.is_entry == True, ContainerInfoModel.stack_id.is_(None))  # noqa: E712
     active = ContainerInfoModel.query.filter(entry_filter).count()
 
+    excluded = _excluded_user_ids()
+
     total_history = ContainerHistoryModel.query.filter(
         ContainerHistoryModel.stopped_at.isnot(None),
     ).all()
@@ -170,6 +172,8 @@ def route_stats_summary():
     seen_stacks = set()
     entry_rows = []
     for r in total_history:
+        if r.user_id in excluded:
+            continue
         if r.stack_id:
             if r.stack_id not in seen_stacks:
                 seen_stacks.add(r.stack_id)
@@ -181,7 +185,12 @@ def route_stats_summary():
     durations = [r.stopped_at - r.created_at for r in entry_rows if r.stopped_at and r.created_at]
     avg_duration = sum(durations) / len(durations) if durations else 0
 
-    unique_users = db.session.query(db.func.count(db.distinct(ContainerHistoryModel.user_id))).scalar() or 0
+    unique_users = (
+        db.session.query(db.func.count(db.distinct(ContainerHistoryModel.user_id)))
+        .filter(~ContainerHistoryModel.user_id.in_(excluded))
+        .scalar()
+        or 0
+    )
 
     flag_shares = len([e for e in event_logger.get_recent_events(limit=2000) if e.get("type") == "flag_sharing"])
 
@@ -850,6 +859,14 @@ def _range_cutoff():
     return 0
 
 
+def _excluded_user_ids():
+    """admins and hidden users should not appear in analytics"""
+    from CTFd.models import Users
+
+    rows = Users.query.filter(db.or_(Users.type == "admin", Users.hidden == True)).all()  # noqa: E712
+    return {u.id for u in rows}
+
+
 @containers_bp.route("/api/analytics/activity", methods=["GET"])
 @admins_only
 def route_analytics_activity():
@@ -898,10 +915,11 @@ def route_analytics_top_users():
         query = query.filter(ContainerHistoryModel.created_at >= cutoff)
     rows = query.order_by(ContainerHistoryModel.created_at.desc()).limit(_MAX_ANALYTICS_ROWS).all()
 
+    excluded = _excluded_user_ids()
     user_stats = defaultdict(lambda: {"total_seconds": 0, "container_count": 0, "challenges": set()})
 
     for row in rows:
-        if not row.user_id:
+        if not row.user_id or row.user_id in excluded:
             continue
         stats = user_stats[row.user_id]
         end = row.stopped_at if row.stopped_at else now
@@ -945,10 +963,11 @@ def route_analytics_challenges():
         query = query.filter(ContainerHistoryModel.created_at >= cutoff)
     rows = query.order_by(ContainerHistoryModel.created_at.desc()).limit(_MAX_ANALYTICS_ROWS).all()
 
+    excluded = _excluded_user_ids()
     chal_stats = defaultdict(lambda: {"count": 0, "users": set(), "lifetimes": []})
 
     for row in rows:
-        if not row.challenge_id:
+        if not row.challenge_id or row.user_id in excluded:
             continue
         stats = chal_stats[row.challenge_id]
         stats["count"] += 1
@@ -991,6 +1010,7 @@ def route_analytics_solve_times():
         return jsonify([])
 
     cutoff = _range_cutoff()
+    excluded = _excluded_user_ids()
 
     solve_query = Solves.query
     if cutoff > 0:
@@ -1004,6 +1024,8 @@ def route_analytics_solve_times():
     for solve in solves:
         solve_ts = solve.date.timestamp() if hasattr(solve.date, "timestamp") else float(solve.date)
         user_id = solve.user_id
+        if user_id in excluded:
+            continue
         team_id = getattr(solve, "team_id", None)
         challenge_id = solve.challenge_id
 
@@ -1096,6 +1118,7 @@ def route_analytics_heatmap():
     range_param = request.args.get("range", "7d")
     week_mode = range_param == "7d"
 
+    excluded = _excluded_user_ids()
     rows = ContainerHistoryModel.query.filter(ContainerHistoryModel.created_at >= cutoff).all()
 
     matrix = [[0] * 7 for _ in range(24)]
@@ -1105,7 +1128,7 @@ def route_analytics_heatmap():
         start_date = (utc_now - timedelta(days=6)).date()
 
     for r in rows:
-        if not r.created_at:
+        if not r.created_at or r.user_id in excluded:
             continue
         dt = datetime.utcfromtimestamp(r.created_at)
         if week_mode:
