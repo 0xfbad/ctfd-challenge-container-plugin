@@ -106,7 +106,7 @@
             Container lifetime before auto-kill.
         </small>
     </label>
-    <input type="hidden" name="expiration_minutes" id="cc-expiry-val" value="30">
+    <input type="hidden" name="expiration_seconds" id="cc-expiry-val" value="1800">
     <div class="input-group">
         <input type="number" class="form-control no-spin" id="cc-expiry-h" min="0" placeholder="0" value="0">
         <div class="input-group-append"><span class="input-group-text">h</span></div>
@@ -130,7 +130,7 @@
     var h = document.getElementById('cc-expiry-h');
     var m = document.getElementById('cc-expiry-m');
     var v = document.getElementById('cc-expiry-val');
-    function sync() { v.value = (parseInt(h.value) || 0) * 60 + (parseInt(m.value) || 0); }
+    function sync() { v.value = (parseInt(h.value) || 0) * 3600 + (parseInt(m.value) || 0) * 60; }
     h.addEventListener('input', sync);
     m.addEventListener('input', sync);
 
@@ -141,12 +141,12 @@
     .then(function(r) { return r.json(); })
     .then(function(data) {
         var s = data.settings || {};
-        if (s.default_expiration_minutes) {
-            var mins = parseInt(s.default_expiration_minutes.value) || 30;
-            h.value = Math.floor(mins / 60);
-            m.value = mins % 60;
-            h.placeholder = Math.floor(mins / 60) + ' (default)';
-            m.placeholder = (mins % 60) + ' (default)';
+        if (s.default_expiration_seconds) {
+            var secs = parseInt(s.default_expiration_seconds.value) || 1800;
+            h.value = Math.floor(secs / 3600);
+            m.value = Math.floor((secs % 3600) / 60);
+            h.placeholder = Math.floor(secs / 3600) + ' (default)';
+            m.placeholder = Math.floor((secs % 3600) / 60) + ' (default)';
             sync();
         }
         if (s.default_max_renewals) {

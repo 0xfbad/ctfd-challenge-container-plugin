@@ -212,8 +212,8 @@
         { key: 'post_solve_expiry_seconds', m: 'cc-duration-post-m', s: 'cc-duration-post-s' }
     ];
 
-    var durationFieldsMins = [
-        { key: 'default_expiration_minutes', h: 'cc-duration-default-h', m: 'cc-duration-default-m' }
+    var durationFieldsHM = [
+        { key: 'default_expiration_seconds', h: 'cc-duration-default-h', m: 'cc-duration-default-m' }
     ];
 
     function secsToMS(secs) {
@@ -225,13 +225,13 @@
         return (parseInt(m) || 0) * 60 + (parseInt(s) || 0);
     }
 
-    function minsToHM(mins) {
-        mins = parseInt(mins) || 0;
-        return { h: Math.floor(mins / 60), m: mins % 60 };
+    function secsToHM(secs) {
+        secs = parseInt(secs) || 0;
+        return { h: Math.floor(secs / 3600), m: Math.floor((secs % 3600) / 60) };
     }
 
-    function hmToMins(h, m) {
-        return (parseInt(h) || 0) * 60 + (parseInt(m) || 0);
+    function hmToSecs(h, m) {
+        return (parseInt(h) || 0) * 3600 + (parseInt(m) || 0) * 60;
     }
 
     function loadSettings() {
@@ -250,9 +250,9 @@
                     document.getElementById(df.s).value = ms.s;
                 }
             });
-            durationFieldsMins.forEach(function(df) {
+            durationFieldsHM.forEach(function(df) {
                 if (s[df.key]) {
-                    var hm = minsToHM(s[df.key].value);
+                    var hm = secsToHM(s[df.key].value);
                     document.getElementById(df.h).value = hm.h;
                     document.getElementById(df.m).value = hm.m;
                 }
@@ -272,8 +272,8 @@
                 document.getElementById(df.s).value
             );
         });
-        durationFieldsMins.forEach(function(df) {
-            payload[df.key] = hmToMins(
+        durationFieldsHM.forEach(function(df) {
+            payload[df.key] = hmToSecs(
                 document.getElementById(df.h).value,
                 document.getElementById(df.m).value
             );

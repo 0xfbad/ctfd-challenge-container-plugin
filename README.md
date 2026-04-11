@@ -95,7 +95,7 @@ User clicks "Stop Instance" or admin force-kills from the dashboard. Plugin kill
 
 ### Expiration
 
-Each challenge has a configurable expiration in minutes (default 30, pulled from the global `default_expiration_minutes` setting). All containers must have an expiration, there is no "never expire" option. An APScheduler job runs on a configurable interval (default 5s) to query the database for containers past their expiration timestamp and kills them
+Each challenge has a configurable expiration in seconds (default 1800, pulled from the global `default_expiration_seconds` setting). All containers must have an expiration, there is no "never expire" option. An APScheduler job runs on a configurable interval (default 5s) to query the database for containers past their expiration timestamp and kills them
 
 Users can renew their container from the UI which resets the timer to the challenge's configured duration. Renewals are limited by a per-challenge `max_renewals` setting (default 2, pulled from the global `default_max_renewals` setting). The user-facing UI shows remaining renewals as a counter on the Renew button and disables it when exhausted. Each renewal is tracked per-container via the `renewals_used` column on `ContainerInfoModel`, the counter resets when a new container is created
 
@@ -230,7 +230,7 @@ Core fields sit at the top, runner fields like context and expiration come next,
 - Volumes: JSON object for volume mounts
 - Connection Type: `tcp`, `ssh`, or `web` (default web)
 - SSH Credentials: username/password for ssh type
-- Expiration: container lifetime as hours/minutes, defaults to the global `default_expiration_minutes` setting
+- Expiration: container lifetime as hours/minutes, defaults to the global `default_expiration_seconds` setting
 - Max Renewals: how many times users can reset the timer, defaults to the global `default_max_renewals` setting (0 disables renewals)
 - Max Memory: MB limit per container
 - Max CPU: core limit as decimal (1.5 means 1.5 cores)
@@ -247,7 +247,7 @@ Managed through the admin settings page, no config files needed
 | expiration_check_interval | 5 | seconds between expiry sweeps |
 | rate_limit_requests | 45 | max requests per rate limit interval |
 | rate_limit_interval | 60 | rate limit window in seconds |
-| default_expiration_minutes | 30 | default container lifetime for new challenges |
+| default_expiration_seconds | 1800 | default container lifetime in seconds for new challenges |
 | default_max_renewals | 2 | default renewal limit for new challenges (0 disables renewals) |
 | freshness_secret | (auto-generated) | HMAC key for freshness tokens, clear to disable |
 | post_solve_expiry_seconds | 90 | seconds until container expires after a correct solve, 0 to disable |
@@ -318,7 +318,7 @@ All analytics endpoints accept `?range=24h|7d|30d|all` (default `7d`)
 
 **Images not found**: images must exist on the challenge's assigned context before users can start instances, use the Image Availability scan on the config page to see what's where and pull what's missing. For private images you'll need to `docker save` / `docker load` onto each host or push to a private registry the hosts can reach
 
-**Containers not expiring**: verify the scheduler is running by checking CTFd logs for expiry job messages, all containers have a mandatory expiration timestamp calculated from the challenge's `expiration_minutes` or the global `default_expiration_minutes` setting
+**Containers not expiring**: verify the scheduler is running by checking CTFd logs for expiry job messages, all containers have a mandatory expiration timestamp calculated from the challenge's `expiration_seconds` or the global `default_expiration_seconds` setting
 
 **Containers piling up on one host**: the load balancer uses weighted least-connections scoring, check that your context weights are set appropriately in the admin UI, a context with weight 2 gets twice the score bonus compared to weight 1
 

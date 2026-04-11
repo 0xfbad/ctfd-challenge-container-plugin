@@ -110,7 +110,7 @@ class ContainerChallenge(BaseChallenge):
 
         cls._handle_ssh_password(data)
 
-        for attr in ("docker_context", "max_memory_mb", "max_cpu", "expiration_minutes", "max_renewals"):
+        for attr in ("docker_context", "max_memory_mb", "max_cpu", "expiration_seconds", "max_renewals"):
             if attr in data:
                 data[attr] = cls.sanitize_value(data[attr])
 
@@ -127,7 +127,7 @@ class ContainerChallenge(BaseChallenge):
         cls._handle_ssh_password(data, existing_password=challenge.ssh_password)
 
         for attr, value in data.items():
-            if attr in ("docker_context", "max_memory_mb", "max_cpu", "expiration_minutes", "max_renewals"):
+            if attr in ("docker_context", "max_memory_mb", "max_cpu", "expiration_seconds", "max_renewals"):
                 value = cls.sanitize_value(value)
             setattr(challenge, attr, value)
 
@@ -232,7 +232,7 @@ class ContainerChallenge(BaseChallenge):
             "ctype": challenge.ctype,
             "ssh_username": challenge.ssh_username,
             "ssh_password": challenge.ssh_password,
-            "expiration_minutes": challenge.expiration_minutes,
+            "expiration_seconds": challenge.expiration_seconds,
             "max_memory_mb": challenge.max_memory_mb,
             "max_cpu": challenge.max_cpu,
             "cap_add": challenge.cap_add,

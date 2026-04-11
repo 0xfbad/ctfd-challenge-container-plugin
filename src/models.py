@@ -13,7 +13,7 @@ class ContainerChallengeModel(Challenges):
     ctype = db.Column(db.Text, default="tcp")
     ssh_username = db.Column(db.Text, nullable=True)
     ssh_password = db.Column(db.Text, nullable=True)
-    expiration_minutes = db.Column(db.Integer, default=30)
+    expiration_seconds = db.Column(db.Integer, default=1800)
     max_renewals = db.Column(db.Integer, default=2)
     max_memory_mb = db.Column(db.Integer, nullable=True)
     max_cpu = db.Column(db.Float, nullable=True)

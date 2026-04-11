@@ -113,6 +113,7 @@ def _ensure_columns(app: Flask):
         insp = inspect(db.engine)
         for table, col, col_type, default in [
             ("container_challenges", "max_renewals", "INTEGER", "2"),
+            ("container_challenges", "expiration_seconds", "INTEGER", "1800"),
             ("container_info", "renewals_used", "INTEGER", "0"),
         ]:
             try:
@@ -122,6 +123,21 @@ def _ensure_columns(app: Flask):
             if col not in cols:
                 db.session.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type} DEFAULT {default}"))
                 logger.info(f"added {col} column to {table}")
+
+        # migrate expiration_minutes -> expiration_seconds
+        try:
+            chal_cols = {c["name"] for c in insp.get_columns("container_challenges")}
+            if "expiration_minutes" in chal_cols:
+                db.session.execute(
+                    text(
+                        "UPDATE container_challenges SET expiration_seconds = expiration_minutes * 60 "
+                        "WHERE expiration_seconds IS NULL OR expiration_seconds = 1800"
+                    )
+                )
+                db.session.execute(text("ALTER TABLE container_challenges DROP COLUMN expiration_minutes"))
+                logger.info("migrated expiration_minutes to expiration_seconds")
+        except Exception as e:
+            logger.debug(f"expiration_minutes migration: {e}")
 
         # float(32-bit) rounds unix timestamps, need double
         try:

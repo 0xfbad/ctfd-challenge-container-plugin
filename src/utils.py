@@ -10,7 +10,7 @@ DEFAULTS = {
     "max_concurrent_creates": 2,
     "freshness_secret": "",
     "post_solve_expiry_seconds": 90,
-    "default_expiration_minutes": 30,
+    "default_expiration_seconds": 1800,
     "default_max_renewals": 2,
 }
 

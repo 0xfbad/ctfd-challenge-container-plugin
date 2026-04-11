@@ -212,9 +212,8 @@ def renew_container(chal_id, xid, is_team):
     time_remaining = max(0, (running_container.expires or 0) - now)
 
     try:
-        expiration_minutes = challenge.expiration_minutes or get_setting("default_expiration_minutes", 30)
-        expiration_seconds = expiration_minutes * 60
-        new_expires = now + expiration_seconds
+        expiration = challenge.expiration_seconds or get_setting("default_expiration_seconds", 1800)
+        new_expires = now + expiration
         running_container.expires = new_expires
         running_container.renewals_used = renewals_used + 1
         if running_container.stack_id:
@@ -311,9 +310,8 @@ def _create_container_inner(chal_id, xid, uid, is_team):
 
     extra_env = extra_env or None
 
-    expiration_minutes = challenge.expiration_minutes or get_setting("default_expiration_minutes", 30)
-    expiration_seconds = expiration_minutes * 60
-    expires = int(time.time() + expiration_seconds)
+    expiration = challenge.expiration_seconds or get_setting("default_expiration_seconds", 1800)
+    expires = int(time.time() + expiration)
     now = int(time.time())
 
     host_status = container_manager.orchestrator.get_status()

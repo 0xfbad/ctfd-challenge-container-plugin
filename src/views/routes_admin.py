@@ -338,8 +338,8 @@ def route_admin_extend():
     if not challenge:
         return jsonify(error="challenge not found"), 404
 
-    expiration_minutes = challenge.expiration_minutes or get_setting("default_expiration_minutes", 30)
-    new_expires = int(time.time() + expiration_minutes * 60)
+    expiration = challenge.expiration_seconds or get_setting("default_expiration_seconds", 1800)
+    new_expires = int(time.time() + expiration)
 
     container.expires = new_expires
     if container.stack_id:
