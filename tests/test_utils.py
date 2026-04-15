@@ -1,4 +1,9 @@
+import sys
+from unittest.mock import patch
+
 from utils import settings_to_dict, get_setting, _coerce, DEFAULTS
+
+_flask_mod = sys.modules["flask"]
 
 
 class FakeSetting:
@@ -66,10 +71,12 @@ def test_defaults_dict_has_expected_keys():
 
 
 def test_get_setting_returns_default_outside_app_context():
-    result = get_setting("max_containers_per_user")
-    assert result == 4
+    with patch.object(_flask_mod, "current_app", None):
+        result = get_setting("max_containers_per_user")
+        assert result == 4
 
 
 def test_get_setting_with_explicit_default():
-    result = get_setting("nonexistent_key", 99)
-    assert result == 99
+    with patch.object(_flask_mod, "current_app", None):
+        result = get_setting("nonexistent_key", 99)
+        assert result == 99

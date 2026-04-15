@@ -55,6 +55,7 @@ _flask = sys.modules["flask"]
 for attr in (
     "Blueprint",
     "Flask",
+    "Request",
     "request",
     "jsonify",
     "render_template",
@@ -101,7 +102,26 @@ _docker_errors = sys.modules["docker.errors"]
 _docker_errors.DockerException = type("DockerException", (Exception,), {})
 _docker_errors.NotFound = type("NotFound", (Exception,), {})
 _docker_errors.ImageNotFound = type("ImageNotFound", (Exception,), {})
+_docker_errors.APIError = type("APIError", (Exception,), {})
 _docker.errors = _docker_errors
+
+_docker_models = types.ModuleType("docker.models")
+_docker_models_containers = types.ModuleType("docker.models.containers")
+_docker_models_containers.Container = MagicMock()
+_docker_models_networks = types.ModuleType("docker.models.networks")
+_docker_models_networks.Network = MagicMock()
+_docker_models.containers = _docker_models_containers
+_docker_models.networks = _docker_models_networks
+_docker.models = _docker_models
+sys.modules["docker.models"] = _docker_models
+sys.modules["docker.models.containers"] = _docker_models_containers
+sys.modules["docker.models.networks"] = _docker_models_networks
+
+_docker_types = types.ModuleType("docker.types")
+_docker_types.IPAMPool = MagicMock()
+_docker_types.IPAMConfig = MagicMock()
+_docker.types = _docker_types
+sys.modules["docker.types"] = _docker_types
 
 # paramiko stubs
 _paramiko = sys.modules["paramiko"]
@@ -200,6 +220,7 @@ _load_module("models")
 _load_module("event_logger")
 _load_module("utils")
 _load_module("freshness")
+_load_module("exceptions")
 _load_module("docker_host_manager")
 _load_module("orchestrator")
 _load_module("container_manager")

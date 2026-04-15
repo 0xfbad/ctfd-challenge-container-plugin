@@ -1,23 +1,31 @@
+from __future__ import annotations
+
 import time
 import logging
 import threading
+
 from flask import current_app, request
 from CTFd.models import db
 
 from ..models import ContainerInfoModel, ContainerChallengeModel, ContainerHistoryModel, DockerContextModel
-from ..container_manager import ContainerException
+from ..exceptions import ContainerException
+from ..container_manager import ContainerManager
+from ..docker_host_manager import LOCAL_CONTEXT_NAME
 from ..utils import get_setting
 from ..freshness import compute_token
 from ..event_logger import event_logger
 
 logger = logging.getLogger(__name__)
 
+# JSON response dicts returned by helper functions
+JsonResponse = dict[str, str | int | bool | None]
+
 _create_locks_guard = threading.Lock()
-_create_locks: dict[tuple, threading.Lock] = {}
+_create_locks: dict[tuple[int, str, int], threading.Lock] = {}
 _MAX_CREATE_LOCKS = 1000
 
 
-def _get_create_lock(chal_id, xid, is_team):
+def _get_create_lock(chal_id: int, xid: int, is_team: bool) -> threading.Lock:
     key = (chal_id, "team" if is_team else "user", xid)
     with _create_locks_guard:
         if key not in _create_locks:
@@ -29,8 +37,7 @@ def _get_create_lock(chal_id, xid, is_team):
         return _create_locks[key]
 
 
-def sanitize_container_error(err):
-    """strip internal details from container errors shown to users"""
+def sanitize_container_error(err: ContainerException | Exception) -> str:
     msg = str(err)
     if any(
         p in msg.lower()
@@ -49,17 +56,17 @@ def sanitize_container_error(err):
 
 
 def log_container_event(
-    event_type,
-    message,
-    user_id=None,
-    user_name=None,
-    container_id=None,
-    challenge_id=None,
-    challenge_name=None,
-    team_id=None,
-    team_name=None,
-    docker_context=None,
-):
+    event_type: str,
+    message: str,
+    user_id: int | None = None,
+    user_name: str | None = None,
+    container_id: str | None = None,
+    challenge_id: int | None = None,
+    challenge_name: str | None = None,
+    team_id: int | None = None,
+    team_name: str | None = None,
+    docker_context: str | None = None,
+) -> None:
     event_logger.log_event(
         event_type=event_type,
         message=message,
@@ -76,7 +83,12 @@ def log_container_event(
     )
 
 
-def build_connection_response(status, challenge, container, context_name):
+def build_connection_response(
+    status: str,
+    challenge: ContainerChallengeModel,
+    container: ContainerInfoModel,
+    context_name: str | None,
+) -> JsonResponse:
     max_renewals = challenge.max_renewals
     if max_renewals is None:
         max_renewals = get_setting("default_max_renewals", 2)
@@ -93,18 +105,13 @@ def build_connection_response(status, challenge, container, context_name):
     }
 
 
-def _request_hostname():
-    try:
-        return request.host.split(":")[0]
-    except Exception:
-        return "localhost"
+def _request_hostname() -> str:
+    return request.host.split(":")[0]
 
 
-def get_hostname_for_context(context_name):
+def get_hostname_for_context(context_name: str | None) -> str:
     if not context_name:
         return _request_hostname()
-
-    from ..docker_host_manager import LOCAL_CONTEXT_NAME
 
     # local containers are colocated so users connect via the CTFd hostname
     if context_name == LOCAL_CONTEXT_NAME:
@@ -123,14 +130,49 @@ def get_hostname_for_context(context_name):
     return _request_hostname()
 
 
-def record_history_stop(container_id, reason):
+def record_history_stop(container_id: str, reason: str) -> None:
     row = ContainerHistoryModel.query.filter_by(container_id=container_id).first()
     if row:
         row.stopped_at = time.time()
         row.reason = reason
 
 
-def kill_container(container_id):
+def _add_history_row(
+    container_id: str,
+    challenge_id: int,
+    uid: int,
+    team_id: int | None,
+    context_name: str,
+    stack_id: str | None = None,
+) -> None:
+    db.session.add(
+        ContainerHistoryModel(
+            container_id=container_id,
+            challenge_id=challenge_id,
+            user_id=uid,
+            team_id=team_id,
+            docker_context=context_name,
+            stack_id=stack_id,
+            created_at=time.time(),
+        )
+    )
+
+
+def _log_request_failed(challenge: ContainerChallengeModel, uid: int, err: Exception) -> None:
+    event_logger.log_event(
+        "request_failed",
+        f"container request failed for {challenge.name}: {err}",
+        level="error",
+        user_id=uid,
+        metadata={
+            "challenge_id": challenge.id,
+            "challenge_name": challenge.name,
+            "reason": str(err),
+        },
+    )
+
+
+def kill_container(container_id: str) -> JsonResponse:
     container_manager = current_app.container_manager
     container = ContainerInfoModel.query.filter_by(container_id=container_id).first()
 
@@ -151,43 +193,39 @@ def kill_container(container_id):
         logger.error(f"failed to kill container {container_id}: {e}")
         return {"error": "failed to stop container, please try again"}
 
-    try:
-        container_manager.release_slot(context_name)
+    container_manager.release_slot(context_name)
 
-        challenge_name = container.challenge.name if container.challenge else None
-        user_name = container.user.name if container.user else None
-        team_name = container.team.name if container.team else None
+    challenge_name = container.challenge.name if container.challenge else None
+    user_name = container.user.name if container.user else None
+    team_name = container.team.name if container.team else None
 
-        log_container_event(
-            event_type="killed",
-            container_id=container_id,
-            challenge_id=container.challenge_id,
-            challenge_name=challenge_name,
-            user_id=container.user_id,
-            user_name=user_name,
-            team_id=container.team_id,
-            team_name=team_name,
-            docker_context=context_name,
-            message=f"container killed for {challenge_name}",
-        )
+    log_container_event(
+        event_type="killed",
+        container_id=container_id,
+        challenge_id=container.challenge_id,
+        challenge_name=challenge_name,
+        user_id=container.user_id,
+        user_name=user_name,
+        team_id=container.team_id,
+        team_name=team_name,
+        docker_context=context_name,
+        message=f"container killed for {challenge_name}",
+    )
 
-        if stack_id:
-            siblings = ContainerInfoModel.query.filter_by(stack_id=stack_id).all()
-            for s in siblings:
-                record_history_stop(s.container_id, "stopped")
-                db.session.delete(s)
-        else:
-            record_history_stop(container_id, "stopped")
-            db.session.delete(container)
+    if stack_id:
+        siblings = ContainerInfoModel.query.filter_by(stack_id=stack_id).all()
+        for s in siblings:
+            record_history_stop(s.container_id, "stopped")
+            db.session.delete(s)
+    else:
+        record_history_stop(container_id, "stopped")
+        db.session.delete(container)
 
-        db.session.commit()
-        return {"success": "container killed"}
-    except Exception as e:
-        logger.error(f"failed to clean up container {container_id}: {e}")
-        return {"error": "failed to stop container, please try again"}
+    db.session.commit()
+    return {"success": "container killed"}
 
 
-def renew_container(chal_id, xid, is_team):
+def renew_container(chal_id: int, xid: int, is_team: bool) -> JsonResponse | tuple[JsonResponse, int]:
     challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
 
     if challenge is None:
@@ -211,18 +249,15 @@ def renew_container(chal_id, xid, is_team):
     now = int(time.time())
     time_remaining = max(0, (running_container.expires or 0) - now)
 
-    try:
-        expiration = challenge.expiration_seconds or get_setting("default_expiration_seconds", 1800)
-        new_expires = now + expiration
-        running_container.expires = new_expires
-        running_container.renewals_used = renewals_used + 1
-        if running_container.stack_id:
-            ContainerInfoModel.query.filter_by(stack_id=running_container.stack_id).update(
-                {"expires": new_expires, "renewals_used": renewals_used + 1}
-            )
-        db.session.commit()
-    except Exception:
-        return {"error": "database error occurred, please try again"}
+    expiration = int(challenge.expiration_seconds or get_setting("default_expiration_seconds", 1800) or 1800)
+    new_expires = now + expiration
+    running_container.expires = new_expires
+    running_container.renewals_used = renewals_used + 1
+    if running_container.stack_id:
+        ContainerInfoModel.query.filter_by(stack_id=running_container.stack_id).update(
+            {"expires": new_expires, "renewals_used": renewals_used + 1}
+        )
+    db.session.commit()
 
     user_id = running_container.user_id
     user_name = running_container.user.name if running_container.user else None
@@ -250,7 +285,7 @@ def renew_container(chal_id, xid, is_team):
     return response
 
 
-def create_container(chal_id, xid, uid, is_team):
+def create_container(chal_id: int, xid: int, uid: int, is_team: bool) -> JsonResponse | tuple[JsonResponse, int]:
     lock = _get_create_lock(chal_id, xid, is_team)
     acquired = lock.acquire(timeout=30)
     if not acquired:
@@ -262,7 +297,7 @@ def create_container(chal_id, xid, uid, is_team):
         lock.release()
 
 
-def _create_container_inner(chal_id, xid, uid, is_team):
+def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> JsonResponse | tuple[JsonResponse, int]:
     container_manager = current_app.container_manager
     challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
 
@@ -297,10 +332,10 @@ def _create_container_inner(chal_id, xid, uid, is_team):
             logger.error(f"container status check failed: {err}")
             return {"error": "a server error occurred, please try again"}, 500
 
-    extra_env = {}
-    freshness_secret = get_setting("freshness_secret")
-    if freshness_secret:
-        token = compute_token(freshness_secret, chal_id, xid)
+    extra_env: dict[str, str] = {}
+    freshness_secret_raw = get_setting("freshness_secret")
+    if freshness_secret_raw:
+        token = compute_token(str(freshness_secret_raw), chal_id, xid)
         extra_env["FRESHNESS_TOKEN"] = token
 
     if challenge.ssh_username:
@@ -308,9 +343,9 @@ def _create_container_inner(chal_id, xid, uid, is_team):
     if challenge.ssh_password:
         extra_env["SSH_PASSWORD"] = challenge.ssh_password
 
-    extra_env = extra_env or None
+    extra_env_or_none: dict[str, str] | None = extra_env or None
 
-    expiration = challenge.expiration_seconds or get_setting("default_expiration_seconds", 1800)
+    expiration = int(challenge.expiration_seconds or get_setting("default_expiration_seconds", 1800) or 1800)
     expires = int(time.time() + expiration)
     now = int(time.time())
 
@@ -335,6 +370,8 @@ def _create_container_inner(chal_id, xid, uid, is_team):
         },
     )
 
+    team_id = xid if is_team else None
+
     if challenge.services_json:
         try:
             entry_container, host_port, companions, stack_id, context_name = container_manager.create_stack(
@@ -350,22 +387,12 @@ def _create_container_inner(chal_id, xid, uid, is_team):
                 challenge.max_memory_mb,
                 challenge.max_cpu,
                 challenge.docker_context,
-                extra_env=extra_env,
+                extra_env=extra_env_or_none,
                 ctype=challenge.ctype,
                 cap_add=challenge.cap_add,
             )
         except ContainerException as err:
-            event_logger.log_event(
-                "request_failed",
-                f"container request failed for {challenge.name}: {err}",
-                level="error",
-                user_id=uid,
-                metadata={
-                    "challenge_id": challenge.id,
-                    "challenge_name": challenge.name,
-                    "reason": str(err),
-                },
-            )
+            _log_request_failed(challenge, uid, err)
             return {"error": sanitize_container_error(err)}
 
         if host_port is None:
@@ -374,7 +401,7 @@ def _create_container_inner(chal_id, xid, uid, is_team):
         entry_row = ContainerInfoModel(
             container_id=entry_container.id,
             challenge_id=challenge.id,
-            team_id=xid if is_team else None,
+            team_id=team_id,
             user_id=uid,
             port=host_port,
             timestamp=now,
@@ -384,24 +411,14 @@ def _create_container_inner(chal_id, xid, uid, is_team):
             is_entry=True,
         )
         db.session.add(entry_row)
-        db.session.add(
-            ContainerHistoryModel(
-                container_id=entry_container.id,
-                challenge_id=challenge.id,
-                user_id=uid,
-                team_id=xid if is_team else None,
-                docker_context=context_name,
-                stack_id=stack_id,
-                created_at=time.time(),
-            )
-        )
+        _add_history_row(entry_container.id, challenge.id, uid, team_id, context_name, stack_id)
 
         for svc_name, svc_container in companions:
             db.session.add(
                 ContainerInfoModel(
                     container_id=svc_container.id,
                     challenge_id=challenge.id,
-                    team_id=xid if is_team else None,
+                    team_id=team_id,
                     user_id=uid,
                     port=0,
                     timestamp=now,
@@ -411,17 +428,7 @@ def _create_container_inner(chal_id, xid, uid, is_team):
                     is_entry=False,
                 )
             )
-            db.session.add(
-                ContainerHistoryModel(
-                    container_id=svc_container.id,
-                    challenge_id=challenge.id,
-                    user_id=uid,
-                    team_id=xid if is_team else None,
-                    docker_context=context_name,
-                    stack_id=stack_id,
-                    created_at=time.time(),
-                )
-            )
+            _add_history_row(svc_container.id, challenge.id, uid, team_id, context_name, stack_id)
 
         try:
             db.session.commit()
@@ -449,22 +456,12 @@ def _create_container_inner(chal_id, xid, uid, is_team):
                 challenge.max_memory_mb,
                 challenge.max_cpu,
                 challenge.docker_context,
-                extra_env=extra_env,
+                extra_env=extra_env_or_none,
                 ctype=challenge.ctype,
                 cap_add=challenge.cap_add,
             )
         except ContainerException as err:
-            event_logger.log_event(
-                "request_failed",
-                f"container request failed for {challenge.name}: {err}",
-                level="error",
-                user_id=uid,
-                metadata={
-                    "challenge_id": challenge.id,
-                    "challenge_name": challenge.name,
-                    "reason": str(err),
-                },
-            )
+            _log_request_failed(challenge, uid, err)
             return {"error": sanitize_container_error(err)}
 
         port = container_manager.get_container_port(created_container.id, context_name)
@@ -474,7 +471,7 @@ def _create_container_inner(chal_id, xid, uid, is_team):
         new_container = ContainerInfoModel(
             container_id=created_container.id,
             challenge_id=challenge.id,
-            team_id=xid if is_team else None,
+            team_id=team_id,
             user_id=uid,
             port=port,
             timestamp=now,
@@ -482,6 +479,7 @@ def _create_container_inner(chal_id, xid, uid, is_team):
             docker_context=context_name,
         )
         db.session.add(new_container)
+        _add_history_row(created_container.id, challenge.id, uid, team_id, context_name)
         try:
             db.session.commit()
         except Exception:
@@ -491,21 +489,6 @@ def _create_container_inner(chal_id, xid, uid, is_team):
             except Exception:
                 logger.debug("failed to clean up container after db error", exc_info=True)
             return {"error": "database error, container has been cleaned up"}, 500
-
-        db.session.add(
-            ContainerHistoryModel(
-                container_id=created_container.id,
-                challenge_id=challenge.id,
-                user_id=uid,
-                team_id=xid if is_team else None,
-                docker_context=context_name,
-                created_at=time.time(),
-            )
-        )
-        try:
-            db.session.commit()
-        except Exception:
-            db.session.rollback()
 
     user_id = new_container.user_id
     user_name = new_container.user.name if new_container.user else None
@@ -529,7 +512,7 @@ def _create_container_inner(chal_id, xid, uid, is_team):
     return response
 
 
-def view_container_info(chal_id, xid, is_team):
+def view_container_info(chal_id: int, xid: int, is_team: bool) -> JsonResponse | tuple[JsonResponse, int]:
     container_manager = current_app.container_manager
     challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
 
@@ -540,14 +523,6 @@ def view_container_info(chal_id, xid, is_team):
     filter_args["team_id" if is_team else "user_id"] = xid
     running_container = ContainerInfoModel.query.filter_by(**filter_args).first()
 
-    # fallback for legacy rows without is_entry
-    if not running_container:
-        legacy_args = {"challenge_id": challenge.id}
-        legacy_args["team_id" if is_team else "user_id"] = xid
-        running_container = (
-            ContainerInfoModel.query.filter_by(**legacy_args).filter(ContainerInfoModel.stack_id.is_(None)).first()
-        )
-
     if running_container:
         try:
             if container_manager.is_container_running(running_container.container_id, running_container.docker_context):
@@ -556,7 +531,6 @@ def view_container_info(chal_id, xid, is_team):
                 )
                 return response
             else:
-                # clean up stale rows
                 if running_container.stack_id:
                     stale = ContainerInfoModel.query.filter_by(stack_id=running_container.stack_id).all()
                     for s in stale:
@@ -580,7 +554,9 @@ def view_container_info(chal_id, xid, is_team):
     return {"status": "instance not started"}
 
 
-def _check_misconfigured(challenge, container_manager):
+def _check_misconfigured(
+    challenge: ContainerChallengeModel, container_manager: ContainerManager
+) -> JsonResponse | None:
     if not challenge.image or not challenge.port:
         logger.warning(f"challenge {challenge.id} ({challenge.name}) missing image or port")
         return {
@@ -598,7 +574,7 @@ def _check_misconfigured(challenge, container_manager):
     return None
 
 
-def connect_type(chal_id):
+def connect_type(chal_id: int) -> JsonResponse | tuple[JsonResponse, int]:
     challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
 
     if challenge is None:

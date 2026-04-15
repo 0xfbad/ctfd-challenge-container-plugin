@@ -1,50 +1,52 @@
-from __future__ import annotations
-
 import atexit
 import sys
 import os
 import time
 import json
 import logging
-from typing import Any
 
 from flask import Flask
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers import SchedulerNotRunningError
 import docker
+from docker.models.containers import Container
 
 from CTFd.models import db
 from .models import ContainerInfoModel, ContainerHistoryModel
 from .docker_host_manager import DockerHostManager
 from .orchestrator import Orchestrator
+from .exceptions import ContainerException
+from .utils import get_setting
+from .event_logger import event_logger
 
 logger = logging.getLogger(__name__)
 
 CPU_QUOTA_BASE = 100000
+_SSH_CAPS = ["SYS_CHROOT", "SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "AUDIT_WRITE"]
+
+# value types that appear in kwargs dicts forwarded to docker run
+_DockerRunVal = str | int | bool | list[str] | dict[str, str] | dict[str, dict[str, str]]
 
 
-class ContainerException(Exception):
-    def __init__(self, *args):
-        super().__init__(*args)
-        self.message = args[0] if args else "unknown container exception"
-
-    def __str__(self):
-        return self.message
+def _build_caps(ctype: str | None, cap_add: str | None) -> list[str]:
+    caps = []
+    if ctype == "ssh":
+        caps.extend(_SSH_CAPS)
+    if cap_add:
+        caps.extend(c.strip() for c in cap_add.split(",") if c.strip())
+    return list(set(caps)) if caps else []
 
 
 class ContainerManager:
-    def __init__(self, settings, app):
+    def __init__(self, settings: dict[str, str], app: Flask) -> None:
         self.settings = settings
         self.app = app
         self.host_manager = DockerHostManager()
         self.orchestrator = Orchestrator(self.host_manager)
 
-        try:
-            self.initialize_connection()
-        except ContainerException:
-            logger.error("docker could not initialize or connect")
+        self.initialize_connection()
 
-    def _ensure_connected(self):
+    def _ensure_connected(self) -> None:
         if not self.host_manager.has_contexts():
             try:
                 self.initialize_connection()
@@ -54,7 +56,7 @@ class ContainerManager:
             if not self.host_manager.has_contexts():
                 raise ContainerException("no docker contexts available")
 
-    def initialize_connection(self):
+    def initialize_connection(self) -> None:
         try:
             self.expiration_scheduler.shutdown()
         except (SchedulerNotRunningError, AttributeError):
@@ -63,10 +65,10 @@ class ContainerManager:
         self.load_docker_contexts()
         self.setup_expiration_scheduler()
 
-    def load_docker_contexts(self):
+    def load_docker_contexts(self) -> None:
         self.orchestrator.load_from_db()
 
-    def setup_expiration_scheduler(self):
+    def setup_expiration_scheduler(self) -> None:
         _serving = (
             "gunicorn" in sys.modules
             or os.environ.get("WERKZEUG_RUN_MAIN")
@@ -75,8 +77,6 @@ class ContainerManager:
         if not _serving:
             logger.info("scheduler skipped (CLI mode)")
             return
-
-        from .utils import get_setting
 
         expiration_check_interval = get_setting("expiration_check_interval", 5)
 
@@ -105,49 +105,36 @@ class ContainerManager:
 
         atexit.register(_shutdown_scheduler)
 
-    def select_and_reserve(self):
-        return self.orchestrator.select_and_reserve()
-
-    def reserve_slot(self, context_name):
+    def reserve_slot(self, context_name: str) -> None:
         self.orchestrator.reserve_slot(context_name)
 
-    def release_slot(self, context_name):
+    def release_slot(self, context_name: str) -> None:
         self.orchestrator.release_slot(context_name)
 
-    def is_container_running(self, container_id: str, context_name: str | None = None) -> bool:
+    def _dispatch_to_context(self, method_name, context_name, args, kwargs, default=None):
+        """Route a host_manager call to a specific context or fan out across all contexts"""
         self._ensure_connected()
 
         if context_name and context_name in self.host_manager._context_configs:
             try:
-                return self.host_manager.is_container_running(context_name, container_id)
+                return getattr(self.host_manager, method_name)(context_name, *args, **kwargs)
             except docker.errors.DockerException as e:
                 raise ContainerException(f"docker error: {e}")
 
         for ctx in self.host_manager.get_connected_contexts():
             try:
-                if self.host_manager.is_container_running(ctx, container_id):
-                    return True
-            except (docker.errors.NotFound, docker.errors.DockerException):
-                continue
-        return False
-
-    def get_container_port(self, container_id: str, context_name: str | None = None) -> str | None:
-        self._ensure_connected()
-
-        if context_name and context_name in self.host_manager._context_configs:
-            try:
-                return self.host_manager.get_container_port(context_name, container_id)
-            except docker.errors.DockerException as e:
-                raise ContainerException(f"docker error: {e}")
-
-        for ctx in self.host_manager.get_connected_contexts():
-            try:
-                result = self.host_manager.get_container_port(ctx, container_id)
-                if result is not None:
+                result = getattr(self.host_manager, method_name)(ctx, *args, **kwargs)
+                if result is not None and result != default:
                     return result
             except (docker.errors.NotFound, docker.errors.DockerException):
                 continue
-        return None
+        return default
+
+    def is_container_running(self, container_id: str, context_name: str | None = None) -> bool:
+        return self._dispatch_to_context("is_container_running", context_name, (container_id,), {}, default=False)
+
+    def get_container_port(self, container_id: str, context_name: str | None = None) -> str | None:
+        return self._dispatch_to_context("get_container_port", context_name, (container_id,), {}, default=None)
 
     def get_running_container_ids(self) -> set[str]:
         self._ensure_connected()
@@ -157,40 +144,14 @@ class ContainerManager:
             result.update(self.host_manager.get_running_container_ids(ctx))
         return result
 
-    def kill_container(self, container_id: str, context_name: str | None = None):
-        self._ensure_connected()
-
-        if context_name and context_name in self.host_manager._context_configs:
-            try:
-                self.host_manager.kill_container(context_name, container_id)
-                return
-            except docker.errors.DockerException as e:
-                raise ContainerException(f"docker error: {e}")
-
-        for ctx in self.host_manager.get_connected_contexts():
-            try:
-                if self.host_manager.kill_container(ctx, container_id):
-                    return
-            except (docker.errors.NotFound, docker.errors.DockerException):
-                continue
+    def kill_container(self, container_id: str, context_name: str | None = None) -> None:
+        self._dispatch_to_context("kill_container", context_name, (container_id,), {}, default=None)
 
     def get_container_logs(self, container_id: str, context_name: str | None = None, tail: int = 200) -> str:
-        self._ensure_connected()
-
-        if context_name and context_name in self.host_manager._context_configs:
-            try:
-                return self.host_manager.get_container_logs(context_name, container_id, tail=tail)
-            except docker.errors.DockerException as e:
-                raise ContainerException(f"docker error: {e}")
-
-        for ctx in self.host_manager.get_connected_contexts():
-            try:
-                result = self.host_manager.get_container_logs(ctx, container_id, tail=tail)
-                if result is not None:
-                    return result
-            except (docker.errors.NotFound, docker.errors.DockerException):
-                continue
-        return ""
+        result = self._dispatch_to_context(
+            "get_container_logs", context_name, (container_id,), {"tail": tail}, default=""
+        )
+        return result if result is not None else ""
 
     def create_container(
         self,
@@ -204,13 +165,13 @@ class ContainerManager:
         max_memory_mb: int | None = None,
         max_cpu: float | None = None,
         context_name: str | None = None,
-        extra_env: dict | None = None,
+        extra_env: dict[str, str] | None = None,
         ctype: str | None = None,
         cap_add: str | None = None,
-    ):
+    ) -> tuple[Container, str]:
         self._ensure_connected()
 
-        kwargs: dict[str, Any] = {}
+        kwargs: dict[str, _DockerRunVal] = {}
 
         if max_memory_mb:
             try:
@@ -255,55 +216,75 @@ class ContainerManager:
         kwargs["name"] = container_name
         kwargs["hostname"] = container_hostname
 
-        # ssh containers need extra capabilities for sshd privilege separation
-        caps = []
-        if ctype == "ssh":
-            caps.extend(["SYS_CHROOT", "SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "AUDIT_WRITE"])
-        if cap_add:
-            caps.extend([c.strip() for c in cap_add.split(",") if c.strip()])
+        caps = _build_caps(ctype, cap_add)
         if caps:
-            kwargs["cap_add"] = list(set(caps))
+            kwargs["cap_add"] = caps
 
         if context_name:
             return self._create_on_context(context_name, image, port, command, environment, kwargs)
 
         return self._create_load_balanced(image, port, command, environment, kwargs)
 
-    def _create_on_context(self, context_name, image, port, command, environment, kwargs):
-        from .event_logger import event_logger
+    def _log_create_error(self, context_name: str, image: str, reason: str) -> None:
+        event_logger.log_event(
+            "container_error",
+            f"{reason} on {context_name}"
+            if "not found" in reason
+            else f"failed to create container on {context_name}: {reason}",
+            level="error",
+            metadata={"context_name": context_name, "image": image, "reason": reason},
+        )
 
+    def _try_run_on_context(
+        self,
+        ctx: str,
+        image: str,
+        port: int,
+        command: str,
+        environment: dict[str, str | int],
+        kwargs: dict[str, _DockerRunVal],
+    ) -> tuple[Container, str]:
+        self.host_manager.acquire_semaphore(ctx)
+        try:
+            container = self.host_manager.run_container(ctx, image, port, command, environment, **kwargs)
+            return container, ctx
+        except docker.errors.ImageNotFound:
+            self.orchestrator.release_slot(ctx)
+            self._log_create_error(ctx, image, f"image {image} not found")
+            raise ContainerException("docker image not found")
+        except docker.errors.DockerException as e:
+            self.orchestrator.release_slot(ctx)
+            self._log_create_error(ctx, image, str(e))
+            raise
+        finally:
+            self.host_manager.release_semaphore(ctx)
+
+    def _create_on_context(
+        self,
+        context_name: str,
+        image: str,
+        port: int,
+        command: str,
+        environment: dict[str, str | int],
+        kwargs: dict[str, _DockerRunVal],
+    ) -> tuple[Container, str]:
         if context_name not in self.host_manager._context_configs:
             raise ContainerException(f"docker context '{context_name}' not available")
 
         self.orchestrator.reserve_slot(context_name)
-        self.host_manager.acquire_semaphore(context_name)
         try:
-            container = self.host_manager.run_container(context_name, image, port, command, environment, **kwargs)
-            return container, context_name
-        except docker.errors.ImageNotFound:
-            self.orchestrator.release_slot(context_name)
-            event_logger.log_event(
-                "container_error",
-                f"image {image} not found on {context_name}",
-                level="error",
-                metadata={"context_name": context_name, "image": image, "reason": "image not found"},
-            )
-            raise ContainerException("docker image not found")
+            return self._try_run_on_context(context_name, image, port, command, environment, kwargs)
         except docker.errors.DockerException as e:
-            self.orchestrator.release_slot(context_name)
-            event_logger.log_event(
-                "container_error",
-                f"failed to create container on {context_name}: {e}",
-                level="error",
-                metadata={"context_name": context_name, "image": image, "reason": str(e)},
-            )
             raise ContainerException(f"failed to create container: {e}")
-        finally:
-            self.host_manager.release_semaphore(context_name)
 
-    def _create_load_balanced(self, image, port, command, environment, kwargs):
-        from .event_logger import event_logger
-
+    def _create_load_balanced(
+        self,
+        image: str,
+        port: int,
+        command: str,
+        environment: dict[str, str | int],
+        kwargs: dict[str, _DockerRunVal],
+    ) -> tuple[Container, str]:
         tried: set[str] = set()
         last_error = None
 
@@ -322,52 +303,38 @@ class ContainerManager:
                 self.orchestrator.release_slot(selected)
                 continue
 
-            self.host_manager.acquire_semaphore(selected)
             try:
-                container = self.host_manager.run_container(selected, image, port, command, environment, **kwargs)
-                return container, selected
-            except docker.errors.ImageNotFound:
-                self.orchestrator.release_slot(selected)
-                event_logger.log_event(
-                    "container_error",
-                    f"image {image} not found on {selected}",
-                    level="error",
-                    metadata={"context_name": selected, "image": image, "reason": "image not found"},
-                )
-                raise ContainerException("docker image not found")
+                return self._try_run_on_context(selected, image, port, command, environment, kwargs)
             except docker.errors.DockerException as e:
-                self.orchestrator.release_slot(selected)
                 last_error = e
                 continue
-            finally:
-                self.host_manager.release_semaphore(selected)
 
         raise ContainerException(f"failed to create container on any context: {last_error}")
 
     def create_stack(
         self,
-        chal_id,
-        team_id,
-        user_id,
-        image,
-        port,
-        command,
-        volumes,
-        services_json,
-        network_json,
-        max_memory_mb=None,
-        max_cpu=None,
-        context_name=None,
-        extra_env=None,
-        ctype=None,
-        cap_add=None,
-    ):
+        chal_id: int | str,
+        team_id: int | str,
+        user_id: int | str,
+        image: str,
+        port: int,
+        command: str,
+        volumes: str,
+        services_json: str | None,
+        network_json: str | None,
+        max_memory_mb: int | None = None,
+        max_cpu: float | None = None,
+        context_name: str | None = None,
+        extra_env: dict[str, str] | None = None,
+        ctype: str | None = None,
+        cap_add: str | None = None,
+    ) -> tuple[Container, int, list[tuple[str, Container]], str, str]:
         import uuid
 
         self._ensure_connected()
 
-        services = json.loads(services_json) if services_json else {}
-        network_cfg = json.loads(network_json) if network_json else {}
+        services: dict[str, dict[str, str | dict[str, str]]] = json.loads(services_json) if services_json else {}
+        network_cfg: dict[str, str | dict[str, str]] = json.loads(network_json) if network_json else {}
 
         stack_id = uuid.uuid4().hex
         ts = int(time.time())
@@ -393,20 +360,17 @@ class ContainerManager:
         }
 
         try:
-            subnet = network_cfg.get("subnet")
-            ips = network_cfg.get("ips", {})
+            subnet_raw = network_cfg.get("subnet")
+            subnet = str(subnet_raw) if subnet_raw else None
+            ips_raw = network_cfg.get("ips", {})
+            ips: dict[str, str] = ips_raw if isinstance(ips_raw, dict) else {}
 
             self.host_manager.create_network(context_name, net_name, subnet=subnet, labels=stack_labels)
 
-            entry_caps = []
-            if ctype == "ssh":
-                entry_caps.extend(["SYS_CHROOT", "SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "AUDIT_WRITE"])
-            if cap_add:
-                entry_caps.extend([c.strip() for c in cap_add.split(",") if c.strip()])
-
-            entry_kwargs: dict[str, Any] = {"labels": stack_labels}
+            entry_kwargs: dict[str, _DockerRunVal] = {"labels": stack_labels}
+            entry_caps = _build_caps(ctype, cap_add)
             if entry_caps:
-                entry_kwargs["cap_add"] = list(set(entry_caps))
+                entry_kwargs["cap_add"] = entry_caps
             if max_memory_mb:
                 entry_kwargs["mem_limit"] = f"{int(max_memory_mb)}m"
             if max_cpu:
@@ -425,35 +389,43 @@ class ContainerManager:
                 publish_port=True,
                 hostname=entry_hostname,
                 internal_port=port,
-                **entry_kwargs,
+                **entry_kwargs,  # type: ignore[arg-type]  # mypy can't narrow **dict unpacking
             )
 
-            companions = []
+            companions: list[tuple[str, Container]] = []
             for svc_name, svc_cfg in services.items():
                 svc_env = dict(base_env)
-                svc_env.update(svc_cfg.get("environment", {}))
+                svc_env_extra = svc_cfg.get("environment", {})
+                if isinstance(svc_env_extra, dict):
+                    svc_env.update(svc_env_extra)
 
-                svc_caps = []
-                if svc_cfg.get("cap_add"):
-                    svc_caps = [c.strip() for c in svc_cfg["cap_add"].split(",") if c.strip()]
+                svc_caps: list[str] = []
+                svc_cap_add = svc_cfg.get("cap_add")
+                if isinstance(svc_cap_add, str) and svc_cap_add:
+                    svc_caps = [c.strip() for c in svc_cap_add.split(",") if c.strip()]
 
-                svc_kwargs: dict[str, Any] = {"labels": stack_labels}
+                svc_kwargs: dict[str, _DockerRunVal] = {"labels": stack_labels}
                 if svc_caps:
                     svc_kwargs["cap_add"] = svc_caps
 
+                svc_image = svc_cfg["image"]
+                svc_command_raw = svc_cfg.get("command")
+                svc_command = str(svc_command_raw) if isinstance(svc_command_raw, str) else None
+
                 svc_container, _ = self.host_manager.run_container_on_network(
                     context_name,
-                    svc_cfg["image"],
+                    str(svc_image),
                     net_name,
                     f"{base_name}-{svc_name}",
-                    svc_cfg.get("command"),
+                    svc_command,
                     svc_env,
                     ip_address=ips.get(svc_name),
                     hostname=svc_name,
-                    **svc_kwargs,
+                    **svc_kwargs,  # type: ignore[arg-type]  # mypy can't narrow **dict unpacking
                 )
                 companions.append((svc_name, svc_container))
 
+            assert host_port is not None
             return entry_container, host_port, companions, stack_id, context_name
 
         except Exception:
@@ -464,7 +436,7 @@ class ContainerManager:
             self.orchestrator.release_slot(context_name)
             raise
 
-    def get_images(self) -> list:
+    def get_images(self) -> list[str]:
         self._ensure_connected()
 
         images_by_context: dict[str, list[str]] = {}
@@ -484,7 +456,7 @@ class ContainerManager:
 
         return result
 
-    def get_images_for_context(self, context_name: str) -> list:
+    def get_images_for_context(self, context_name: str) -> list[str]:
         self._ensure_connected()
 
         if context_name not in self.host_manager._context_configs:
@@ -492,7 +464,7 @@ class ContainerManager:
 
         return self.host_manager.get_images(context_name)
 
-    def pull_image(self, image: str, context_name: str | None = None) -> dict:
+    def pull_image(self, image: str, context_name: str | None = None) -> dict[str, str]:
         self._ensure_connected()
 
         results = {}
@@ -516,13 +488,11 @@ class ContainerManager:
                 return True
         return False
 
-    def get_connected_contexts(self):
+    def get_connected_contexts(self) -> list[str]:
         return self.host_manager.get_connected_contexts()
 
-    def reload_settings(self):
-        from .utils import get_setting
-
-        max_concurrent = get_setting("max_concurrent_creates", 2)
+    def reload_settings(self) -> None:
+        max_concurrent = int(get_setting("max_concurrent_creates", 2) or 2)
         self.host_manager._init_semaphores(max_concurrent)
 
     def kill_expired_containers(self, app: Flask):
@@ -536,9 +506,6 @@ class ContainerManager:
                 return
 
         with app.app_context():
-            from .event_logger import event_logger
-
-            # only check entry containers (or standalone containers without stack_id)
             entries = ContainerInfoModel.query.filter(
                 db.or_(ContainerInfoModel.is_entry == True, ContainerInfoModel.stack_id.is_(None))  # noqa: E712
             ).all()

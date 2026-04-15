@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -6,7 +8,7 @@ import socket as _socket
 import threading
 import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from statistics import median
 
@@ -19,10 +21,12 @@ from CTFd.utils.user import get_current_user
 
 from . import containers_bp
 from .helpers import get_hostname_for_context, kill_container
-from ..container_manager import ContainerException
+from ..container_manager import ContainerManager
+from ..exceptions import ContainerException
 from ..docker_host_manager import (
     LOCAL_CONTEXT_NAME,
     LOCAL_SOCKET_PATH,
+    ImageInfo,
     _resolve_endpoint,
     discover_contexts,
     ping_endpoint,
@@ -39,7 +43,7 @@ _sse_connection_count = 0
 _sse_connection_lock = threading.Lock()
 
 
-def _get_connection_status(container_manager):
+def _get_connection_status(container_manager: ContainerManager) -> tuple[bool, set[str]]:
     try:
         connected = container_manager.is_connected()
     except ContainerException:
@@ -158,7 +162,6 @@ def route_user_flags():
 @containers_bp.route("/api/stats/summary", methods=["GET"])
 @admins_only
 def route_stats_summary():
-    # only count entry containers / standalone (not companions)
     entry_filter = db.or_(ContainerInfoModel.is_entry == True, ContainerInfoModel.stack_id.is_(None))  # noqa: E712
     active = ContainerInfoModel.query.filter(entry_filter).count()
 
@@ -168,7 +171,6 @@ def route_stats_summary():
         ContainerHistoryModel.stopped_at.isnot(None),
     ).all()
 
-    # deduplicate stacks: group by stack_id, count each stack once
     seen_stacks = set()
     entry_rows = []
     for r in total_history:
@@ -194,7 +196,7 @@ def route_stats_summary():
 
     flag_shares = len([e for e in event_logger.get_recent_events(limit=2000) if e.get("type") == "flag_sharing"])
 
-    # peak concurrent via sweep line on entry rows only
+    # sweep line algorithm for peak concurrent containers
     events_list = []
     for r in entry_rows:
         if r.created_at:
@@ -300,7 +302,6 @@ def route_kill_container():
     if not container_id:
         return jsonify(error="no container_id specified"), 400
 
-    # get container info before killing for the event log
     container = ContainerInfoModel.query.filter_by(container_id=container_id).first()
     user_name = container.user.name if container and container.user else None
     user_id = container.user_id if container else None
@@ -650,8 +651,8 @@ def route_api_discover_contexts():
 
         if available:
 
-            def _ping(ctx):
-                ctx["reachable"] = ping_endpoint(ctx["endpoint"])
+            def _ping(ctx: dict[str, str | bool]) -> dict[str, str | bool]:
+                ctx["reachable"] = ping_endpoint(str(ctx["endpoint"]))
                 return ctx
 
             with ThreadPoolExecutor(max_workers=min(len(available), 8)) as pool:
@@ -678,14 +679,13 @@ def route_api_images_matrix():
     if not connected:
         return jsonify(images=challenge_images, contexts=[], matrix={})
 
-    # list images and fetch metadata on each context in parallel
-    def _list(ctx_name):
+    def _list(ctx_name: str) -> tuple[str, set[str]]:
         return ctx_name, set(container_manager.host_manager.get_images(ctx_name))
 
-    def _info(ctx_name, image):
+    def _info(ctx_name: str, image: str) -> tuple[str, str, ImageInfo | None]:
         return ctx_name, image, container_manager.host_manager.get_image_info(ctx_name, image)
 
-    context_images: dict[str, set] = {}
+    context_images: dict[str, set[str]] = {}
     with ThreadPoolExecutor(max_workers=min(len(connected), 8)) as pool:
         futures = {pool.submit(_list, ctx): ctx for ctx in connected}
         for future in as_completed(futures, timeout=15):
@@ -695,9 +695,8 @@ def route_api_images_matrix():
             except Exception:
                 context_images[futures[future]] = set()
 
-    # build matrix keyed by display name (strip :latest)
-    matrix: dict[str, dict] = {}
-    pending: list[tuple[str, str, object]] = []
+    matrix: dict[str, dict[str, dict[str, bool | ImageInfo | None]]] = {}
+    pending: list[tuple[str, str, Future[tuple[str, str, ImageInfo | None]]]] = []
     max_workers = min(max(len(connected), 1) * max(len(challenge_images), 1), 16)
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -729,9 +728,9 @@ def route_api_images_matrix():
     return jsonify(images=display_images, contexts=connected, matrix=matrix)
 
 
-def _load_image_cache():
+def _load_image_cache() -> dict[str, object] | None:
     raw = get_setting("image_cache")
-    if not raw:
+    if not raw or not isinstance(raw, str):
         return None
     try:
         return json.loads(raw)
@@ -851,7 +850,7 @@ def route_get_container_logs(container_id):
     return jsonify(logs=logs)
 
 
-def _range_cutoff():
+def _range_cutoff() -> float:
     range_param = request.args.get("range", "7d")
     now = time.time()
     ranges = {"24h": 86400, "7d": 604800, "30d": 2592000}
@@ -861,8 +860,7 @@ def _range_cutoff():
     return 0
 
 
-def _excluded_user_ids():
-    """admins and hidden users should not appear in analytics"""
+def _excluded_user_ids() -> set[int]:
     from CTFd.models import Users
 
     rows = Users.query.filter(db.or_(Users.type == "admin", Users.hidden == True)).all()  # noqa: E712
@@ -880,7 +878,6 @@ def route_analytics_activity():
         query = query.filter(ContainerHistoryModel.created_at >= cutoff)
     rows = query.order_by(ContainerHistoryModel.created_at.desc()).limit(_MAX_ANALYTICS_ROWS).all()
 
-    # hourly buckets for 24h, daily for everything else
     if range_param == "24h":
         bucket_size = 3600
     else:
@@ -1004,12 +1001,7 @@ def route_analytics_challenges():
 @containers_bp.route("/api/analytics/solve_times", methods=["GET"])
 @admins_only
 def route_analytics_solve_times():
-    from CTFd.models import Challenges
-
-    try:
-        from CTFd.models import Solves
-    except ImportError:
-        return jsonify([])
+    from CTFd.models import Challenges, Solves
 
     cutoff = _range_cutoff()
     excluded = _excluded_user_ids()
@@ -1031,7 +1023,6 @@ def route_analytics_solve_times():
         team_id = getattr(solve, "team_id", None)
         challenge_id = solve.challenge_id
 
-        # find the most recent history row for this user/team + challenge created before the solve
         history_query = ContainerHistoryModel.query.filter(
             ContainerHistoryModel.challenge_id == challenge_id,
             ContainerHistoryModel.created_at <= solve_ts,
@@ -1093,7 +1084,6 @@ def route_analytics_flag_sharing():
     if not sharing:
         return jsonify(labels=[], counts=[], by_challenge={})
 
-    # bin by hour
     bins: dict[int, int] = {}
     by_challenge: dict[str, int] = {}
     for e in sharing:
@@ -1141,14 +1131,14 @@ def route_analytics_heatmap():
             day_idx = dt.weekday()
         matrix[dt.hour][day_idx] += 1
 
-    # echarts heatmap format: [[day, hour, value], ...]
+    # echarts expects [[day, hour, value], ...]
     data = []
     for hour in range(24):
         for day in range(7):
             if matrix[hour][day] > 0:
                 data.append([day, hour, matrix[hour][day]])
 
-    result: dict = {"data": data}
+    result: dict[str, list[list[int]] | int | list[str]] = {"data": data}
     if week_mode:
         epoch = datetime(1970, 1, 1)
         result["start_ts"] = int((datetime.combine(start_date, datetime.min.time()) - epoch).total_seconds())

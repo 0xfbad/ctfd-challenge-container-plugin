@@ -2,6 +2,10 @@ import sys
 from unittest.mock import patch, MagicMock
 from utils import get_setting, set_setting, _coerce, DEFAULTS
 
+_utils_mod = sys.modules["_cc_plugin.utils"]
+_flask_mod = sys.modules["flask"]
+_ctfd_models_mod = sys.modules["CTFd.models"]
+
 
 class FakeSettingsRow:
     def __init__(self, key, value):
@@ -9,15 +13,10 @@ class FakeSettingsRow:
         self.value = value
 
 
-_models_mod = sys.modules["_cc_plugin.models"]
-_flask_mod = sys.modules["flask"]
-_ctfd_models_mod = sys.modules["CTFd.models"]
-
-
 def _with_mock_model():
-    """replace ContainerSettingsModel with a fresh MagicMock"""
+    """replace ContainerSettingsModel where it's used (utils module)"""
     mock = MagicMock()
-    return patch.dict(_models_mod.__dict__, {"ContainerSettingsModel": mock}), mock
+    return patch.object(_utils_mod, "ContainerSettingsModel", mock), mock
 
 
 def test_get_setting_from_db():
@@ -46,7 +45,7 @@ def test_get_setting_missing_row_returns_default():
             assert result == DEFAULTS["max_containers_per_user"]
 
 
-def test_get_setting_db_exception_returns_default():
+def test_get_setting_db_exception_propagates():
     ctx, mock_model = _with_mock_model()
     with ctx:
         mock_model.query.filter_by.side_effect = Exception("db down")
@@ -55,8 +54,10 @@ def test_get_setting_db_exception_returns_default():
         mock_app.__bool__ = lambda self: True
 
         with patch.object(_flask_mod, "current_app", mock_app):
-            result = get_setting("thread_pool_size")
-            assert result == DEFAULTS["thread_pool_size"]
+            import pytest
+
+            with pytest.raises(Exception, match="db down"):
+                get_setting("thread_pool_size")
 
 
 def test_set_setting_updates_existing():
@@ -104,5 +105,6 @@ def test_coerce_bool_no():
 
 
 def test_get_setting_explicit_default_overrides_defaults_dict():
-    result = get_setting("max_containers_per_user", 99)
-    assert result == 99
+    with patch.object(_flask_mod, "current_app", None):
+        result = get_setting("max_containers_per_user", 99)
+        assert result == 99

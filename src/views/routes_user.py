@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from flask import request
+from CTFd.models import Users
 from CTFd.utils.decorators import (
     authed_only,
     during_ctf_time_only,
@@ -17,7 +20,7 @@ from .helpers import (
     sanitize_container_error,
 )
 from ..utils import is_team_mode, DEFAULTS
-from ..container_manager import ContainerException
+from ..exceptions import ContainerException
 from ..models import ContainerInfoModel
 
 # rate limit values are evaluated at import time (before app context),
@@ -28,7 +31,9 @@ _RL_MUTATE = 10
 _RL_MUTATE_INTERVAL = 60
 
 
-def validate_request(required_fields):
+def validate_request(
+    required_fields: list[str],
+) -> tuple[dict[str, str] | None, int | None, Users | None]:
     user = get_current_user()
 
     if request.json is None:
@@ -51,6 +56,13 @@ def validate_request(required_fields):
         return {"error": "user not a member of a team"}, 400, None
 
     return None, None, user
+
+
+def _resolve_identity(user):
+    """Return (xid, is_team) for the current user based on user/team mode"""
+    if is_team_mode():
+        return user.team.id, True
+    return user.id, False
 
 
 @containers_bp.route("/api/get_connect_type/<int:challenge_id>", methods=["GET"])
@@ -84,11 +96,9 @@ def route_view_info():
         return error_response, status_code
 
     chal_id = int(request.json["chal_id"])
+    xid, is_team = _resolve_identity(user)
     try:
-        if is_team_mode():
-            return view_container_info(chal_id, user.team.id, True)
-        else:
-            return view_container_info(chal_id, user.id, False)
+        return view_container_info(chal_id, xid, is_team)
     except ContainerException as err:
         return {"error": sanitize_container_error(err)}, 500
 
@@ -108,11 +118,9 @@ def route_request_container():
         return error_response, status_code
 
     chal_id = int(request.json["chal_id"])
+    xid, is_team = _resolve_identity(user)
     try:
-        if is_team_mode():
-            return create_container(chal_id, user.team.id, user.id, True)
-        else:
-            return create_container(chal_id, user.id, user.id, False)
+        return create_container(chal_id, xid, user.id, is_team)
     except ContainerException as err:
         return {"error": sanitize_container_error(err)}, 500
 
@@ -132,11 +140,9 @@ def route_renew_container_route():
         return error_response, status_code
 
     chal_id = int(request.json["chal_id"])
+    xid, is_team = _resolve_identity(user)
     try:
-        if is_team_mode():
-            return renew_container(chal_id, user.team.id, True)
-        else:
-            return renew_container(chal_id, user.id, False)
+        return renew_container(chal_id, xid, is_team)
     except ContainerException as err:
         return {"error": sanitize_container_error(err)}, 500
 
@@ -156,11 +162,11 @@ def route_stop_container():
         return error_response, status_code
 
     chal_id = int(request.json["chal_id"])
+    xid, is_team = _resolve_identity(user)
 
-    if is_team_mode():
-        running_container = ContainerInfoModel.query.filter_by(challenge_id=chal_id, team_id=user.team.id).first()
-    else:
-        running_container = ContainerInfoModel.query.filter_by(challenge_id=chal_id, user_id=user.id).first()
+    filter_args = {"challenge_id": chal_id}
+    filter_args["team_id" if is_team else "user_id"] = xid
+    running_container = ContainerInfoModel.query.filter_by(**filter_args).first()
 
     if running_container:
         return kill_container(running_container.container_id)

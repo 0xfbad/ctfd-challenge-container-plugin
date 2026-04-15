@@ -1,21 +1,53 @@
+from __future__ import annotations
+
 import os
 import json
 import threading
 import logging
+from typing import TypedDict, overload
 
 import docker
+from docker import DockerClient
+from docker.models.containers import Container
+from docker.models.networks import Network
 import paramiko
+
+from .models import DockerContextModel
 
 logger = logging.getLogger(__name__)
 
 LOCAL_CONTEXT_NAME = "local"
 LOCAL_SOCKET_PATH = "/var/run/docker.sock"
 
+# value types that appear in kwargs forwarded to docker containers.run
+_DockerRunVal = str | int | bool | list[str] | dict[str, str] | dict[str, dict[str, str]]
 
-def _scan_context_meta(context_name=None):
-    """Read docker context metadata from ~/.docker/contexts/meta/.
-    Docker stores context dirs by sha256 hash, not by name,
-    so we scan all entries and match on the Name field."""
+
+class ImageInfo(TypedDict):
+    id: str
+    size_mb: int
+    created: str
+
+
+class DiscoveredContext(TypedDict):
+    name: str
+    endpoint: str
+
+
+# docker context metadata from ~/.docker/contexts/meta/*/meta.json
+_ContextMeta = dict[str, object]
+
+
+@overload
+def _scan_context_meta(context_name: str) -> _ContextMeta | None: ...
+
+
+@overload
+def _scan_context_meta(context_name: None = None) -> list[_ContextMeta]: ...
+
+
+def _scan_context_meta(context_name: str | None = None) -> _ContextMeta | list[_ContextMeta] | None:
+    # docker hashes context dirs by sha256, so we scan all entries and match by Name
     contexts_dir = os.path.expanduser("~/.docker/contexts/meta")
     if not os.path.isdir(contexts_dir):
         return None if context_name else []
@@ -39,12 +71,16 @@ def _scan_context_meta(context_name=None):
     return None if context_name else results
 
 
-def _resolve_endpoint(context_name, hostname):
+def _resolve_endpoint(context_name: str, hostname: str | None) -> str | None:
     meta = _scan_context_meta(context_name)
     if meta:
-        endpoint = meta.get("Endpoints", {}).get("docker", {}).get("Host")
-        if endpoint:
-            return endpoint
+        endpoints = meta.get("Endpoints", {})
+        if isinstance(endpoints, dict):
+            docker_ep = endpoints.get("docker", {})
+            if isinstance(docker_ep, dict):
+                endpoint = docker_ep.get("Host")
+                if endpoint:
+                    return str(endpoint)
 
     if hostname:
         if "@" in hostname:
@@ -57,12 +93,13 @@ def _resolve_endpoint(context_name, hostname):
     return None
 
 
-def discover_contexts():
-    """Scan the host for available docker contexts."""
-    discovered = []
+def discover_contexts() -> list[DiscoveredContext]:
+    discovered: list[DiscoveredContext] = []
     for meta in _scan_context_meta():
-        name = meta.get("Name", "")
-        endpoint = meta.get("Endpoints", {}).get("docker", {}).get("Host", "")
+        name = str(meta.get("Name", ""))
+        endpoints = meta.get("Endpoints", {})
+        docker_ep = endpoints.get("docker", {}) if isinstance(endpoints, dict) else {}
+        endpoint = str(docker_ep.get("Host", "")) if isinstance(docker_ep, dict) else ""
         if name:
             discovered.append({"name": name, "endpoint": endpoint})
 
@@ -73,8 +110,7 @@ def discover_contexts():
     return discovered
 
 
-def ping_endpoint(endpoint, timeout=3):
-    """Quick connectivity check for a docker endpoint."""
+def ping_endpoint(endpoint: str, timeout: int = 3) -> bool:
     client = None
     try:
         client = docker.DockerClient(base_url=endpoint, timeout=timeout)
@@ -91,16 +127,16 @@ def ping_endpoint(endpoint, timeout=3):
 
 
 class DockerHostManager:
-    def __init__(self):
-        self._context_configs = {}
-        self._pub_hostnames = {}
-        self._clients = {}
-        self._config_generation = 0
-        self._client_generation = -1
-        self._lock = threading.Lock()
-        self._semaphores = {}
+    def __init__(self) -> None:
+        self._context_configs: dict[str, str] = {}
+        self._pub_hostnames: dict[str, str | None] = {}
+        self._clients: dict[str, DockerClient] = {}
+        self._config_generation: int = 0
+        self._client_generation: int = -1
+        self._lock: threading.Lock = threading.Lock()
+        self._semaphores: dict[str, threading.BoundedSemaphore] = {}
 
-    def _get_client(self, context_name):
+    def _get_client(self, context_name: str) -> DockerClient:
         with self._lock:
             if self._client_generation != self._config_generation:
                 for old in self._clients.values():
@@ -122,7 +158,7 @@ class DockerHostManager:
             self._clients[context_name] = client
             return client
 
-    def _clear_client(self, context_name):
+    def _clear_client(self, context_name: str) -> None:
         with self._lock:
             old = self._clients.pop(context_name, None)
         if old:
@@ -131,13 +167,13 @@ class DockerHostManager:
             except Exception:
                 pass
 
-    def _init_semaphores(self, limit):
+    def _init_semaphores(self, limit: int) -> None:
         new_semaphores = {}
         for ctx_name in self._context_configs:
             new_semaphores[ctx_name] = threading.BoundedSemaphore(limit)
         self._semaphores = new_semaphores
 
-    def acquire_semaphore(self, context_name, timeout=30):
+    def acquire_semaphore(self, context_name: str, timeout: int = 30) -> bool:
         sem = self._semaphores.get(context_name)
         if sem is None:
             return True
@@ -146,7 +182,7 @@ class DockerHostManager:
             raise Exception("server busy, please try again shortly")
         return True
 
-    def release_semaphore(self, context_name):
+    def release_semaphore(self, context_name: str) -> None:
         sem = self._semaphores.get(context_name)
         if sem is not None:
             try:
@@ -154,9 +190,7 @@ class DockerHostManager:
             except ValueError:
                 pass
 
-    def load_contexts(self, contexts, max_concurrent_creates=2):
-        """(Re)connect all enabled contexts. contexts is a list of
-        DockerContextModel rows."""
+    def load_contexts(self, contexts: list[DockerContextModel], max_concurrent_creates: int = 2) -> None:
         new_configs = {}
         new_pub_hostnames = {}
 
@@ -189,16 +223,16 @@ class DockerHostManager:
 
         self._init_semaphores(max_concurrent_creates)
 
-    def get_pub_hostname(self, context_name):
+    def get_pub_hostname(self, context_name: str) -> str | None:
         return self._pub_hostnames.get(context_name)
 
-    def get_connected_contexts(self):
+    def get_connected_contexts(self) -> list[str]:
         return list(self._context_configs.keys())
 
-    def has_contexts(self):
+    def has_contexts(self) -> bool:
         return bool(self._context_configs)
 
-    def ping(self, context_name):
+    def ping(self, context_name: str) -> bool:
         try:
             client = self._get_client(context_name)
             client.ping()
@@ -207,7 +241,7 @@ class DockerHostManager:
             self._clear_client(context_name)
             return False
 
-    def is_container_running(self, context_name, container_id):
+    def is_container_running(self, context_name: str, container_id: str) -> bool:
         try:
             client = self._get_client(context_name)
             container = client.containers.get(container_id)
@@ -218,7 +252,7 @@ class DockerHostManager:
             self._clear_client(context_name)
             raise
 
-    def get_container_port(self, context_name, container_id):
+    def get_container_port(self, context_name: str, container_id: str) -> str | None:
         try:
             client = self._get_client(context_name)
             container = client.containers.get(container_id)
@@ -233,7 +267,7 @@ class DockerHostManager:
             raise
         return None
 
-    def get_running_container_ids(self, context_name):
+    def get_running_container_ids(self, context_name: str) -> set[str]:
         try:
             client = self._get_client(context_name)
             containers = client.containers.list(filters={"status": "running"})
@@ -242,8 +276,16 @@ class DockerHostManager:
             self._clear_client(context_name)
             return set()
 
-    def run_container(self, context_name, image, port, command, environment, **kwargs):
-        """Create and start a container on the specified context."""
+    def run_container(
+        self,
+        context_name: str,
+        image: str,
+        port: int,
+        command: str,
+        environment: dict[str, str | int],
+        # docker run kwargs (name, hostname, mem_limit, cpu_quota, volumes, cap_add, etc.)
+        **kwargs: _DockerRunVal,
+    ) -> Container:
         import random
 
         client = self._get_client(context_name)
@@ -265,7 +307,6 @@ class DockerHostManager:
                 )
                 return container
             except docker.errors.APIError as e:
-                # port conflict, retry with a different port
                 if "port is already allocated" in str(e) or "address already in use" in str(e):
                     last_err = e
                     continue
@@ -277,7 +318,7 @@ class DockerHostManager:
 
         raise docker.errors.DockerException(f"failed to find available port after retries: {last_err}")
 
-    def kill_container(self, context_name, container_id):
+    def kill_container(self, context_name: str, container_id: str) -> bool:
         try:
             client = self._get_client(context_name)
             container = client.containers.get(container_id)
@@ -289,7 +330,9 @@ class DockerHostManager:
             self._clear_client(context_name)
             raise
 
-    def create_network(self, context_name, network_name, subnet=None, labels=None):
+    def create_network(
+        self, context_name: str, network_name: str, subnet: str | None = None, labels: dict[str, str] | None = None
+    ) -> Network:
         client = self._get_client(context_name)
         ipam_config = None
         if subnet:
@@ -304,18 +347,19 @@ class DockerHostManager:
 
     def run_container_on_network(
         self,
-        context_name,
-        image,
-        network_name,
-        container_name,
-        command,
-        environment,
-        ip_address=None,
-        publish_port=None,
-        hostname=None,
-        internal_port=None,
-        **kwargs,
-    ):
+        context_name: str,
+        image: str,
+        network_name: str,
+        container_name: str,
+        command: str | None,
+        environment: dict[str, str],
+        ip_address: str | None = None,
+        publish_port: bool | None = None,
+        hostname: str | None = None,
+        internal_port: int | None = None,
+        # forwarded to docker containers.run (labels, cap_add, mem_limit, etc.)
+        **kwargs: _DockerRunVal,
+    ) -> tuple[Container, int | None]:
         import random
 
         client = self._get_client(context_name)
@@ -376,7 +420,7 @@ class DockerHostManager:
                 network.connect(container, ipv4_address=ip_address)
             return container, None
 
-    def kill_stack(self, context_name, stack_id):
+    def kill_stack(self, context_name: str, stack_id: str) -> int:
         client = self._get_client(context_name)
         killed = 0
         containers = client.containers.list(filters={"label": f"ctf.stack_id={stack_id}"}, all=True)
@@ -394,7 +438,7 @@ class DockerHostManager:
                 pass
         return killed
 
-    def get_container_logs(self, context_name, container_id, tail=200):
+    def get_container_logs(self, context_name: str, container_id: str, tail: int = 200) -> str:
         try:
             client = self._get_client(context_name)
             container = client.containers.get(container_id)
@@ -408,7 +452,7 @@ class DockerHostManager:
             self._clear_client(context_name)
             raise
 
-    def get_images(self, context_name):
+    def get_images(self, context_name: str) -> list[str]:
         try:
             client = self._get_client(context_name)
             images = client.images.list()
@@ -422,7 +466,7 @@ class DockerHostManager:
             self._clear_client(context_name)
             return []
 
-    def pull_image(self, context_name, image):
+    def pull_image(self, context_name: str, image: str) -> str:
         client = self._get_client(context_name)
         try:
             client.images.pull(image)
@@ -431,16 +475,7 @@ class DockerHostManager:
             self._clear_client(context_name)
             raise
 
-    def check_image(self, context_name, image):
-        try:
-            client = self._get_client(context_name)
-            client.images.get(image)
-            return True
-        except Exception:
-            return False
-
-    def get_image_info(self, context_name, image):
-        """Return image metadata (id, size, build time) or None."""
+    def get_image_info(self, context_name: str, image: str | None) -> ImageInfo | None:
         try:
             client = self._get_client(context_name)
             img = client.images.get(image)
@@ -454,5 +489,8 @@ class DockerHostManager:
                     created = last_tag[:19].replace("T", " ")
             short_id = img.short_id.replace("sha256:", "")
             return {"id": short_id, "size_mb": size_mb, "created": created}
-        except Exception:
+        except docker.errors.ImageNotFound:
+            return None
+        except docker.errors.DockerException:
+            self._clear_client(context_name)
             return None

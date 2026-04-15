@@ -337,10 +337,8 @@ window.ContainerFormUtils = (function () {
 	return {
 		fetchWithTimeout,
 		loadContexts,
-		initImageSearch,
 		initSSHToggle,
 		initAdvancedSection,
-		renderImageStatus,
 		checkImageStatus,
 	};
 

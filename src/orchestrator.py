@@ -1,41 +1,43 @@
+from __future__ import annotations
+
 import logging
 from threading import Lock
 from collections import defaultdict
+from typing import TypedDict
+
+from .docker_host_manager import DockerHostManager
+from .models import ContainerChallengeModel, DockerContextModel
+from .utils import get_setting
+from .event_logger import MetadataDict, event_logger
 
 logger = logging.getLogger(__name__)
 
 
+class HostStatus(TypedDict):
+    context_name: str
+    pub_hostname: str | None
+    active_containers: int
+    healthy: bool
+    weight: int
+
+
 class Orchestrator:
-    def __init__(self, host_manager):
+    def __init__(self, host_manager: DockerHostManager) -> None:
         self.host_manager = host_manager
-        self.container_counts = defaultdict(int)
-        self.health = {}
-        self.weights = {}
+        self.container_counts: defaultdict[str, int] = defaultdict(int)
+        self.health: dict[str, bool] = {}
+        self.weights: dict[str, int] = {}
         self.lock = Lock()
 
     @staticmethod
-    def _challenge_image():
-        """Get the first configured challenge image for health check info."""
-        try:
-            from .models import ContainerChallengeModel
+    def _challenge_image() -> str | None:
+        chal = ContainerChallengeModel.query.filter(ContainerChallengeModel.image.isnot(None)).first()
+        return chal.image if chal else None
 
-            chal = ContainerChallengeModel.query.filter(ContainerChallengeModel.image.isnot(None)).first()
-            return chal.image if chal else None
-        except Exception:
-            return None
+    def load_from_db(self) -> None:
+        contexts = DockerContextModel.query.filter_by(enabled=True).all()
 
-    def load_from_db(self):
-        from .models import DockerContextModel
-        from .utils import get_setting
-        from .event_logger import event_logger
-
-        try:
-            contexts = DockerContextModel.query.filter_by(enabled=True).all()
-        except Exception as e:
-            logger.error(f"could not query docker contexts: {e}")
-            contexts = []
-
-        max_concurrent = get_setting("max_concurrent_creates", 2)
+        max_concurrent = int(get_setting("max_concurrent_creates", 2) or 2)
         self.host_manager.load_contexts(contexts, max_concurrent)
         connected = set(self.host_manager.get_connected_contexts())
 
@@ -50,10 +52,14 @@ class Orchestrator:
             new_weights[name] = ctx.weight
 
             if is_connected:
-                meta: dict = {"context_name": name}
+                meta: MetadataDict = {"context_name": name}
                 image_info = self.host_manager.get_image_info(name, self._challenge_image())
                 if image_info:
-                    meta["image"] = image_info
+                    meta["image"] = {
+                        "id": image_info["id"],
+                        "size_mb": image_info["size_mb"],
+                        "created": image_info["created"],
+                    }
                 events.append(("host_healthy", f"context {name} is healthy", "info", meta))
             else:
                 events.append(
@@ -83,8 +89,8 @@ class Orchestrator:
         healthy_count = sum(1 for h in new_health.values() if h)
         logger.info(f"loaded {len(contexts)} contexts, {healthy_count} healthy")
 
-    def _pick_best_context(self):
-        """Must be called with self.lock held."""
+    def _pick_best_context(self) -> str | None:
+        # caller must hold self.lock
         candidates = []
         for name, healthy in self.health.items():
             if not healthy:
@@ -100,8 +106,7 @@ class Orchestrator:
         candidates.sort(key=lambda x: (-x[0], x[1]))
         return candidates[0][1]
 
-    def select_and_reserve(self):
-        """Pick the best context and increment its count atomically."""
+    def select_and_reserve(self) -> str | None:
         with self.lock:
             name = self._pick_best_context()
             if name is None:
@@ -109,18 +114,16 @@ class Orchestrator:
             self.container_counts[name] += 1
             return name
 
-    def reserve_slot(self, context_name):
+    def reserve_slot(self, context_name: str) -> None:
         with self.lock:
             self.container_counts[context_name] += 1
 
-    def release_slot(self, context_name):
+    def release_slot(self, context_name: str) -> None:
         with self.lock:
             if self.container_counts[context_name] > 0:
                 self.container_counts[context_name] -= 1
 
-    def mark_unhealthy(self, context_name, reason="unreachable"):
-        from .event_logger import event_logger
-
+    def mark_unhealthy(self, context_name: str, reason: str = "unreachable") -> None:
         with self.lock:
             self.health[context_name] = False
         logger.warning(f"context {context_name} marked unhealthy: {reason}")
@@ -131,9 +134,7 @@ class Orchestrator:
             metadata={"context_name": context_name, "reason": reason},
         )
 
-    def mark_healthy(self, context_name):
-        from .event_logger import event_logger
-
+    def mark_healthy(self, context_name: str) -> None:
         with self.lock:
             self.health[context_name] = True
         logger.info(f"context {context_name} marked healthy")
@@ -144,8 +145,7 @@ class Orchestrator:
             metadata={"context_name": context_name},
         )
 
-    def health_check(self):
-        """Ping each context and update health status."""
+    def health_check(self) -> None:
         with self.lock:
             names = list(self.health.keys())
 
@@ -159,9 +159,9 @@ class Orchestrator:
             elif not reachable and was_healthy:
                 self.mark_unhealthy(name)
 
-    def get_status(self):
+    def get_status(self) -> list[HostStatus]:
         with self.lock:
-            status = []
+            status: list[HostStatus] = []
             for name in self.health:
                 status.append(
                     {

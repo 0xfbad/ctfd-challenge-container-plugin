@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import hmac as _hmac
 
+from CTFd.models import Flags
 from CTFd.plugins.flags import BaseFlag, FLAG_CLASSES
 from CTFd.utils.user import get_current_user
 
@@ -15,10 +18,11 @@ class FreshnessFlag(BaseFlag):
     }
 
     @staticmethod
-    def compare(chal_key_obj, provided):
-        secret = get_setting("freshness_secret")
-        if not secret:
+    def compare(chal_key_obj: Flags, provided: str) -> bool:
+        secret_raw = get_setting("freshness_secret")
+        if not secret_raw:
             return False
+        secret = str(secret_raw)
 
         user = get_current_user()
         if not user:
@@ -43,5 +47,5 @@ class FreshnessFlag(BaseFlag):
         return _hmac.compare_digest(expected, provided)
 
 
-def register():
+def register() -> None:
     FLAG_CLASSES["freshness"] = FreshnessFlag

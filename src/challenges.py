@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import os
 import secrets
 import time
 import threading
 
+from flask import Request
 from CTFd.plugins.challenges import BaseChallenge
 from CTFd.models import db, Users, Teams
 from CTFd.utils.user import get_current_user
@@ -13,11 +16,14 @@ from .freshness import compute_token, render_flag, extract_token
 from .event_logger import event_logger
 
 _token_map_lock = threading.Lock()
-_token_map_cache: dict[tuple, tuple] = {}
+# cache keyed by (secret, challenge_id, team_mode) -> (entity_count, {token -> (entity_id, entity_name)})
+_token_map_cache: dict[tuple[str, int, bool], tuple[int, dict[str, tuple[int, str]]]] = {}
 
 
-def _find_token_owner(secret, challenge_id, submitted_token, exclude_xid, team_mode):
-    """cached O(1) lookup of which entity owns a freshness token"""
+def _find_token_owner(
+    secret: str, challenge_id: int, submitted_token: str, exclude_xid: int, team_mode: bool
+) -> tuple[int, str] | None:
+    """cached lookup of which entity owns a freshness token"""
     entity_class = Teams if team_mode else Users
     cache_key = (secret, challenge_id, team_mode)
     current_count = entity_class.query.count()
@@ -30,7 +36,7 @@ def _find_token_owner(secret, challenge_id, submitted_token, exclude_xid, team_m
                 return match
             return None
 
-    token_map = {}
+    token_map: dict[str, tuple[int, str]] = {}
     for entity in entity_class.query.all():
         token = compute_token(secret, challenge_id, entity.id)
         token_map[token] = (entity.id, getattr(entity, "name", f"id={entity.id}"))
@@ -48,10 +54,11 @@ _plugin_dir = os.path.basename(os.path.dirname(os.path.dirname(os.path.abspath(_
 _assets = f"/plugins/{_plugin_dir}/src/assets"
 
 
-def _shorten_after_solve(challenge_id, xid, team_mode):
-    expiry_seconds = get_setting("post_solve_expiry_seconds")
-    if not expiry_seconds:
+def _shorten_after_solve(challenge_id: int, xid: int, team_mode: bool) -> int | None:
+    expiry_raw = get_setting("post_solve_expiry_seconds")
+    if not expiry_raw:
         return None
+    expiry_seconds = int(expiry_raw)
 
     filter_args = {"challenge_id": challenge_id}
     filter_args["team_id" if team_mode else "user_id"] = xid
@@ -92,20 +99,19 @@ class ContainerChallenge(BaseChallenge):
     challenge_model = ContainerChallengeModel
 
     @staticmethod
-    def sanitize_value(value):
+    def sanitize_value(value: str | None) -> str | None:
         return value if value and value != "" else None
 
     @classmethod
-    def _handle_ssh_password(cls, data, existing_password=None):
+    def _handle_ssh_password(cls, data: dict[str, str | None], existing_password: str | None = None) -> None:
         mode = data.pop("ssh_password_mode", None)
         if mode == "auto":
-            # keep existing password if one exists, otherwise generate
             data["ssh_password"] = existing_password or secrets.token_urlsafe(8)
         elif mode == "none":
             data["ssh_password"] = None
 
     @classmethod
-    def create(cls, request):
+    def create(cls, request: Request) -> ContainerChallengeModel:
         data = request.form or request.get_json()
 
         cls._handle_ssh_password(data)
@@ -121,7 +127,7 @@ class ContainerChallenge(BaseChallenge):
         return challenge
 
     @classmethod
-    def update(cls, challenge, request):
+    def update(cls, challenge: ContainerChallengeModel, request: Request) -> ContainerChallengeModel:
         data = request.form or request.get_json()
 
         cls._handle_ssh_password(data, existing_password=challenge.ssh_password)
@@ -135,13 +141,14 @@ class ContainerChallenge(BaseChallenge):
         return challenge
 
     @classmethod
-    def attempt(cls, challenge, request):
+    def attempt(cls, challenge: ContainerChallengeModel, request: Request) -> tuple[bool, str]:
         data = request.form or request.get_json()
         submission = data["submission"].strip()
 
-        secret = get_setting("freshness_secret")
-        if not secret:
+        secret_raw = get_setting("freshness_secret")
+        if not secret_raw:
             return super().attempt(challenge, request)
+        secret = str(secret_raw)
 
         from CTFd.models import Flags
 
@@ -154,7 +161,7 @@ class ContainerChallenge(BaseChallenge):
         if not user:
             return False, "user not found"
 
-        team_mode = is_team_mode()
+        team_mode = bool(is_team_mode())
         if team_mode:
             if not user.team:
                 return False, "you must be on a team to submit flags"
@@ -220,7 +227,7 @@ class ContainerChallenge(BaseChallenge):
         return False, "incorrect"
 
     @classmethod
-    def read(cls, challenge):
+    def read(cls, challenge: ContainerChallengeModel) -> dict[str, str | int | dict[str, str] | None]:
         data = {
             "id": challenge.id,
             "name": challenge.name,

@@ -1,7 +1,11 @@
+from __future__ import annotations
+
 from CTFd.utils import get_config
 
+from .models import ContainerSettingsModel
 
-DEFAULTS = {
+
+DEFAULTS: dict[str, int | str] = {
     "max_containers_per_user": 4,
     "rate_limit_requests": 45,
     "rate_limit_interval": 60,
@@ -18,29 +22,27 @@ USERS_MODE = "users"
 TEAMS_MODE = "teams"
 
 
-def get_setting(key, default=None):
-    from .models import ContainerSettingsModel
-
+def get_setting(key: str, default: int | float | str | bool | None = None) -> int | float | str | bool | None:
     if default is None:
         default = DEFAULTS.get(key)
 
+    # flask raises RuntimeError when current_app is accessed outside an app context
     try:
         from flask import current_app
 
         if not current_app:
             return default
-
-        row = ContainerSettingsModel.query.filter_by(key=key).first()
-        if row is None:
-            return default
-
-        return _coerce(row.value, default)
-    except Exception:
+    except RuntimeError:
         return default
 
+    row = ContainerSettingsModel.query.filter_by(key=key).first()
+    if row is None:
+        return default
 
-def set_setting(key, value):
-    from .models import ContainerSettingsModel
+    return _coerce(row.value, default)
+
+
+def set_setting(key: str, value: int | float | str | bool) -> None:
     from CTFd.models import db
 
     row = ContainerSettingsModel.query.filter_by(key=key).first()
@@ -52,7 +54,7 @@ def set_setting(key, value):
     db.session.commit()
 
 
-def _coerce(raw, default):
+def _coerce(raw: str, default: int | float | str | bool | None) -> int | float | str | bool:
     if default is None:
         return raw
 
@@ -66,10 +68,10 @@ def _coerce(raw, default):
     return raw
 
 
-def settings_to_dict(settings_query):
+def settings_to_dict(settings_query: list[ContainerSettingsModel]) -> dict[str, str]:
     return {setting.key: setting.value for setting in settings_query}
 
 
-def is_team_mode():
+def is_team_mode() -> bool | None:
     mode = get_config("user_mode")
     return mode == TEAMS_MODE if mode in (TEAMS_MODE, USERS_MODE) else None

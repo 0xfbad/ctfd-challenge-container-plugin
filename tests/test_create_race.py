@@ -40,7 +40,7 @@ def test_db_commit_failure_triggers_rollback_and_kill():
     mock_challenge.max_memory_mb = None
     mock_challenge.max_cpu = None
     mock_challenge.docker_context = None
-    mock_challenge.expiration_minutes = 10
+    mock_challenge.expiration_seconds = 600
     mock_challenge.ctype = "tcp"
     mock_challenge.ssh_username = None
     mock_challenge.ssh_password = None
