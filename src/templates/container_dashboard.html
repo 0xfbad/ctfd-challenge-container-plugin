@@ -459,7 +459,9 @@
 
 {% block scripts %}
 <!-- ctfd core pins echarts 5, we load 6 separately for scatter jitter support on category axes -->
-<script src="https://cdn.jsdelivr.net/npm/echarts@6/dist/echarts.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@6.0.0/dist/echarts.min.js"
+	integrity="sha384-F07Cpw5v8spSU0H113F33m2NQQ/o6GqPTnTjf45ssG4Q6q58ZwhxBiQtIaqvnSpR"
+	crossorigin="anonymous"></script>
 <script>
 	let autoRefreshInterval = null;
 	let eventSource = null;
