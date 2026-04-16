@@ -41,7 +41,11 @@ def test_post_solve_shortens_expiry():
     with (
         patch(
             f"{_MOD}.get_setting",
-            side_effect=lambda k, d=None: {"freshness_secret": secret, "post_solve_expiry_seconds": 90, "freshness_token_length": 6}.get(k, d),
+            side_effect=lambda k, d=None: {
+                "freshness_secret": secret,
+                "post_solve_expiry_seconds": 90,
+                "freshness_token_length": 6,
+            }.get(k, d),
         ),
         patch(f"{_MOD}.get_current_user", return_value=user),
         patch(f"{_MOD}.is_team_mode", return_value=False),
@@ -90,7 +94,11 @@ def test_post_solve_disabled_when_zero():
     with (
         patch(
             f"{_MOD}.get_setting",
-            side_effect=lambda k, d=None: {"freshness_secret": secret, "post_solve_expiry_seconds": 0, "freshness_token_length": 6}.get(k, d),
+            side_effect=lambda k, d=None: {
+                "freshness_secret": secret,
+                "post_solve_expiry_seconds": 0,
+                "freshness_token_length": 6,
+            }.get(k, d),
         ),
         patch(f"{_MOD}.get_current_user", return_value=user),
         patch(f"{_MOD}.is_team_mode", return_value=False),
@@ -130,7 +138,11 @@ def test_post_solve_no_container_running():
     with (
         patch(
             f"{_MOD}.get_setting",
-            side_effect=lambda k, d=None: {"freshness_secret": secret, "post_solve_expiry_seconds": 90, "freshness_token_length": 6}.get(k, d),
+            side_effect=lambda k, d=None: {
+                "freshness_secret": secret,
+                "post_solve_expiry_seconds": 90,
+                "freshness_token_length": 6,
+            }.get(k, d),
         ),
         patch(f"{_MOD}.get_current_user", return_value=user),
         patch(f"{_MOD}.is_team_mode", return_value=False),
@@ -175,7 +187,11 @@ def test_post_solve_shortens_zero_expiration_container():
     with (
         patch(
             f"{_MOD}.get_setting",
-            side_effect=lambda k, d=None: {"freshness_secret": secret, "post_solve_expiry_seconds": 90, "freshness_token_length": 6}.get(k, d),
+            side_effect=lambda k, d=None: {
+                "freshness_secret": secret,
+                "post_solve_expiry_seconds": 90,
+                "freshness_token_length": 6,
+            }.get(k, d),
         ),
         patch(f"{_MOD}.get_current_user", return_value=user),
         patch(f"{_MOD}.is_team_mode", return_value=False),

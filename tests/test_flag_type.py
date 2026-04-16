@@ -216,9 +216,11 @@ def test_anticheat_correct_flag_passes():
     mock_flags.query.filter_by.return_value.all.return_value = [mock_flag]
 
     def _settings(key, default=None):
-        return {"freshness_secret": secret, "post_solve_expiry_seconds": 0, "freshness_token_length": _DEFAULT_TOKEN_LEN}.get(
-            key, default
-        )
+        return {
+            "freshness_secret": secret,
+            "post_solve_expiry_seconds": 0,
+            "freshness_token_length": _DEFAULT_TOKEN_LEN,
+        }.get(key, default)
 
     with (
         patch("challenges.get_setting", side_effect=_settings),

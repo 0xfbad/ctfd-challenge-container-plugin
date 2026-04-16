@@ -7,9 +7,7 @@ from CTFd.plugins.flags import BaseFlag, FLAG_CLASSES
 from CTFd.utils.user import get_current_user
 
 from .freshness import compute_token, render_flag
-from .utils import get_setting, is_team_mode
-
-_TOKEN_LENGTH_KEY = "freshness_token_length"
+from .utils import get_setting, _TOKEN_LENGTH_KEY, is_team_mode
 
 
 class FreshnessFlag(BaseFlag):

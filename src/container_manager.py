@@ -13,7 +13,7 @@ from docker.models.containers import Container
 
 from CTFd.models import db
 from .models import ContainerInfoModel, ContainerHistoryModel
-from .docker_host_manager import DockerHostManager
+from .docker_host_manager import DockerHostManager, _DockerRunVal
 from .orchestrator import Orchestrator
 from .exceptions import ContainerException
 from .utils import get_setting
@@ -49,9 +49,6 @@ _VOLUME_BLOCKED_PATHS = frozenset(
         "/run",
     }
 )
-
-# value types that appear in kwargs dicts forwarded to docker run
-_DockerRunVal = str | int | bool | list[str] | dict[str, str] | dict[str, dict[str, str]]
 
 
 def _build_caps(ctype: str | None, cap_add: str | None) -> list[str]:
@@ -140,7 +137,14 @@ class ContainerManager:
     def release_slot(self, context_name: str) -> None:
         self.orchestrator.release_slot(context_name)
 
-    def _dispatch_to_context(self, method_name, context_name, args, kwargs, default=None):
+    def _dispatch_to_context(
+        self,
+        method_name: str,
+        context_name: str | None,
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+        default: object = None,
+    ):
         """Route a host_manager call to a specific context or fan out across all contexts"""
         self._ensure_connected()
 
@@ -527,7 +531,7 @@ class ContainerManager:
         max_concurrent = int(get_setting("max_concurrent_creates", 2) or 2)
         self.host_manager._init_semaphores(max_concurrent)
 
-    def kill_expired_containers(self, app: Flask):
+    def kill_expired_containers(self, app: Flask) -> None:
         if not self.host_manager.has_contexts():
             try:
                 self.initialize_connection()

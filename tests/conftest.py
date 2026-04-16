@@ -71,7 +71,7 @@ _decorators.authed_only = lambda f: f
 _decorators.admins_only = lambda f: f
 _decorators.during_ctf_time_only = lambda f: f
 _decorators.require_verified_emails = lambda f: f
-_decorators.ratelimit = lambda **kw: lambda f: f
+_decorators.ratelimit = lambda **_kw: lambda f: f
 
 _user_utils = sys.modules["CTFd.utils.user"]
 _user_utils.get_current_user = MagicMock()

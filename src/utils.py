@@ -27,6 +27,8 @@ DEFAULTS: dict[str, int | str] = {
     "default_max_renewals": 2,
 }
 
+_TOKEN_LENGTH_KEY = "freshness_token_length"
+
 USERS_MODE = "users"
 TEAMS_MODE = "teams"
 

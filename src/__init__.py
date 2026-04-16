@@ -105,7 +105,7 @@ def _reconcile_containers(app: Flask, container_manager: ContainerManager) -> No
         logger.info(f"reconciled containers on startup: {kept} recovered, {removed} stale records removed")
 
 
-def _ensure_columns(app: Flask):
+def _ensure_columns(app: Flask) -> None:
     from CTFd.models import db
     from sqlalchemy import inspect, text
 

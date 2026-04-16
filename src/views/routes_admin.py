@@ -9,7 +9,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from statistics import median
 
 import docker
@@ -1138,13 +1138,13 @@ def route_analytics_heatmap():
     matrix = [[0] * 7 for _ in range(24)]
 
     if week_mode:
-        utc_now = datetime.utcnow()
+        utc_now = datetime.now(UTC)
         start_date = (utc_now - timedelta(days=6)).date()
 
     for r in rows:
         if not r.created_at or r.user_id in excluded:
             continue
-        dt = datetime.utcfromtimestamp(r.created_at)
+        dt = datetime.fromtimestamp(r.created_at, tz=UTC)
         if week_mode:
             day_idx = (dt.date() - start_date).days
             if not (0 <= day_idx < 7):
@@ -1162,8 +1162,10 @@ def route_analytics_heatmap():
 
     result: dict[str, list[list[int]] | int | list[str]] = {"data": data}
     if week_mode:
-        epoch = datetime(1970, 1, 1)
-        result["start_ts"] = int((datetime.combine(start_date, datetime.min.time()) - epoch).total_seconds())
+        epoch = datetime(1970, 1, 1, tzinfo=UTC)
+        result["start_ts"] = int(
+            (datetime.combine(start_date, datetime.min.time(), tzinfo=UTC) - epoch).total_seconds()
+        )
     else:
         result["days"] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     return jsonify(result)

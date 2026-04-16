@@ -1,7 +1,7 @@
 class ContainerException(Exception):
-    def __init__(self, *args):
+    def __init__(self, *args: object) -> None:
         super().__init__(*args)
-        self.message = args[0] if args else "unknown container exception"
+        self.message = str(args[0]) if args else "unknown container exception"
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.message

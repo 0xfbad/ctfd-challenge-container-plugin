@@ -11,15 +11,13 @@ from CTFd.models import db, Users, Teams
 from CTFd.utils.user import get_current_user
 
 from .models import ContainerChallengeModel, ContainerInfoModel, ContainerHistoryModel
-from .utils import get_setting, is_team_mode
+from .utils import get_setting, _TOKEN_LENGTH_KEY, is_team_mode
 from .freshness import compute_token, render_flag, extract_token
 from .event_logger import event_logger
 
 _token_map_lock = threading.Lock()
 # cache keyed by (secret, challenge_id, team_mode, token_length) -> (entity_count, {token -> (entity_id, entity_name)})
 _token_map_cache: dict[tuple[str, int, bool, int], tuple[int, dict[str, tuple[int, str]]]] = {}
-
-_TOKEN_LENGTH_KEY = "freshness_token_length"
 
 
 def _get_token_length() -> int:
