@@ -8,6 +8,13 @@ from freshness import compute_token, render_flag
 _MOD = "challenges"
 
 
+def _patch_solves(already_solved=False):
+    """patch Solves.query to simulate already-solved or not"""
+    mock_solves = MagicMock()
+    mock_solves.query.filter_by.return_value.first.return_value = MagicMock() if already_solved else None
+    return patch(f"{_MOD}.Solves", mock_solves)
+
+
 def _make_user(user_id, team=None, name="alice"):
     return SimpleNamespace(id=user_id, team=team, name=name)
 
@@ -53,6 +60,7 @@ def test_post_solve_shortens_expiry():
         patch(f"{_MOD}.ContainerInfoModel") as mock_info,
         patch(f"{_MOD}.ContainerHistoryModel") as mock_hist,
         patch(f"{_MOD}.db"),
+        _patch_solves(already_solved=False),
     ):
         mock_info.query.filter_by.return_value.first.return_value = mock_container
         mock_hist.query.filter_by.return_value.first.return_value = mock_history
@@ -106,6 +114,7 @@ def test_post_solve_disabled_when_zero():
         patch(f"{_MOD}.ContainerInfoModel") as mock_info,
         patch(f"{_MOD}.ContainerHistoryModel"),
         patch(f"{_MOD}.db"),
+        _patch_solves(already_solved=False),
     ):
         mock_info.query.filter_by.return_value.first.return_value = mock_container
 
@@ -150,6 +159,7 @@ def test_post_solve_no_container_running():
         patch(f"{_MOD}.ContainerInfoModel") as mock_info,
         patch(f"{_MOD}.ContainerHistoryModel"),
         patch(f"{_MOD}.db"),
+        _patch_solves(already_solved=False),
     ):
         mock_info.query.filter_by.return_value.first.return_value = None
 
@@ -199,6 +209,7 @@ def test_post_solve_shortens_zero_expiration_container():
         patch(f"{_MOD}.ContainerInfoModel") as mock_info,
         patch(f"{_MOD}.ContainerHistoryModel"),
         patch(f"{_MOD}.db"),
+        _patch_solves(already_solved=False),
     ):
         mock_info.query.filter_by.return_value.first.return_value = mock_container
 
@@ -208,3 +219,56 @@ def test_post_solve_shortens_zero_expiration_container():
         # expires=0 containers now get shortened like any other
         assert mock_container.expires != 0
         assert mock_container.expires > int(time.time())
+
+
+def test_already_solved_skips_shorten_and_log():
+    secret = "testsecret"
+    challenge_id = 1
+    template = "ctf{%TOKEN%}"
+    user = _make_user(10, name="alice")
+    token = compute_token(secret, challenge_id, 10)
+    submitted = render_flag(template, token)
+
+    challenge = SimpleNamespace(id=challenge_id, name="test_chal")
+
+    mock_request = MagicMock()
+    mock_request.form = None
+    mock_request.get_json.return_value = {"submission": submitted}
+
+    mock_flag = SimpleNamespace(content=template, challenge_id=challenge_id, data=None, type="freshness")
+
+    mock_flags = MagicMock()
+    mock_flags.query.filter_by.return_value.all.return_value = [mock_flag]
+
+    mock_container = MagicMock()
+    mock_container.container_id = "abc123"
+    original_expires = int(time.time()) + 3600
+    mock_container.expires = original_expires
+
+    with (
+        patch(
+            f"{_MOD}.get_setting",
+            side_effect=lambda k, d=None: {
+                "freshness_secret": secret,
+                "post_solve_expiry_seconds": 90,
+                "freshness_token_length": 6,
+            }.get(k, d),
+        ),
+        patch(f"{_MOD}.get_current_user", return_value=user),
+        patch(f"{_MOD}.is_team_mode", return_value=False),
+        patch("CTFd.models.Flags", mock_flags),
+        patch(f"{_MOD}.ContainerInfoModel") as mock_info,
+        patch(f"{_MOD}.ContainerHistoryModel"),
+        patch(f"{_MOD}.db"),
+        patch(f"{_MOD}.event_logger") as mock_event_logger,
+        _patch_solves(already_solved=True),
+    ):
+        mock_info.query.filter_by.return_value.first.return_value = mock_container
+
+        result, message = ContainerChallenge.attempt(challenge, mock_request)
+
+        assert result is True
+        assert message == "correct"
+        # expiry unchanged, no shorten or log on re-submission
+        assert mock_container.expires == original_expires
+        mock_event_logger.log_event.assert_not_called()

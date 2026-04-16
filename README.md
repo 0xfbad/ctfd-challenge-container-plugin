@@ -18,11 +18,29 @@ services:
   ctfd:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ~/.ssh:/root/.ssh:ro
-      - ~/.docker:/root/.docker:ro
+      - ctfd-ssh:/home/ctfd/.ssh:ro
+      - ~/.docker:/home/ctfd/.docker:ro
+    depends_on:
+      permissions:
+        condition: service_completed_successfully
+
+  permissions:
+    image: alpine:3.23
+    user: root
+    volumes:
+      - ~/.ssh:/mnt/host-ssh:ro
+      - ctfd-ssh:/mnt/ctfd-ssh
+    command: >
+      sh -c '
+        cp -a /mnt/host-ssh/. /mnt/ctfd-ssh/ &&
+        chown -R 1001:1001 /mnt/ctfd-ssh
+      '
+
+volumes:
+  ctfd-ssh:
 ```
 
-The socket talks to the local daemon, the SSH keys tunnel to remote hosts, and the docker config has context metadata. For remote contexts you'll also want `network_mode: host` so SSH connections can reach your Docker hosts
+The socket talks to the local daemon, the SSH keys tunnel to remote hosts, and the docker config has context metadata. The permissions init container copies host SSH keys into a named volume with the correct ownership (uid 1001 matches the ctfd user inside the container), avoiding permission mismatches from bind-mounting directly. For remote contexts you'll also want `network_mode: host` so SSH connections can reach your Docker hosts
 
 3. Create Docker contexts for remote hosts:
 

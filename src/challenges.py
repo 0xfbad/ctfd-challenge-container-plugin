@@ -7,7 +7,7 @@ import threading
 
 from flask import Request
 from CTFd.plugins.challenges import BaseChallenge
-from CTFd.models import db, Users, Teams
+from CTFd.models import db, Users, Teams, Solves
 from CTFd.utils.user import get_current_user
 
 from .models import ContainerChallengeModel, ContainerInfoModel, ContainerHistoryModel
@@ -216,18 +216,20 @@ class ContainerChallenge(BaseChallenge):
                 match = expected == submission
 
             if match:
-                solve_time = _shorten_after_solve(challenge.id, xid, team_mode)
-                event_logger.log_event(
-                    "solved",
-                    f"user '{user.name}' solved '{challenge.name}', timer shortened",
-                    user_id=user.id,
-                    username=user.name,
-                    metadata={
-                        "challenge_id": challenge.id,
-                        "challenge_name": challenge.name,
-                        "solve_time": solve_time,
-                    },
-                )
+                already_solved = Solves.query.filter_by(account_id=xid, challenge_id=challenge.id).first()
+                if not already_solved:
+                    solve_time = _shorten_after_solve(challenge.id, xid, team_mode)
+                    event_logger.log_event(
+                        "solved",
+                        f"user '{user.name}' solved '{challenge.name}', timer shortened",
+                        user_id=user.id,
+                        username=user.name,
+                        metadata={
+                            "challenge_id": challenge.id,
+                            "challenge_name": challenge.name,
+                            "solve_time": solve_time,
+                        },
+                    )
                 return True, "correct"
 
             submitted_token = extract_token(template, submission)

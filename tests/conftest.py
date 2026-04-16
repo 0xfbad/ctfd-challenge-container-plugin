@@ -24,6 +24,7 @@ _ctfd_models.Challenges = type("Challenges", (), {})
 _ctfd_models.Users = MagicMock()
 _ctfd_models.Teams = MagicMock()
 _ctfd_models.Flags = MagicMock()
+_ctfd_models.Solves = MagicMock()
 
 _stub_modules = [
     "CTFd",
