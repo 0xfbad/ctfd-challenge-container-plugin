@@ -24,19 +24,6 @@ logger = logging.getLogger(__name__)
 CPU_QUOTA_BASE = 100000
 _SSH_CAPS = ["SYS_CHROOT", "SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "AUDIT_WRITE"]
 
-_BLOCKED_CAPS = frozenset(
-    {
-        "SYS_ADMIN",
-        "SYS_RAWIO",
-        "SYS_MODULE",
-        "SYS_PTRACE",
-        "NET_RAW",
-        "DAC_READ_SEARCH",
-        "SYS_BOOT",
-        "SYS_TIME",
-    }
-)
-
 _VOLUME_BLOCKED_PATHS = frozenset(
     {
         "/etc/shadow",
@@ -58,7 +45,7 @@ def _build_caps(ctype: str | None, cap_add: str | None) -> list[str]:
     if cap_add:
         for c in cap_add.split(","):
             c = c.strip().upper()
-            if c and c not in _BLOCKED_CAPS:
+            if c:
                 caps.append(c)
     return list(set(caps)) if caps else []
 

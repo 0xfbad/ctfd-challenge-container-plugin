@@ -69,7 +69,7 @@ Rate limit changes require a CTFd restart
 
 ## Container security
 
-Every container gets `cap_drop=ALL`, `no-new-privileges`, a pids limit of 256, and `auto_remove=True`. SSH challenges automatically get the capabilities sshd needs (SETUID, SETGID, CHOWN, etc). Additional capabilities can be added per-challenge via the `cap_add` field, but dangerous ones (SYS_ADMIN, SYS_RAWIO, SYS_MODULE, SYS_PTRACE, NET_RAW, DAC_READ_SEARCH, SYS_BOOT, SYS_TIME) are blocked. Volume mounts are validated against a blocklist covering `/proc`, `/sys`, `/dev`, `/var/run`, `/run`, and sensitive files like `/etc/shadow`
+Every container gets `cap_drop=ALL`, `no-new-privileges`, a pids limit of 256, and `auto_remove=True`. SSH challenges automatically get the capabilities sshd needs (SETUID, SETGID, CHOWN, etc). Additional capabilities can be added per-challenge via the `cap_add` field. Volume mounts are validated against a blocklist covering `/proc`, `/sys`, `/dev`, `/var/run`, `/run`, and sensitive files like `/etc/shadow`
 
 ## Freshness tokens
 
