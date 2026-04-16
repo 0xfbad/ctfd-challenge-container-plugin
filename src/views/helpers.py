@@ -37,22 +37,25 @@ def _get_create_lock(chal_id: int, xid: int, is_team: bool) -> threading.Lock:
         return _create_locks[key]
 
 
+_USER_SAFE_PATTERNS = (
+    "no renewals remaining",
+    "container not found",
+    "challenge not found",
+    "you can only spawn",
+    "another container request is in progress",
+    "docker image not found",
+    "memory limit must be",
+    "cpu limit must be",
+)
+
+
 def sanitize_container_error(err: ContainerException | Exception) -> str:
     msg = str(err)
-    if any(
-        p in msg.lower()
-        for p in (
-            "failed to",
-            "docker error",
-            "not connected",
-            "no docker context",
-            "no healthy context",
-            "not available",
-        )
-    ):
-        logger.error(f"container error (sanitized): {msg}")
-        return "a server error occurred, please try again"
-    return msg
+    lower = msg.lower()
+    if any(p in lower for p in _USER_SAFE_PATTERNS):
+        return msg
+    logger.error(f"container error (sanitized): {msg}")
+    return "a server error occurred, please try again"
 
 
 def log_container_event(
@@ -335,7 +338,8 @@ def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> 
     extra_env: dict[str, str] = {}
     freshness_secret_raw = get_setting("freshness_secret")
     if freshness_secret_raw:
-        token = compute_token(str(freshness_secret_raw), chal_id, xid)
+        token_length = int(get_setting("freshness_token_length", 6) or 6)
+        token = compute_token(str(freshness_secret_raw), chal_id, xid, length=token_length)
         extra_env["FRESHNESS_TOKEN"] = token
 
     if challenge.ssh_username:

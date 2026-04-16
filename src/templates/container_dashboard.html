@@ -655,7 +655,7 @@
 		const m = event.metadata || {};
 		switch (event.type) {
 			case 'host_unhealthy':
-				return [m.context_name, m.reason].filter(Boolean).join(': ');
+				return [escapeHtml(m.context_name), escapeHtml(m.reason)].filter(Boolean).join(': ');
 			case 'host_healthy':
 				return m.context_name ? `${escapeHtml(m.context_name)}: reachable` : '';
 			case 'container_error': {
@@ -675,10 +675,10 @@
 				if (m.action === 'kill') return `killed ${target}'s container`;
 				if (m.action === 'extend') return `renewed ${target}'s container`;
 				if (m.action === 'clear_history') return `cleared ${m.count} history records`;
-				return m.action || '';
+				return escapeHtml(m.action || '');
 			}
 			case 'context_changed':
-				return [m.context_name, m.action].filter(Boolean).join(': ');
+				return [escapeHtml(m.context_name), escapeHtml(m.action)].filter(Boolean).join(': ');
 			case 'container_requested': {
 				if (!m.hosts) return '';
 				const hostParts = Object.entries(m.hosts).map(([name, h]) => {

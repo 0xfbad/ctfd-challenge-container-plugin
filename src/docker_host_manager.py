@@ -364,8 +364,7 @@ class DockerHostManager:
 
         client = self._get_client(context_name)
 
-        # skip no-new-privileges when cap_add is set so file capabilities work
-        sec_opt = [] if kwargs.get("cap_add") else ["no-new-privileges:true"]
+        sec_opt = ["no-new-privileges:true"]
 
         if publish_port and internal_port:
             last_err = None

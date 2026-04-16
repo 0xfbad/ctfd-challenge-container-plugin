@@ -33,7 +33,7 @@ from ..docker_host_manager import (
 )
 from ..event_logger import event_logger
 from ..models import ContainerChallengeModel, ContainerHistoryModel, ContainerInfoModel, DockerContextModel
-from ..utils import DEFAULTS, get_setting, is_team_mode, set_setting
+from ..utils import DEFAULTS, esc, get_setting, is_team_mode, set_setting
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,26 @@ _MAX_ANALYTICS_ROWS = 50000
 _MAX_SSE_CONNECTIONS = 10
 _sse_connection_count = 0
 _sse_connection_lock = threading.Lock()
+
+
+_EVENT_ESC_KEYS = ("username", "message")
+_META_ESC_KEYS = ("team_name", "target", "source_entity", "challenge_name")
+
+
+def _esc_event(event: dict) -> dict:
+    """HTML-escape user-controlled fields in an event dict before serialization"""
+    out = dict(event)
+    for k in _EVENT_ESC_KEYS:
+        if k in out and isinstance(out[k], str):
+            out[k] = esc(out[k])
+    meta = out.get("metadata")
+    if isinstance(meta, dict):
+        meta = dict(meta)
+        for k in _META_ESC_KEYS:
+            if k in meta and isinstance(meta[k], str):
+                meta[k] = esc(meta[k])
+        out["metadata"] = meta
+    return out
 
 
 def _get_connection_status(container_manager: ContainerManager) -> tuple[bool, set[str]]:
@@ -105,9 +125,9 @@ def route_get_running_containers():
             "container_id": container.container_id,
             "container_name": container_name,
             "image": container.challenge.image,
-            "challenge": f"{container.challenge.name}",
+            "challenge": esc(container.challenge.name),
             "challenge_id": container.challenge_id,
-            "user": f"{user_obj.name}",
+            "user": esc(user_obj.name),
             "user_id": container.user_id,
             "is_admin": user_obj.type == "admin" if user_obj else False,
             "is_hidden": getattr(user_obj, "hidden", False),
@@ -127,7 +147,7 @@ def route_get_running_containers():
             else 0,
         }
         if team_mode:
-            container_data["team"] = f"{container.team.name}"
+            container_data["team"] = esc(container.team.name)
             container_data["team_id"] = container.team_id
         running_containers_data.append(container_data)
 
@@ -223,7 +243,7 @@ def route_stats_summary():
 @containers_bp.route("/api/events/recent", methods=["GET"])
 @admins_only
 def route_get_recent_events():
-    events = event_logger.get_recent_events(limit=50)
+    events = [_esc_event(e) for e in event_logger.get_recent_events(limit=50)]
     return jsonify(events=events)
 
 
@@ -231,7 +251,7 @@ def route_get_recent_events():
 @admins_only
 def route_get_flag_sharing():
     all_events = event_logger.get_recent_events(limit=2000)
-    sharing = [e for e in all_events if e.get("type") == "flag_sharing"]
+    sharing = [_esc_event(e) for e in all_events if e.get("type") == "flag_sharing"]
     return jsonify(events=sharing)
 
 
@@ -267,12 +287,12 @@ def route_events_stream():
         try:
             recent_events = event_logger.get_recent_events(limit=200)
             for event in recent_events:
-                yield f"data: {json.dumps(event)}\n\n"
+                yield f"data: {json.dumps(_esc_event(event))}\n\n"
 
             while True:
                 try:
                     event_data = q.get(timeout=30)
-                    yield f"data: {json.dumps(event_data)}\n\n"
+                    yield f"data: {json.dumps(_esc_event(event_data))}\n\n"
                 except queue.Empty:
                     yield ": keepalive\n\n"
 
@@ -935,7 +955,7 @@ def route_analytics_top_users():
         result.append(
             {
                 "user_id": user_id,
-                "username": user_obj.name if user_obj else f"user#{user_id}",
+                "username": esc(user_obj.name) if user_obj else f"user#{user_id}",
                 "is_admin": user_obj.type == "admin" if user_obj else False,
                 "is_hidden": getattr(user_obj, "hidden", False) if user_obj else False,
                 "is_banned": getattr(user_obj, "banned", False) if user_obj else False,
@@ -975,7 +995,7 @@ def route_analytics_challenges():
         end = row.stopped_at if row.stopped_at else now
         stats["lifetimes"].append(end - row.created_at)
 
-    chal_names = {c.id: c.name for c in Challenges.query.filter(Challenges.id.in_(chal_stats.keys())).all()}
+    chal_names = {c.id: esc(c.name) for c in Challenges.query.filter(Challenges.id.in_(chal_stats.keys())).all()}
 
     result = []
     for chal_id, stats in chal_stats.items():
@@ -1043,13 +1063,15 @@ def route_analytics_solve_times():
         stats["solves"].append({"time": round(solve_time, 1), "user_id": user_id})
         stats["solve_count"] += 1
 
-    chal_names = {c.id: c.name for c in Challenges.query.filter(Challenges.id.in_(chal_times.keys())).all()}
+    chal_names = {c.id: esc(c.name) for c in Challenges.query.filter(Challenges.id.in_(chal_times.keys())).all()}
 
     all_user_ids = set()
     for stats in chal_times.values():
         for s in stats["solves"]:
             all_user_ids.add(s["user_id"])
-    user_names = {u.id: u.name for u in Users.query.filter(Users.id.in_(all_user_ids)).all()} if all_user_ids else {}
+    user_names = (
+        {u.id: esc(u.name) for u in Users.query.filter(Users.id.in_(all_user_ids)).all()} if all_user_ids else {}
+    )
 
     result = []
     for chal_id, stats in chal_times.items():
@@ -1089,7 +1111,7 @@ def route_analytics_flag_sharing():
     for e in sharing:
         hour = int(e["timestamp"]) // 3600 * 3600
         bins[hour] = bins.get(hour, 0) + 1
-        cname = (e.get("metadata") or {}).get("challenge_name", "unknown")
+        cname = esc((e.get("metadata") or {}).get("challenge_name", "unknown"))
         by_challenge[cname] = by_challenge.get(cname, 0) + 1
 
     if bins:

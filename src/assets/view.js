@@ -162,8 +162,17 @@ function view_container_info(challengeId) {
     .then(function(data) {
         if (data.status === "misconfigured") {
             info.style.display = 'block';
-            info.innerHTML = '<div class="misconfigured-banner"><i class="fas fa-exclamation-triangle" style="margin-right:6px"></i>' +
-                (data.message || 'This challenge has a broken configuration. This is on our end, not yours.') + '</div>';
+            var banner = document.createElement('div');
+            banner.className = 'misconfigured-banner';
+            var icon = document.createElement('i');
+            icon.className = 'fas fa-exclamation-triangle';
+            icon.style.marginRight = '6px';
+            banner.appendChild(icon);
+            banner.appendChild(document.createTextNode(
+                data.message || 'This challenge has a broken configuration. This is on our end, not yours.'
+            ));
+            info.innerHTML = '';
+            info.appendChild(banner);
         } else if (data.status === "instance not started") {
             showStart();
         } else if (data.status === "already_running") {

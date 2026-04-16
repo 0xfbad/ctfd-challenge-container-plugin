@@ -24,6 +24,32 @@ logger = logging.getLogger(__name__)
 CPU_QUOTA_BASE = 100000
 _SSH_CAPS = ["SYS_CHROOT", "SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "AUDIT_WRITE"]
 
+_BLOCKED_CAPS = frozenset(
+    {
+        "SYS_ADMIN",
+        "SYS_RAWIO",
+        "SYS_MODULE",
+        "SYS_PTRACE",
+        "NET_RAW",
+        "DAC_READ_SEARCH",
+        "SYS_BOOT",
+        "SYS_TIME",
+    }
+)
+
+_VOLUME_BLOCKED_PATHS = frozenset(
+    {
+        "/etc/shadow",
+        "/etc/passwd",
+        "/etc/sudoers",
+        "/proc",
+        "/sys",
+        "/dev",
+        "/var/run",
+        "/run",
+    }
+)
+
 # value types that appear in kwargs dicts forwarded to docker run
 _DockerRunVal = str | int | bool | list[str] | dict[str, str] | dict[str, dict[str, str]]
 
@@ -33,7 +59,10 @@ def _build_caps(ctype: str | None, cap_add: str | None) -> list[str]:
     if ctype == "ssh":
         caps.extend(_SSH_CAPS)
     if cap_add:
-        caps.extend(c.strip() for c in cap_add.split(",") if c.strip())
+        for c in cap_add.split(","):
+            c = c.strip().upper()
+            if c and c not in _BLOCKED_CAPS:
+                caps.append(c)
     return list(set(caps)) if caps else []
 
 
@@ -196,8 +225,12 @@ class ContainerManager:
             try:
                 volumes_dict = json.loads(volumes)
                 for host_path in volumes_dict:
-                    if "docker.sock" in os.path.normpath(host_path):
+                    normalized = os.path.normpath(host_path)
+                    if "docker.sock" in normalized:
                         raise ContainerException("mounting the docker socket is not allowed")
+                    for blocked in _VOLUME_BLOCKED_PATHS:
+                        if normalized == blocked or normalized.startswith(blocked + "/"):
+                            raise ContainerException(f"mounting {blocked} is not allowed")
                 kwargs["volumes"] = volumes_dict
             except json.decoder.JSONDecodeError:
                 raise ContainerException("volumes json string is invalid")
@@ -344,12 +377,11 @@ class ContainerManager:
         if context_name:
             if context_name not in self.host_manager._context_configs:
                 raise ContainerException(f"docker context '{context_name}' not available")
+            self.orchestrator.reserve_slot(context_name)
         else:
             context_name = self.orchestrator.select_and_reserve()
             if context_name is None:
                 raise ContainerException("no healthy context available")
-
-        self.orchestrator.reserve_slot(context_name)
         stack_labels = {"ctf.stack_id": stack_id}
 
         base_env = {

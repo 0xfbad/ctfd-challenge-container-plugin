@@ -24,7 +24,7 @@ def test_compute_token_deterministic():
 
 def test_compute_token_length():
     token = compute_token("secret", 1, 1)
-    assert len(token) == 4
+    assert len(token) == 6
 
 
 def test_compute_token_custom_length():

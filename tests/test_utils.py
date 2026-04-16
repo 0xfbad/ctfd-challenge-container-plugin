@@ -63,6 +63,7 @@ def test_defaults_dict_has_expected_keys():
         "thread_pool_size",
         "max_concurrent_creates",
         "freshness_secret",
+        "freshness_token_length",
         "post_solve_expiry_seconds",
         "default_expiration_seconds",
         "default_max_renewals",

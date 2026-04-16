@@ -5,6 +5,18 @@ from flag_type import FreshnessFlag
 from freshness import compute_token, render_flag
 
 _MOD = "flag_type"
+_DEFAULT_TOKEN_LEN = 6
+
+
+def _setting_side_effect(secret):
+    def _get(key, default=None):
+        if key == "freshness_secret":
+            return secret
+        if key == "freshness_token_length":
+            return _DEFAULT_TOKEN_LEN
+        return default
+
+    return _get
 
 
 def _make_key_obj(content, challenge_id, data=None):
@@ -29,7 +41,7 @@ def test_correct_flag():
     key_obj = _make_key_obj("ctf{%TOKEN%}", challenge_id)
 
     with (
-        patch(f"{_MOD}.get_setting", return_value=secret),
+        patch(f"{_MOD}.get_setting", side_effect=_setting_side_effect(secret)),
         patch(f"{_MOD}.get_current_user", return_value=user),
         patch(f"{_MOD}.is_team_mode", return_value=False),
     ):
@@ -42,7 +54,7 @@ def test_wrong_flag():
     user = _make_user(42)
 
     with (
-        patch(f"{_MOD}.get_setting", return_value=secret),
+        patch(f"{_MOD}.get_setting", side_effect=_setting_side_effect(secret)),
         patch(f"{_MOD}.get_current_user", return_value=user),
         patch(f"{_MOD}.is_team_mode", return_value=False),
     ):
@@ -60,7 +72,7 @@ def test_team_mode():
     key_obj = _make_key_obj("flag{%TOKEN%}", challenge_id)
 
     with (
-        patch(f"{_MOD}.get_setting", return_value=secret),
+        patch(f"{_MOD}.get_setting", side_effect=_setting_side_effect(secret)),
         patch(f"{_MOD}.get_current_user", return_value=user),
         patch(f"{_MOD}.is_team_mode", return_value=True),
     ):
@@ -77,7 +89,7 @@ def test_case_insensitive():
     key_obj = _make_key_obj("CTF{%TOKEN%}", challenge_id, data="case_insensitive")
 
     with (
-        patch(f"{_MOD}.get_setting", return_value=secret),
+        patch(f"{_MOD}.get_setting", side_effect=_setting_side_effect(secret)),
         patch(f"{_MOD}.get_current_user", return_value=user),
         patch(f"{_MOD}.is_team_mode", return_value=False),
     ):
@@ -88,7 +100,7 @@ def test_missing_secret():
     key_obj = _make_key_obj("ctf{%TOKEN%}", 1)
 
     with (
-        patch(f"{_MOD}.get_setting", return_value=""),
+        patch(f"{_MOD}.get_setting", side_effect=_setting_side_effect("")),
         patch(f"{_MOD}.get_current_user", return_value=_make_user(1)),
         patch(f"{_MOD}.is_team_mode", return_value=False),
     ):
@@ -99,7 +111,7 @@ def test_missing_user():
     key_obj = _make_key_obj("ctf{%TOKEN%}", 1)
 
     with (
-        patch(f"{_MOD}.get_setting", return_value="secret"),
+        patch(f"{_MOD}.get_setting", side_effect=_setting_side_effect("secret")),
         patch(f"{_MOD}.get_current_user", return_value=None),
     ):
         assert FreshnessFlag.compare(key_obj, "anything") is False
@@ -110,7 +122,7 @@ def test_team_mode_without_team():
     user = _make_user(42, team=None)
 
     with (
-        patch(f"{_MOD}.get_setting", return_value="secret"),
+        patch(f"{_MOD}.get_setting", side_effect=_setting_side_effect("secret")),
         patch(f"{_MOD}.get_current_user", return_value=user),
         patch(f"{_MOD}.is_team_mode", return_value=True),
     ):
@@ -147,8 +159,15 @@ def test_anticheat_detection():
     mock_flags = MagicMock()
     mock_flags.query.filter_by.return_value.all.return_value = [mock_flag]
 
+    def _settings(key, default=None):
+        if key == "freshness_secret":
+            return secret
+        if key == "freshness_token_length":
+            return _DEFAULT_TOKEN_LEN
+        return default
+
     with (
-        patch("challenges.get_setting", return_value=secret),
+        patch("challenges.get_setting", side_effect=_settings),
         patch("challenges.get_current_user", return_value=user),
         patch("challenges.is_team_mode", return_value=False),
         patch("challenges.Users") as mock_users,
@@ -156,6 +175,7 @@ def test_anticheat_detection():
         patch("challenges.event_logger") as mock_logger,
     ):
         mock_users.query.all.return_value = [user, other_user]
+        mock_users.query.count.return_value = 2
         result, message = ContainerChallenge.attempt(challenge, mock_request)
 
         assert result is False
@@ -195,11 +215,13 @@ def test_anticheat_correct_flag_passes():
     mock_flags = MagicMock()
     mock_flags.query.filter_by.return_value.all.return_value = [mock_flag]
 
+    def _settings(key, default=None):
+        return {"freshness_secret": secret, "post_solve_expiry_seconds": 0, "freshness_token_length": _DEFAULT_TOKEN_LEN}.get(
+            key, default
+        )
+
     with (
-        patch(
-            "challenges.get_setting",
-            side_effect=lambda k: {"freshness_secret": secret, "post_solve_expiry_seconds": 0}.get(k),
-        ),
+        patch("challenges.get_setting", side_effect=_settings),
         patch("challenges.get_current_user", return_value=user),
         patch("challenges.is_team_mode", return_value=False),
         patch("CTFd.models.Flags", mock_flags),

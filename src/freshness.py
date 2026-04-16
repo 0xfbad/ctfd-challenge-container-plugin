@@ -12,7 +12,7 @@ def generate_secret() -> str:
     return secrets.token_hex(32)
 
 
-def compute_token(secret: str, challenge_id: int | str, xid: int | str, length: int = 4) -> str:
+def compute_token(secret: str, challenge_id: int | str, xid: int | str, length: int = 6) -> str:
     msg = f"{challenge_id}:{xid}".encode()
     digest = hmac.new(secret.encode(), msg, hashlib.sha256).digest()
 

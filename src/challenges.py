@@ -16,16 +16,23 @@ from .freshness import compute_token, render_flag, extract_token
 from .event_logger import event_logger
 
 _token_map_lock = threading.Lock()
-# cache keyed by (secret, challenge_id, team_mode) -> (entity_count, {token -> (entity_id, entity_name)})
-_token_map_cache: dict[tuple[str, int, bool], tuple[int, dict[str, tuple[int, str]]]] = {}
+# cache keyed by (secret, challenge_id, team_mode, token_length) -> (entity_count, {token -> (entity_id, entity_name)})
+_token_map_cache: dict[tuple[str, int, bool, int], tuple[int, dict[str, tuple[int, str]]]] = {}
+
+_TOKEN_LENGTH_KEY = "freshness_token_length"
+
+
+def _get_token_length() -> int:
+    return int(get_setting(_TOKEN_LENGTH_KEY, 6) or 6)
 
 
 def _find_token_owner(
     secret: str, challenge_id: int, submitted_token: str, exclude_xid: int, team_mode: bool
 ) -> tuple[int, str] | None:
     """cached lookup of which entity owns a freshness token"""
+    token_length = _get_token_length()
     entity_class = Teams if team_mode else Users
-    cache_key = (secret, challenge_id, team_mode)
+    cache_key = (secret, challenge_id, team_mode, token_length)
     current_count = entity_class.query.count()
 
     with _token_map_lock:
@@ -38,7 +45,7 @@ def _find_token_owner(
 
     token_map: dict[str, tuple[int, str]] = {}
     for entity in entity_class.query.all():
-        token = compute_token(secret, challenge_id, entity.id)
+        token = compute_token(secret, challenge_id, entity.id, length=token_length)
         token_map[token] = (entity.id, getattr(entity, "name", f"id={entity.id}"))
 
     with _token_map_lock:
@@ -126,6 +133,32 @@ class ContainerChallenge(BaseChallenge):
 
         return challenge
 
+    _UPDATABLE_FIELDS = {
+        "name",
+        "description",
+        "category",
+        "value",
+        "state",
+        "max_attempts",
+        "connection_info",
+        "type",
+        "image",
+        "port",
+        "command",
+        "volumes",
+        "ctype",
+        "ssh_username",
+        "ssh_password",
+        "docker_context",
+        "max_memory_mb",
+        "max_cpu",
+        "expiration_seconds",
+        "max_renewals",
+        "cap_add",
+        "services_json",
+        "network_json",
+    }
+
     @classmethod
     def update(cls, challenge: ContainerChallengeModel, request: Request) -> ContainerChallengeModel:
         data = request.form or request.get_json()
@@ -133,6 +166,8 @@ class ContainerChallenge(BaseChallenge):
         cls._handle_ssh_password(data, existing_password=challenge.ssh_password)
 
         for attr, value in data.items():
+            if attr not in cls._UPDATABLE_FIELDS:
+                continue
             if attr in ("docker_context", "max_memory_mb", "max_cpu", "expiration_seconds", "max_renewals"):
                 value = cls.sanitize_value(value)
             setattr(challenge, attr, value)
@@ -171,7 +206,8 @@ class ContainerChallenge(BaseChallenge):
 
         for flag in freshness_flags:
             template = flag.content
-            token = compute_token(secret, challenge.id, xid)
+            token_length = _get_token_length()
+            token = compute_token(secret, challenge.id, xid, length=token_length)
             expected = render_flag(template, token)
 
             case_insensitive = flag.data and flag.data.lower() == "case_insensitive"

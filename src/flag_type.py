@@ -9,6 +9,8 @@ from CTFd.utils.user import get_current_user
 from .freshness import compute_token, render_flag
 from .utils import get_setting, is_team_mode
 
+_TOKEN_LENGTH_KEY = "freshness_token_length"
+
 
 class FreshnessFlag(BaseFlag):
     name = "freshness"
@@ -38,7 +40,8 @@ class FreshnessFlag(BaseFlag):
         template = chal_key_obj.content
         challenge_id = chal_key_obj.challenge_id
 
-        token = compute_token(secret, challenge_id, xid)
+        token_length = int(get_setting(_TOKEN_LENGTH_KEY, 6) or 6)
+        token = compute_token(secret, challenge_id, xid, length=token_length)
         expected = render_flag(template, token)
 
         if chal_key_obj.data and chal_key_obj.data.lower() == "case_insensitive":
