@@ -258,17 +258,19 @@ def test_already_solved_skips_shorten_and_log():
         patch(f"{_MOD}.is_team_mode", return_value=False),
         patch("CTFd.models.Flags", mock_flags),
         patch(f"{_MOD}.ContainerInfoModel") as mock_info,
-        patch(f"{_MOD}.ContainerHistoryModel"),
+        patch(f"{_MOD}.ContainerHistoryModel") as mock_hist,
         patch(f"{_MOD}.db"),
         patch(f"{_MOD}.event_logger") as mock_event_logger,
         _patch_solves(already_solved=True),
     ):
         mock_info.query.filter_by.return_value.first.return_value = mock_container
+        mock_hist.query.filter_by.return_value.first.return_value = MagicMock(reason=None)
 
         result, message = ContainerChallenge.attempt(challenge, mock_request)
 
         assert result is True
         assert message == "correct"
-        # expiry unchanged, no shorten or log on re-submission
-        assert mock_container.expires == original_expires
+        # timer still shortened on re-submission, but no log entry
+        assert mock_container.expires <= int(time.time()) + 91
+        assert mock_container.expires >= int(time.time()) + 85
         mock_event_logger.log_event.assert_not_called()

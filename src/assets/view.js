@@ -20,27 +20,49 @@ CTFd._internal.challenge.submit = function (preview) {
         if (response.status === 429 || response.status === 403) {
             return response;
         }
-        // re-fetch container info to pick up post-solve expiry change
-        var status = (response.data && response.data.status) || (response.data && response.data.data && response.data.data.status);
-        if (status === "correct" || status === "already_solved") {
-            setTimeout(function() {
-                fetch("/containers/api/view_info", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json", "Accept": "application/json", "CSRF-Token": init.csrfNonce },
-                    body: JSON.stringify({ chal_id: challengeId }),
-                })
-                .then(function(r) { return r.json(); })
-                .then(function(data) {
-                    if (data.expires) startTimer(data.expires);
-                })
-                .catch(function() {});
-            }, 1000);
-        }
         return response;
     });
 };
 
 var _expiryInterval = null;
+var _syncInterval = null;
+var _activeChalId = null;
+var _activeExpiresAt = null;
+
+function _startSync(challengeId) {
+    _activeChalId = challengeId;
+    if (_syncInterval) clearInterval(_syncInterval);
+    _syncInterval = setInterval(function() { _syncNow(); }, 10000);
+}
+
+function _syncNow() {
+    if (!_activeChalId) return;
+    fetch("/containers/api/view_info", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json", "CSRF-Token": init.csrfNonce },
+        body: JSON.stringify({ chal_id: _activeChalId }),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.status === "instance not started") {
+            _stopSync();
+            if (_expiryInterval) { clearInterval(_expiryInterval); _expiryInterval = null; }
+            resetAlert();
+            showStart();
+        } else if (data.expires && data.expires !== _activeExpiresAt) {
+            _activeExpiresAt = data.expires;
+            startTimer(data.expires);
+            if (data.max_renewals != null) updateRenewButton(data.renewals_used || 0, data.max_renewals);
+        }
+    })
+    .catch(function() {});
+}
+
+function _stopSync() {
+    _activeChalId = null;
+    _activeExpiresAt = null;
+    if (_syncInterval) { clearInterval(_syncInterval); _syncInterval = null; }
+}
 
 function resetAlert() {
     var el = document.getElementById("deployment-info");
@@ -76,17 +98,19 @@ function formatTime(seconds) {
 
 function startTimer(expiresAt) {
     if (_expiryInterval) clearInterval(_expiryInterval);
+    _activeExpiresAt = expiresAt;
 
     var timer = document.getElementById("instance-timer");
 
     function tick() {
-        var left = Math.max(0, Math.floor((expiresAt * 1000 - Date.now()) / 1000));
+        var left = Math.max(0, Math.floor((_activeExpiresAt * 1000 - Date.now()) / 1000));
         timer.textContent = left > 0 ? formatTime(left) : "expired";
         timer.className = "bar-timer" + (left <= 0 ? " timer-expired" : left < 300 ? " timer-warning" : "");
 
         if (left <= 0) {
             clearInterval(_expiryInterval);
             _expiryInterval = null;
+            _stopSync();
             resetAlert();
             showStart();
         }
@@ -106,7 +130,7 @@ function updateRenewButton(renewalsUsed, maxRenewals) {
     btn.setAttribute('data-tip', remaining <= 0 ? 'All ' + maxRenewals + ' renewals used' : 'Reset the container timer');
 }
 
-function showConnection(data, container) {
+function showConnection(data, container, challengeId) {
     container.innerHTML = '';
     container.style.display = 'block';
 
@@ -146,6 +170,7 @@ function showConnection(data, container) {
     }
 
     startTimer(data.expires);
+    if (challengeId) _startSync(challengeId);
     showRunning();
 }
 
@@ -176,9 +201,9 @@ function view_container_info(challengeId) {
         } else if (data.status === "instance not started") {
             showStart();
         } else if (data.status === "already_running") {
-            showConnection(data, info);
+            showConnection(data, info, challengeId);
         } else if (data.status === "host_unavailable") {
-            showConnection(data, info);
+            showConnection(data, info, challengeId);
             var warn = document.createElement('div');
             warn.className = 'connection-hint';
             warn.style.color = '#b58105';
@@ -254,7 +279,7 @@ function _doContainerRequest(challengeId, isRetry) {
             btn.disabled = false;
             btn.innerHTML = '<i class="fas fa-play"></i> Start Instance';
         } else {
-            showConnection(data, info);
+            showConnection(data, info, challengeId);
             btn.disabled = false;
             btn.innerHTML = '<i class="fas fa-play"></i> Start Instance';
         }
@@ -370,6 +395,7 @@ function container_stop(challengeId) {
         }
 
         if (_expiryInterval) { clearInterval(_expiryInterval); _expiryInterval = null; }
+        _stopSync();
         showStart();
     })
     .catch(function(e) {

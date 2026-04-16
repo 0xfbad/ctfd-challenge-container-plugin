@@ -216,9 +216,9 @@ class ContainerChallenge(BaseChallenge):
                 match = expected == submission
 
             if match:
+                solve_time = _shorten_after_solve(challenge.id, xid, team_mode)
                 already_solved = Solves.query.filter_by(account_id=xid, challenge_id=challenge.id).first()
                 if not already_solved:
-                    solve_time = _shorten_after_solve(challenge.id, xid, team_mode)
                     event_logger.log_event(
                         "solved",
                         f"user '{user.name}' solved '{challenge.name}', timer shortened",
