@@ -3,6 +3,8 @@ from __future__ import annotations
 import socket
 import time
 import logging
+import docker
+import paramiko
 from flask import Flask
 from CTFd.plugins import register_plugin_assets_directory
 from CTFd.plugins.challenges import CHALLENGE_CLASSES
@@ -12,6 +14,7 @@ from .challenges import ContainerChallenge
 from .models import ContainerSettingsModel
 from .utils import settings_to_dict, DEFAULTS
 from .container_manager import ContainerManager
+from .exceptions import ContainerException
 from .docker_host_manager import LOCAL_SOCKET_PATH, LOCAL_CONTEXT_NAME
 from .models import ContainerInfoModel, ContainerHistoryModel, DockerContextModel
 from .views import containers_bp
@@ -81,11 +84,14 @@ def _reconcile_containers(app: Flask, container_manager: ContainerManager) -> No
     kept = 0
 
     for container in containers:
-        still_running = False
         try:
             still_running = container_manager.is_container_running(container.container_id, container.docker_context)
+        except (ContainerException, docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+            # transient connectivity issue, keep the row and retry on next reconcile cycle
+            kept += 1
+            continue
         except Exception:
-            pass
+            still_running = False
 
         if still_running:
             container_manager.reserve_slot(container.docker_context)

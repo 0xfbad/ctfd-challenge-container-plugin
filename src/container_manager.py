@@ -10,6 +10,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers import SchedulerNotRunningError
 import docker
 from docker.models.containers import Container
+import paramiko
 
 from CTFd.models import db
 from .models import ContainerInfoModel, ContainerHistoryModel
@@ -138,7 +139,7 @@ class ContainerManager:
         if context_name and context_name in self.host_manager._context_configs:
             try:
                 return getattr(self.host_manager, method_name)(context_name, *args, **kwargs)
-            except docker.errors.DockerException as e:
+            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
                 raise ContainerException(f"docker error: {e}")
 
         for ctx in self.host_manager.get_connected_contexts():
@@ -146,7 +147,7 @@ class ContainerManager:
                 result = getattr(self.host_manager, method_name)(ctx, *args, **kwargs)
                 if result is not None and result != default:
                     return result
-            except (docker.errors.NotFound, docker.errors.DockerException):
+            except (docker.errors.NotFound, docker.errors.DockerException, paramiko.ssh_exception.SSHException):
                 continue
         return default
 
@@ -276,7 +277,7 @@ class ContainerManager:
             self.orchestrator.release_slot(ctx)
             self._log_create_error(ctx, image, f"image {image} not found")
             raise ContainerException("docker image not found")
-        except docker.errors.DockerException as e:
+        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
             self.orchestrator.release_slot(ctx)
             self._log_create_error(ctx, image, str(e))
             raise
@@ -298,7 +299,7 @@ class ContainerManager:
         self.orchestrator.reserve_slot(context_name)
         try:
             return self._try_run_on_context(context_name, image, port, command, environment, kwargs)
-        except docker.errors.DockerException as e:
+        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
             raise ContainerException(f"failed to create container: {e}")
 
     def _create_load_balanced(
@@ -329,7 +330,7 @@ class ContainerManager:
 
             try:
                 return self._try_run_on_context(selected, image, port, command, environment, kwargs)
-            except docker.errors.DockerException as e:
+            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
                 last_error = e
                 continue
 

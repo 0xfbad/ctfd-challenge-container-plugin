@@ -248,7 +248,7 @@ class DockerHostManager:
             return container.status == "running"
         except docker.errors.NotFound:
             return False
-        except docker.errors.DockerException:
+        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
             self._clear_client(context_name)
             raise
 
@@ -262,7 +262,7 @@ class DockerHostManager:
                     return port_mappings[0]["HostPort"]
         except (KeyError, IndexError, docker.errors.NotFound):
             return None
-        except docker.errors.DockerException:
+        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
             self._clear_client(context_name)
             raise
         return None
@@ -270,9 +270,11 @@ class DockerHostManager:
     def get_running_container_ids(self, context_name: str) -> set[str]:
         try:
             client = self._get_client(context_name)
-            containers = client.containers.list(filters={"status": "running"})
+            # sparse=True skips per-container inspect calls, which over ssh opens a
+            # channel per container and exhausts the remote's MaxSessions
+            containers = client.containers.list(filters={"status": "running"}, sparse=True)
             return {c.id for c in containers}
-        except docker.errors.DockerException:
+        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
             self._clear_client(context_name)
             return set()
 
@@ -312,7 +314,7 @@ class DockerHostManager:
                     continue
                 self._clear_client(context_name)
                 raise
-            except docker.errors.DockerException:
+            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
                 self._clear_client(context_name)
                 raise
 
@@ -326,7 +328,7 @@ class DockerHostManager:
             return True
         except docker.errors.NotFound:
             return False
-        except docker.errors.DockerException:
+        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
             self._clear_client(context_name)
             raise
 
@@ -447,7 +449,7 @@ class DockerHostManager:
             return output
         except docker.errors.NotFound:
             return ""
-        except docker.errors.DockerException:
+        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
             self._clear_client(context_name)
             raise
 
@@ -461,7 +463,7 @@ class DockerHostManager:
                     if tag:
                         tags.append(tag)
             return sorted(tags)
-        except docker.errors.DockerException:
+        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
             self._clear_client(context_name)
             return []
 
@@ -470,7 +472,7 @@ class DockerHostManager:
         try:
             client.images.pull(image)
             return "ok"
-        except docker.errors.DockerException:
+        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
             self._clear_client(context_name)
             raise
 
@@ -490,6 +492,6 @@ class DockerHostManager:
             return {"id": short_id, "size_mb": size_mb, "created": created}
         except docker.errors.ImageNotFound:
             return None
-        except docker.errors.DockerException:
+        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
             self._clear_client(context_name)
             return None
