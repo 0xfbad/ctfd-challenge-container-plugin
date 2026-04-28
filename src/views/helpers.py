@@ -241,6 +241,19 @@ def renew_container(chal_id: int, xid: int, is_team: bool) -> JsonResponse | tup
     if running_container is None:
         return {"error": "container not found, try resetting the container"}
 
+    container_manager = current_app.container_manager
+    try:
+        if not container_manager.is_container_running(running_container.container_id, running_container.docker_context):
+            if running_container.stack_id:
+                for s in ContainerInfoModel.query.filter_by(stack_id=running_container.stack_id).all():
+                    db.session.delete(s)
+            else:
+                db.session.delete(running_container)
+            db.session.commit()
+            return {"error": "container not found, try resetting the container"}
+    except ContainerException:
+        return {"error": "the container host is temporarily unreachable, please wait"}
+
     max_renewals = challenge.max_renewals
     if max_renewals is None:
         max_renewals = get_setting("default_max_renewals", 2)
