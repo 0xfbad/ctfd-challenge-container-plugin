@@ -227,9 +227,22 @@ var _requestInFlight = false;
 
 function _isPermanentError(msg) {
     if (!msg) return false;
-    var permanent = ["image not found", "max containers", "challenge not found"];
+    var permanent = ["image not found", "challenge not found"];
     var lower = msg.toLowerCase();
     return permanent.some(function(p) { return lower.indexOf(p) !== -1; });
+}
+
+function _isUserError(msg) {
+    if (!msg) return false;
+    var userErrs = [
+        "you can only spawn",
+        "rate limit", "too many",
+        "not a member of a team",
+        "invalid",
+        "no container found",
+    ];
+    var lower = msg.toLowerCase();
+    return userErrs.some(function(p) { return lower.indexOf(p) !== -1; });
 }
 
 function _showServerError(container) {
@@ -263,7 +276,7 @@ function _doContainerRequest(challengeId, isRetry) {
     .then(function(data) {
         if (data.error || data.message) {
             var errMsg = data.error || data.message;
-            if (!isRetry && !_isPermanentError(errMsg)) {
+            if (!isRetry && !_isPermanentError(errMsg) && !_isUserError(errMsg)) {
                 btn.innerHTML = '<span class="loading-spinner"></span> Retrying...';
                 _requestInFlight = false;
                 setTimeout(function() { _doContainerRequest(challengeId, true); }, 2000);
