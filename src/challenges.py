@@ -6,7 +6,12 @@ import time
 import threading
 
 from flask import Request
-from CTFd.plugins.challenges import BaseChallenge
+from CTFd.plugins.challenges import BaseChallenge, calculate_value
+from CTFd.plugins.challenges.decay import DECAY_FUNCTIONS
+from CTFd.exceptions.challenges import (
+    ChallengeCreateException,
+    ChallengeUpdateException,
+)
 from CTFd.models import db, Users, Teams, Solves
 from CTFd.utils.user import get_current_user
 
@@ -125,9 +130,29 @@ class ContainerChallenge(BaseChallenge):
             if attr in data:
                 data[attr] = cls.sanitize_value(data[attr])
 
+        for attr in ("initial", "minimum", "decay"):
+            if attr in data:
+                try:
+                    data[attr] = float(data[attr])
+                except (ValueError, TypeError):
+                    raise ChallengeCreateException(f"Invalid input for '{attr}'")
+
         challenge = cls.challenge_model(**data)
+
+        if challenge.function in DECAY_FUNCTIONS:
+            if data.get("value") and not data.get("initial"):
+                challenge.initial = data["value"]
+
+            for attr in ("initial", "minimum", "decay"):
+                if getattr(challenge, attr) is None:
+                    db.session.rollback()
+                    raise ChallengeCreateException(f"Missing '{attr}' but function is {challenge.function}")
+
         db.session.add(challenge)
         db.session.commit()
+
+        if challenge.function in DECAY_FUNCTIONS:
+            calculate_value(challenge)
 
         return challenge
 
@@ -155,6 +180,10 @@ class ContainerChallenge(BaseChallenge):
         "cap_add",
         "services_json",
         "network_json",
+        "function",
+        "initial",
+        "minimum",
+        "decay",
     }
 
     @classmethod
@@ -168,9 +197,24 @@ class ContainerChallenge(BaseChallenge):
                 continue
             if attr in ("docker_context", "max_memory_mb", "max_cpu", "expiration_seconds", "max_renewals"):
                 value = cls.sanitize_value(value)
+            elif attr in ("initial", "minimum", "decay"):
+                try:
+                    value = float(value)
+                except (ValueError, TypeError):
+                    db.session.rollback()
+                    raise ChallengeUpdateException(f"Invalid input for '{attr}'")
             setattr(challenge, attr, value)
 
+        for attr in ("initial", "minimum", "decay"):
+            if challenge.function in DECAY_FUNCTIONS and getattr(challenge, attr) is None:
+                db.session.rollback()
+                raise ChallengeUpdateException(f"Missing '{attr}' but function is {challenge.function}")
+
         db.session.commit()
+
+        if challenge.function in DECAY_FUNCTIONS:
+            return calculate_value(challenge)
+
         return challenge
 
     @classmethod
@@ -287,6 +331,10 @@ class ContainerChallenge(BaseChallenge):
             "state": challenge.state,
             "max_attempts": challenge.max_attempts,
             "type": challenge.type,
+            "initial": challenge.initial if challenge.function != "static" else None,
+            "decay": challenge.decay if challenge.function != "static" else None,
+            "minimum": challenge.minimum if challenge.function != "static" else None,
+            "function": challenge.function,
             "type_data": {
                 "id": cls.id,
                 "name": cls.name,

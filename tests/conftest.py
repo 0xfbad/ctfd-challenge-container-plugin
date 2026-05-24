@@ -30,6 +30,9 @@ _stub_modules = [
     "CTFd",
     "CTFd.plugins",
     "CTFd.plugins.challenges",
+    "CTFd.plugins.challenges.decay",
+    "CTFd.exceptions",
+    "CTFd.exceptions.challenges",
     "CTFd.utils",
     "CTFd.utils.decorators",
     "CTFd.utils.user",
@@ -95,6 +98,14 @@ _challenges.BaseChallenge = type(
     "BaseChallenge", (), {"attempt": staticmethod(lambda challenge, request: (False, "incorrect"))}
 )
 _challenges.CHALLENGE_CLASSES = {}
+_challenges.calculate_value = MagicMock()
+
+_challenges_decay = sys.modules["CTFd.plugins.challenges.decay"]
+_challenges_decay.DECAY_FUNCTIONS = {"linear": MagicMock(), "logarithmic": MagicMock()}
+
+_chal_exc = sys.modules["CTFd.exceptions.challenges"]
+_chal_exc.ChallengeCreateException = type("ChallengeCreateException", (Exception,), {})
+_chal_exc.ChallengeUpdateException = type("ChallengeUpdateException", (Exception,), {})
 
 _flags_mod = types.ModuleType("CTFd.plugins.flags")
 _flags_mod.BaseFlag = type("BaseFlag", (), {"name": "static", "templates": {}})
