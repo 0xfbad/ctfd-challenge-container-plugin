@@ -65,6 +65,22 @@ Select "Container" challenge type when creating a challenge. The typical web cha
 - Max Renewals: timer resets allowed (default 2, 0 disables)
 - Command, Volumes, Max Memory, Max CPU under Advanced options
 
+## Dynamic scoring
+
+Container challenges support CTFd's native decay scoring. In the admin edit form set the Scoring Function to `linear` or `logarithmic` and fill in Initial / Decay / Minimum, the value recomputes on every solve
+
+For ctfcli, dynamic fields go under `extra:` and `function` must be set explicitly, otherwise the challenge stays static even if initial/decay/minimum are present
+
+```yaml
+type: container
+value: 175
+extra:
+  function: logarithmic
+  initial: 175
+  decay: 7
+  minimum: 75
+```
+
 ## Plugin settings
 
 Managed through `/admin/config`, no config files
