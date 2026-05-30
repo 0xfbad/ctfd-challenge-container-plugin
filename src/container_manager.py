@@ -16,7 +16,7 @@ from CTFd.models import db
 from .models import ContainerInfoModel, ContainerHistoryModel
 from .docker_host_manager import DockerHostManager, _DockerRunVal
 from .orchestrator import Orchestrator
-from .exceptions import ContainerException
+from .exceptions import ContainerException, ContainerUnavailableException
 from .utils import get_setting
 from .event_logger import event_logger
 
@@ -68,10 +68,10 @@ class ContainerManager:
             try:
                 self.load_docker_contexts()
             except ContainerException:
-                raise ContainerException("docker is not connected")
+                raise ContainerUnavailableException("docker is not connected")
 
             if not self.host_manager.has_contexts():
-                raise ContainerException("no docker contexts available")
+                raise ContainerUnavailableException("no docker contexts available")
 
     def initialize_connection(self) -> None:
         try:

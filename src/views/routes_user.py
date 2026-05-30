@@ -20,7 +20,7 @@ from .helpers import (
     sanitize_container_error,
 )
 from ..utils import is_team_mode, DEFAULTS
-from ..exceptions import ContainerException
+from ..exceptions import ContainerException, ContainerUnavailableException
 from ..models import ContainerInfoModel
 
 # rate limit values are evaluated at import time (before app context),
@@ -77,6 +77,8 @@ def _resolve_identity(user):
 def get_connect_type_route(challenge_id):
     try:
         return connect_type(challenge_id)
+    except ContainerUnavailableException as err:
+        return {"error": sanitize_container_error(err)}, 503
     except ContainerException as err:
         return {"error": sanitize_container_error(err)}, 500
 
@@ -99,6 +101,8 @@ def route_view_info():
     xid, is_team = _resolve_identity(user)
     try:
         return view_container_info(chal_id, xid, is_team)
+    except ContainerUnavailableException as err:
+        return {"error": sanitize_container_error(err)}, 503
     except ContainerException as err:
         return {"error": sanitize_container_error(err)}, 500
 
@@ -121,6 +125,8 @@ def route_request_container():
     xid, is_team = _resolve_identity(user)
     try:
         return create_container(chal_id, xid, user.id, is_team)
+    except ContainerUnavailableException as err:
+        return {"error": sanitize_container_error(err)}, 503
     except ContainerException as err:
         return {"error": sanitize_container_error(err)}, 500
 
@@ -143,6 +149,8 @@ def route_renew_container_route():
     xid, is_team = _resolve_identity(user)
     try:
         return renew_container(chal_id, xid, is_team)
+    except ContainerUnavailableException as err:
+        return {"error": sanitize_container_error(err)}, 503
     except ContainerException as err:
         return {"error": sanitize_container_error(err)}, 500
 

@@ -8,7 +8,7 @@ from flask import current_app, request
 from CTFd.models import db
 
 from ..models import ContainerInfoModel, ContainerChallengeModel, ContainerHistoryModel, DockerContextModel
-from ..exceptions import ContainerException
+from ..exceptions import ContainerException, ContainerUnavailableException
 from ..container_manager import ContainerManager
 from ..docker_host_manager import LOCAL_CONTEXT_NAME
 from ..utils import get_setting
@@ -344,6 +344,8 @@ def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> 
             else:
                 db.session.delete(running_container)
                 db.session.commit()
+        except ContainerUnavailableException:
+            return {"error": "container service temporarily unavailable"}, 503
         except ContainerException as err:
             logger.error(f"container status check failed: {err}")
             return {"error": "a server error occurred, please try again"}, 500
