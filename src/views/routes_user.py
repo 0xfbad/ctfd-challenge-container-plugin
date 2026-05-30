@@ -5,7 +5,6 @@ from CTFd.models import Users
 from CTFd.utils.decorators import (
     authed_only,
     during_ctf_time_only,
-    ratelimit,
     require_verified_emails,
 )
 from CTFd.utils.user import get_current_user
@@ -19,7 +18,7 @@ from .helpers import (
     kill_container,
     sanitize_container_error,
 )
-from ..utils import is_team_mode, DEFAULTS
+from ..utils import is_team_mode, DEFAULTS, ratelimit_per_user
 from ..exceptions import ContainerException, ContainerUnavailableException
 from ..models import ContainerInfoModel
 
@@ -71,7 +70,7 @@ def _resolve_identity(user):
 @authed_only
 @during_ctf_time_only
 @require_verified_emails
-@ratelimit(
+@ratelimit_per_user(
     method="GET",
     limit=_RL_VIEW,
     interval=_RL_VIEW_INTERVAL,
@@ -89,7 +88,7 @@ def get_connect_type_route(challenge_id):
 @authed_only
 @during_ctf_time_only
 @require_verified_emails
-@ratelimit(
+@ratelimit_per_user(
     method="POST",
     limit=_RL_VIEW,
     interval=_RL_VIEW_INTERVAL,
@@ -113,7 +112,7 @@ def route_view_info():
 @authed_only
 @during_ctf_time_only
 @require_verified_emails
-@ratelimit(
+@ratelimit_per_user(
     method="POST",
     limit=_RL_MUTATE,
     interval=_RL_MUTATE_INTERVAL,
@@ -137,7 +136,7 @@ def route_request_container():
 @authed_only
 @during_ctf_time_only
 @require_verified_emails
-@ratelimit(
+@ratelimit_per_user(
     method="POST",
     limit=_RL_MUTATE,
     interval=_RL_MUTATE_INTERVAL,
@@ -161,7 +160,7 @@ def route_renew_container_route():
 @authed_only
 @during_ctf_time_only
 @require_verified_emails
-@ratelimit(
+@ratelimit_per_user(
     method="POST",
     limit=_RL_MUTATE,
     interval=_RL_MUTATE_INTERVAL,
