@@ -536,9 +536,7 @@ class ContainerManager:
                 if not self.host_manager.has_contexts():
                     return
 
-            entries = ContainerInfoModel.query.filter(
-                db.or_(ContainerInfoModel.is_entry == True, ContainerInfoModel.stack_id.is_(None))  # noqa: E712
-            ).all()
+            entries = ContainerInfoModel.query.filter(ContainerInfoModel.entry_or_standalone()).all()
             killed_rows = []
             released_stacks = set()
 

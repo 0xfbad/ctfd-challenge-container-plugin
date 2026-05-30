@@ -101,9 +101,7 @@ def route_containers_dashboard():
 def route_get_running_containers():
     container_manager = current_app.container_manager
     running_containers = (
-        ContainerInfoModel.query.filter(
-            db.or_(ContainerInfoModel.is_entry == True, ContainerInfoModel.stack_id.is_(None))  # noqa: E712
-        )
+        ContainerInfoModel.query.filter(ContainerInfoModel.entry_or_standalone())
         .order_by(ContainerInfoModel.timestamp.desc())
         .all()
     )
@@ -182,8 +180,7 @@ def route_user_flags():
 @containers_bp.route("/api/stats/summary", methods=["GET"])
 @admins_only
 def route_stats_summary():
-    entry_filter = db.or_(ContainerInfoModel.is_entry == True, ContainerInfoModel.stack_id.is_(None))  # noqa: E712
-    active = ContainerInfoModel.query.filter(entry_filter).count()
+    active = ContainerInfoModel.query.filter(ContainerInfoModel.entry_or_standalone()).count()
 
     excluded = _excluded_user_ids()
 

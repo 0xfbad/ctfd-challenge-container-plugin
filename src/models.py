@@ -40,6 +40,12 @@ class ContainerInfoModel(db.Model):
     user = relationship("Users", foreign_keys=[user_id])
     challenge = relationship(ContainerChallengeModel, foreign_keys=[challenge_id])
 
+    @classmethod
+    def entry_or_standalone(cls):
+        # filter: rows representing an entry container of a stack, or a standalone
+        # container with no stack at all. excludes companion rows
+        return db.or_(cls.is_entry == True, cls.stack_id.is_(None))  # noqa: E712
+
 
 class ContainerSettingsModel(db.Model):
     __tablename__ = "container_settings"
