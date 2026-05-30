@@ -70,7 +70,6 @@ def _esc_event(event: dict) -> dict:
 
 
 def _flag_share_to_event(row: ContainerFlagShareModel) -> dict:
-    """convert a persisted flag-share row into the dict shape the dashboard JS expects"""
     if row.owner_team_id is not None:
         source_type = "teams"
         source_id = row.owner_team_id
