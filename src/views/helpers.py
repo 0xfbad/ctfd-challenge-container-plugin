@@ -328,7 +328,7 @@ def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> 
     if user_containers.count() >= max_containers_allowed:
         return {
             "error": f"you can only spawn {max_containers_allowed} containers at a time, please stop other containers to continue"
-        }, 500
+        }, 409
 
     filter_args = {"challenge_id": challenge.id}
     filter_args["team_id" if is_team else "user_id"] = xid
