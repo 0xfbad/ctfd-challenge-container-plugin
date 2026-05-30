@@ -62,8 +62,11 @@ class ContainerManager:
 
     def _ensure_connected(self) -> None:
         if not self.host_manager.has_contexts():
+            # reload contexts only, don't call initialize_connection — that tears
+            # down the expiration scheduler from a request greenlet and apscheduler
+            # raises "cannot join thread before it is started" under load
             try:
-                self.initialize_connection()
+                self.load_docker_contexts()
             except ContainerException:
                 raise ContainerException("docker is not connected")
 
@@ -520,16 +523,19 @@ class ContainerManager:
         self.host_manager._init_semaphores(max_concurrent)
 
     def kill_expired_containers(self, app: Flask) -> None:
-        if not self.host_manager.has_contexts():
-            try:
-                self.initialize_connection()
-            except ContainerException:
-                return
-
-            if not self.host_manager.has_contexts():
-                return
-
         with app.app_context():
+            if not self.host_manager.has_contexts():
+                # reload from db only, don't call initialize_connection — that
+                # tears down the scheduler running this very job and raises
+                # "cannot join current thread" from apscheduler
+                try:
+                    self.load_docker_contexts()
+                except ContainerException:
+                    return
+
+                if not self.host_manager.has_contexts():
+                    return
+
             entries = ContainerInfoModel.query.filter(
                 db.or_(ContainerInfoModel.is_entry == True, ContainerInfoModel.stack_id.is_(None))  # noqa: E712
             ).all()
