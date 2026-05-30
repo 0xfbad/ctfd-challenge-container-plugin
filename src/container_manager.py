@@ -95,6 +95,14 @@ class ContainerManager:
             logger.info("scheduler skipped (CLI mode)")
             return
 
+        # leader election so kill_expired_containers + health_check fire once per
+        # interval, not WORKERS times. file lock is per-process, kernel-released on exit
+        from . import _claim_scheduler_leader
+
+        if not _claim_scheduler_leader():
+            logger.info("scheduler skipped (another worker holds the leader lock)")
+            return
+
         expiration_check_interval = get_setting("expiration_check_interval", 5)
 
         self.expiration_scheduler = BackgroundScheduler()

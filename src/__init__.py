@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import fcntl
+import os
 import socket
+import tempfile
 import time
 import logging
 import docker
@@ -8,7 +11,6 @@ import paramiko
 from flask import Flask
 from CTFd.plugins import register_plugin_assets_directory
 from CTFd.plugins.challenges import CHALLENGE_CLASSES
-import os
 
 from .challenges import ContainerChallenge
 from .models import ContainerSettingsModel
@@ -24,6 +26,37 @@ from .event_logger import event_logger
 from . import event_bus
 
 logger = logging.getLogger(__name__)
+
+# module-global keeps the lock fd alive for the worker's lifetime, kernel releases on exit
+_scheduler_lock_fd = None
+
+
+def _claim_scheduler_leader() -> bool:
+    """try to take the cross-worker scheduler lock. returns True if this worker should run jobs"""
+    global _scheduler_lock_fd
+    lock_path = os.environ.get(
+        "CHALLENGE_CONTAINERS_SCHEDULER_LOCK",
+        os.path.join(tempfile.gettempdir(), "ctfd-challenge-containers-scheduler.lock"),
+    )
+    fd = None
+    try:
+        # open in "a+" so a losing worker doesn't truncate the leader's pid; truncate after flock
+        fd = open(lock_path, "a+")
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            fd.close()
+            return False
+        fd.seek(0)
+        fd.truncate()
+        fd.write(str(os.getpid()))
+        fd.flush()
+        _scheduler_lock_fd = fd
+        return True
+    except OSError:
+        if fd is not None:
+            fd.close()
+        return False
 
 
 def _seed_defaults(app: Flask) -> None:
