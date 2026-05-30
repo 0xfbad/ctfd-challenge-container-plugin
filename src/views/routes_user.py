@@ -16,10 +16,8 @@ from .helpers import (
     create_container,
     renew_container,
     kill_container,
-    sanitize_container_error,
 )
-from ..utils import is_team_mode, DEFAULTS, ratelimit_per_user
-from ..exceptions import ContainerException, ContainerUnavailableException
+from ..utils import is_team_mode, DEFAULTS, ratelimit_per_user, handle_container_errors
 from ..models import ContainerInfoModel
 
 # rate limit values are evaluated at import time (before app context),
@@ -75,13 +73,9 @@ def _resolve_identity(user):
     limit=_RL_VIEW,
     interval=_RL_VIEW_INTERVAL,
 )
+@handle_container_errors
 def get_connect_type_route(challenge_id):
-    try:
-        return connect_type(challenge_id)
-    except ContainerUnavailableException as err:
-        return {"error": sanitize_container_error(err)}, 503
-    except ContainerException as err:
-        return {"error": sanitize_container_error(err)}, 500
+    return connect_type(challenge_id)
 
 
 @containers_bp.route("/api/view_info", methods=["POST"])
@@ -93,6 +87,7 @@ def get_connect_type_route(challenge_id):
     limit=_RL_VIEW,
     interval=_RL_VIEW_INTERVAL,
 )
+@handle_container_errors
 def route_view_info():
     error_response, status_code, user = validate_request(["chal_id"])
     if error_response:
@@ -100,12 +95,7 @@ def route_view_info():
 
     chal_id = int(request.json["chal_id"])
     xid, is_team = _resolve_identity(user)
-    try:
-        return view_container_info(chal_id, xid, is_team)
-    except ContainerUnavailableException as err:
-        return {"error": sanitize_container_error(err)}, 503
-    except ContainerException as err:
-        return {"error": sanitize_container_error(err)}, 500
+    return view_container_info(chal_id, xid, is_team)
 
 
 @containers_bp.route("/api/request", methods=["POST"])
@@ -117,6 +107,7 @@ def route_view_info():
     limit=_RL_MUTATE,
     interval=_RL_MUTATE_INTERVAL,
 )
+@handle_container_errors
 def route_request_container():
     error_response, status_code, user = validate_request(["chal_id"])
     if error_response:
@@ -124,12 +115,7 @@ def route_request_container():
 
     chal_id = int(request.json["chal_id"])
     xid, is_team = _resolve_identity(user)
-    try:
-        return create_container(chal_id, xid, user.id, is_team)
-    except ContainerUnavailableException as err:
-        return {"error": sanitize_container_error(err)}, 503
-    except ContainerException as err:
-        return {"error": sanitize_container_error(err)}, 500
+    return create_container(chal_id, xid, user.id, is_team)
 
 
 @containers_bp.route("/api/renew", methods=["POST"])
@@ -141,6 +127,7 @@ def route_request_container():
     limit=_RL_MUTATE,
     interval=_RL_MUTATE_INTERVAL,
 )
+@handle_container_errors
 def route_renew_container_route():
     error_response, status_code, user = validate_request(["chal_id"])
     if error_response:
@@ -148,12 +135,7 @@ def route_renew_container_route():
 
     chal_id = int(request.json["chal_id"])
     xid, is_team = _resolve_identity(user)
-    try:
-        return renew_container(chal_id, xid, is_team)
-    except ContainerUnavailableException as err:
-        return {"error": sanitize_container_error(err)}, 503
-    except ContainerException as err:
-        return {"error": sanitize_container_error(err)}, 500
+    return renew_container(chal_id, xid, is_team)
 
 
 @containers_bp.route("/api/stop", methods=["POST"])

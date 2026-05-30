@@ -91,6 +91,25 @@ def is_team_mode() -> bool | None:
     return mode == TEAMS_MODE if mode in (TEAMS_MODE, USERS_MODE) else None
 
 
+def handle_container_errors(f):
+    # routes_user wraps every container call in try/except dispatching on the
+    # ContainerException subclass. centralizes that pattern so each route stays
+    # focused on its happy path
+    from .exceptions import ContainerException, ContainerUnavailableException
+    from .views.helpers import sanitize_container_error
+
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        try:
+            return f(*args, **kwargs)
+        except ContainerUnavailableException as err:
+            return {"error": sanitize_container_error(err)}, 503
+        except ContainerException as err:
+            return {"error": sanitize_container_error(err)}, 500
+
+    return wrapper
+
+
 def ratelimit_per_user(method="POST", limit=50, interval=300, key_prefix="rl_user"):
     # ctfd's @ratelimit keys on ip, which falsely throttles students who share an
     # egress ip (campus wifi, nat, vpn). this version keys on user_id when authed
