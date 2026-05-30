@@ -96,9 +96,7 @@ def owner_filter(xid: int, is_team: bool) -> dict[str, int]:
 
 
 def handle_container_errors(f):
-    # routes_user wraps every container call in try/except dispatching on the
-    # ContainerException subclass. centralizes that pattern so each route stays
-    # focused on its happy path
+    # centralize ContainerException dispatch so routes stay focused on happy paths
     from .exceptions import ContainerException, ContainerUnavailableException
     from .views.helpers import sanitize_container_error
 
@@ -115,9 +113,8 @@ def handle_container_errors(f):
 
 
 def ratelimit_per_user(method="POST", limit=50, interval=300, key_prefix="rl_user"):
-    # ctfd's @ratelimit keys on ip, which falsely throttles students who share an
-    # egress ip (campus wifi, nat, vpn). this version keys on user_id when authed
-    # and falls back to ip otherwise. also adds retry-after for polite client backoff
+    # ctfd's @ratelimit keys on ip, which falsely throttles students sharing
+    # an egress ip (campus wifi, nat, vpn)
     def decorator(f):
         @functools.wraps(f)
         def wrapper(*args, **kwargs):

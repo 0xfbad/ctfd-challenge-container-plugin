@@ -62,7 +62,7 @@ class ContainerManager:
 
     def _ensure_connected(self) -> None:
         if not self.host_manager.has_contexts():
-            # reload contexts only, don't call initialize_connection — that tears
+            # reload contexts only, don't call initialize_connection, it tears
             # down the expiration scheduler from a request greenlet and apscheduler
             # raises "cannot join thread before it is started" under load
             try:
@@ -525,7 +525,7 @@ class ContainerManager:
     def kill_expired_containers(self, app: Flask) -> None:
         with app.app_context():
             if not self.host_manager.has_contexts():
-                # reload from db only, don't call initialize_connection — that
+                # reload from db only, don't call initialize_connection, it
                 # tears down the scheduler running this very job and raises
                 # "cannot join current thread" from apscheduler
                 try:
