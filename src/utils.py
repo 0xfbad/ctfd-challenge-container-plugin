@@ -3,17 +3,9 @@ from __future__ import annotations
 import functools
 
 from flask import jsonify, request
-from markupsafe import escape as _markup_escape
 from CTFd.utils import get_config
 
 from .models import ContainerSettingsModel
-
-
-def esc(value: str | None) -> str:
-    """HTML-escape a string for safe browser rendering"""
-    if value is None:
-        return ""
-    return str(_markup_escape(value))
 
 
 DEFAULTS: dict[str, int | str] = {

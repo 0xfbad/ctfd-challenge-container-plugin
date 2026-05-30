@@ -75,6 +75,15 @@
 
 	.log-user a:hover { text-decoration: underline; }
 
+	.team-clip {
+		display: inline-block;
+		max-width: 180px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		vertical-align: bottom;
+	}
+
 	.log-detail {
 		color: #6c757d;
 	}
@@ -765,9 +774,11 @@
 			: '';
 		if (m.team_name && html) {
 			const teamId = safeId(m.team_id);
+			const tip = escapeAttr(m.team_name);
+			const safeName = escapeHtml(m.team_name);
 			const teamHtml = teamId
-				? '<a href="/admin/teams/' + teamId + '">' + escapeHtml(m.team_name) + '</a>'
-				: escapeHtml(m.team_name);
+				? '<a class="team-clip" href="/admin/teams/' + teamId + '" title="' + tip + '">' + safeName + '</a>'
+				: '<span class="team-clip" title="' + tip + '">' + safeName + '</span>';
 			html += ' (' + teamHtml + ')';
 		}
 		return html;
@@ -1013,6 +1024,9 @@
 				const names = data.map(u => u.username);
 				const times = data.map(u => u.total_seconds);
 
+				const visibleRows = 12;
+				const endPct = data.length > visibleRows ? (visibleRows / data.length) * 100 : 100;
+
 				chart.setOption({
 					tooltip: {
 						trigger: 'axis',
@@ -1027,10 +1041,14 @@
 						}
 					},
 					toolbox: { feature: { saveAsImage: {} } },
-					grid: { left: 100, top: 10, bottom: 30, right: 30 },
+					dataZoom: [
+						{ type: 'inside', yAxisIndex: 0, start: 0, end: endPct, zoomLock: data.length <= visibleRows },
+						{ type: 'slider', yAxisIndex: 0, start: 0, end: endPct, width: 14, right: 6, showDetail: false, showDataShadow: false }
+					],
+					grid: { left: 100, top: 10, bottom: 30, right: 40 },
 					xAxis: { type: 'value', axisLabel: { formatter: v => formatDuration(v) } },
-					yAxis: { type: 'category', data: names.reverse() },
-					series: [{ type: 'bar', data: times.reverse(), itemStyle: { color: '#007bff' } }]
+					yAxis: { type: 'category', data: names, inverse: true },
+					series: [{ type: 'bar', data: times, itemStyle: { color: '#007bff' } }]
 				});
 			});
 	}
@@ -1315,17 +1333,21 @@
 			: '';
 		if (m.team_name) {
 			const teamId = safeId(m.team_id);
+			const tip = escapeAttr(m.team_name);
+			const safeName = escapeHtml(m.team_name);
 			const teamHtml = teamId
-				? '<a href="/admin/teams/' + teamId + '">' + escapeHtml(m.team_name) + '</a>'
-				: escapeHtml(m.team_name);
+				? '<a class="team-clip" href="/admin/teams/' + teamId + '" title="' + tip + '">' + safeName + '</a>'
+				: '<span class="team-clip" title="' + tip + '">' + safeName + '</span>';
 			submitter += ' <small class="text-muted">(' + teamHtml + ')</small>';
 		}
 
 		const srcId = safeId(m.source_id);
 		const srcType = m.source_type === 'teams' ? 'teams' : 'users';
 		const ownerBadges = srcType === 'users' ? userBadges(_userFlags[srcId] || {}) : '';
+		const ownerClipClass = srcType === 'teams' ? ' class="team-clip"' : '';
+		const ownerTip = srcType === 'teams' && m.source_entity ? ' title="' + escapeAttr(m.source_entity) + '"' : '';
 		const ownerHtml = m.source_entity
-			? (srcId ? '<a href="/admin/' + srcType + '/' + srcId + '">' + escapeHtml(m.source_entity) + '</a>' + ownerBadges : escapeHtml(m.source_entity))
+			? (srcId ? '<a' + ownerClipClass + ' href="/admin/' + srcType + '/' + srcId + '"' + ownerTip + '>' + escapeHtml(m.source_entity) + '</a>' + ownerBadges : escapeHtml(m.source_entity))
 			: '';
 
 		const chalHtml = m.challenge_name
