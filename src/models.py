@@ -75,3 +75,36 @@ class DockerContextModel(db.Model):
     pub_hostname = db.Column(db.String(512), nullable=False)
     weight = db.Column(db.Integer, default=1)
     enabled = db.Column(db.Boolean, default=True)
+
+
+class ContainerFlagShareModel(db.Model):
+    __tablename__ = "container_flag_shares"
+    # submitted_token is part of the PK-equivalent uniqueness because a single submitter
+    # might try multiple owners' tokens against the same challenge, but the same submitter
+    # double-clicking submit of the same token is just one logical incident
+    __table_args__ = (
+        db.UniqueConstraint(
+            "submitter_user_id",
+            "submitter_team_id",
+            "challenge_id",
+            "submitted_token",
+            name="uq_flag_share_submitter_token",
+        ),
+    )
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    challenge_id = db.Column(db.Integer, db.ForeignKey("challenges.id", ondelete="SET NULL"), nullable=True)
+    submitter_user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    submitter_team_id = db.Column(db.Integer, db.ForeignKey("teams.id", ondelete="SET NULL"), nullable=True)
+    owner_user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    owner_team_id = db.Column(db.Integer, db.ForeignKey("teams.id", ondelete="SET NULL"), nullable=True)
+    # MySQL/MariaDB cannot index a TEXT column without a key length, so cap at 191 chars
+    # to stay under the utf8mb4 single-key 767-byte limit while still fitting any real token
+    submitted_token = db.Column(db.String(191), nullable=True)
+    ip = db.Column(db.String(46), nullable=True)
+    timestamp = db.Column(db.Float(precision=53), index=True)
+
+    submitter_user = relationship("Users", foreign_keys=[submitter_user_id])
+    submitter_team = relationship("Teams", foreign_keys=[submitter_team_id])
+    owner_user = relationship("Users", foreign_keys=[owner_user_id])
+    owner_team = relationship("Teams", foreign_keys=[owner_team_id])
+    challenge = relationship("Challenges", foreign_keys=[challenge_id])

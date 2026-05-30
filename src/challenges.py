@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 import time
@@ -13,12 +14,16 @@ from CTFd.exceptions.challenges import (
     ChallengeUpdateException,
 )
 from CTFd.models import db, Users, Teams, Solves
-from CTFd.utils.user import get_current_user
+from CTFd.utils.user import get_current_user, get_ip
+from flask import request as flask_request
+from sqlalchemy.exc import IntegrityError
 
-from .models import ContainerChallengeModel, ContainerInfoModel, ContainerHistoryModel
+from .models import ContainerChallengeModel, ContainerInfoModel, ContainerHistoryModel, ContainerFlagShareModel
 from .utils import get_setting, _TOKEN_LENGTH_KEY, is_team_mode, owner_filter
 from .freshness import compute_token, render_flag, extract_token
 from .event_logger import event_logger
+
+logger = logging.getLogger(__name__)
 
 _token_map_lock = threading.Lock()
 # cache keyed by (secret, challenge_id, team_mode, token_length) -> (entity_count, {token -> (entity_id, entity_name)})
@@ -46,13 +51,16 @@ def _find_token_owner(
                 return match
             return None
 
+    # snapshot the entities once and count the same list, so a signup that races us
+    # leaves a count mismatch that invalidates the cache on the next request
+    entities = entity_class.query.all()
     token_map: dict[str, tuple[int, str]] = {}
-    for entity in entity_class.query.all():
+    for entity in entities:
         token = compute_token(secret, challenge_id, entity.id, length=token_length)
         token_map[token] = (entity.id, getattr(entity, "name", f"id={entity.id}"))
 
     with _token_map_lock:
-        _token_map_cache[cache_key] = (current_count, token_map)
+        _token_map_cache[cache_key] = (len(entities), token_map)
 
     match = token_map.get(submitted_token)
     if match and match[0] != exclude_xid:
@@ -300,6 +308,25 @@ class ContainerChallenge(BaseChallenge):
                     level="warning",
                     metadata=meta,
                 )
+
+                share_row = ContainerFlagShareModel(
+                    challenge_id=challenge.id,
+                    submitter_user_id=user.id,
+                    submitter_team_id=user.team.id if (team_mode and user.team) else None,
+                    owner_user_id=None if team_mode else source_id,
+                    owner_team_id=source_id if team_mode else None,
+                    submitted_token=submitted_token,
+                    ip=get_ip(flask_request),
+                    timestamp=time.time(),
+                )
+                try:
+                    db.session.add(share_row)
+                    db.session.commit()
+                except IntegrityError:
+                    # unique constraint hit: same submitter already has a row for this token
+                    # on this challenge (e.g. double-click submit). first row is the record
+                    db.session.rollback()
+
                 return False, "this flag belongs to another participant. this attempt has been logged."
 
         return False, "incorrect"

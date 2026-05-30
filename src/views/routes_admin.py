@@ -32,7 +32,13 @@ from ..docker_host_manager import (
     ping_endpoint,
 )
 from ..event_logger import event_logger
-from ..models import ContainerChallengeModel, ContainerHistoryModel, ContainerInfoModel, DockerContextModel
+from ..models import (
+    ContainerChallengeModel,
+    ContainerFlagShareModel,
+    ContainerHistoryModel,
+    ContainerInfoModel,
+    DockerContextModel,
+)
 from ..utils import DEFAULTS, esc, get_setting, is_team_mode, set_setting
 
 logger = logging.getLogger(__name__)
@@ -61,6 +67,45 @@ def _esc_event(event: dict) -> dict:
                 meta[k] = esc(meta[k])
         out["metadata"] = meta
     return out
+
+
+def _flag_share_to_event(row: ContainerFlagShareModel) -> dict:
+    """convert a persisted flag-share row into the dict shape the dashboard JS expects"""
+    if row.owner_team_id is not None:
+        source_type = "teams"
+        source_id = row.owner_team_id
+        source_entity = row.owner_team.name if row.owner_team else None
+    else:
+        source_type = "users"
+        source_id = row.owner_user_id
+        source_entity = row.owner_user.name if row.owner_user else None
+
+    meta: dict = {
+        "challenge_id": row.challenge_id,
+        "challenge_name": row.challenge.name if row.challenge else None,
+        "source_id": source_id,
+        "source_entity": source_entity,
+        "source_type": source_type,
+    }
+    if row.submitter_team_id:
+        meta["team_id"] = row.submitter_team_id
+        if row.submitter_team:
+            meta["team_name"] = row.submitter_team.name
+
+    submitter_name = row.submitter_user.name if row.submitter_user else None
+    chal_name = row.challenge.name if row.challenge else "unknown"
+    msg = f"submitted a flag belonging to '{source_entity or 'unknown'}' on challenge '{chal_name}'"
+
+    return {
+        "id": row.id,
+        "timestamp": row.timestamp,
+        "type": "flag_sharing",
+        "level": "warning",
+        "user_id": row.submitter_user_id,
+        "username": submitter_name,
+        "message": msg,
+        "metadata": meta,
+    }
 
 
 def _get_connection_status(container_manager: ContainerManager) -> tuple[bool, set[str]]:
@@ -216,7 +261,7 @@ def route_stats_summary():
         or 0
     )
 
-    flag_shares = len([e for e in event_logger.get_recent_events(limit=2000) if e.get("type") == "flag_sharing"])
+    flag_shares = ContainerFlagShareModel.query.count()
 
     # sweep line algorithm for peak concurrent containers
     events_list = []
@@ -252,9 +297,20 @@ def route_get_recent_events():
 @containers_bp.route("/api/flag_sharing", methods=["GET"])
 @admins_only
 def route_get_flag_sharing():
-    all_events = event_logger.get_recent_events(limit=2000)
-    sharing = [_esc_event(e) for e in all_events if e.get("type") == "flag_sharing"]
-    return jsonify(events=sharing)
+    rows = (
+        ContainerFlagShareModel.query.options(
+            db.joinedload(ContainerFlagShareModel.submitter_user),
+            db.joinedload(ContainerFlagShareModel.submitter_team),
+            db.joinedload(ContainerFlagShareModel.owner_user),
+            db.joinedload(ContainerFlagShareModel.owner_team),
+            db.joinedload(ContainerFlagShareModel.challenge),
+        )
+        .order_by(ContainerFlagShareModel.timestamp.desc())
+        .limit(500)
+        .all()
+    )
+    events = [_esc_event(_flag_share_to_event(r)) for r in rows]
+    return jsonify(events=events)
 
 
 @containers_bp.route("/api/events/stream", methods=["GET"])
@@ -1102,18 +1158,23 @@ def route_analytics_solve_times():
 def route_analytics_flag_sharing():
     cutoff = _range_cutoff()
 
-    all_events = event_logger.get_recent_events(limit=2000)
-    sharing = [e for e in all_events if e.get("type") == "flag_sharing" and e.get("timestamp", 0) >= cutoff]
+    rows = (
+        ContainerFlagShareModel.query.options(db.joinedload(ContainerFlagShareModel.challenge))
+        .filter(ContainerFlagShareModel.timestamp >= cutoff)
+        .all()
+    )
 
-    if not sharing:
+    if not rows:
         return jsonify(labels=[], counts=[], by_challenge={})
 
     bins: dict[int, int] = {}
     by_challenge: dict[str, int] = {}
-    for e in sharing:
-        hour = int(e["timestamp"]) // 3600 * 3600
+    for r in rows:
+        if not r.timestamp:
+            continue
+        hour = int(r.timestamp) // 3600 * 3600
         bins[hour] = bins.get(hour, 0) + 1
-        cname = esc((e.get("metadata") or {}).get("challenge_name", "unknown"))
+        cname = esc(r.challenge.name if r.challenge else "unknown")
         by_challenge[cname] = by_challenge.get(cname, 0) + 1
 
     if bins:

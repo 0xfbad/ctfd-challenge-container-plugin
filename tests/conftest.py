@@ -49,6 +49,7 @@ _stub_modules = [
     "apscheduler.schedulers.background",
     "sqlalchemy",
     "sqlalchemy.orm",
+    "sqlalchemy.exc",
     "gevent",
     "gevent.monkey",
     "gevent.threadpool",
@@ -88,6 +89,7 @@ _decorators.ratelimit = lambda **_kw: lambda f: f
 
 _user_utils = sys.modules["CTFd.utils.user"]
 _user_utils.get_current_user = MagicMock()
+_user_utils.get_ip = MagicMock(return_value="127.0.0.1")
 
 _ctfd_utils = sys.modules["CTFd.utils"]
 _ctfd_utils.get_config = MagicMock(return_value="users")
@@ -166,6 +168,9 @@ _apscheduler_bg.BackgroundScheduler = MagicMock()
 _sqlalchemy_orm = sys.modules["sqlalchemy.orm"]
 _sqlalchemy_orm.relationship = MagicMock()
 sys.modules["sqlalchemy"].orm = _sqlalchemy_orm
+_sqlalchemy_exc = sys.modules["sqlalchemy.exc"]
+_sqlalchemy_exc.IntegrityError = type("IntegrityError", (Exception,), {})
+sys.modules["sqlalchemy"].exc = _sqlalchemy_exc
 
 # gevent stub: ThreadPool.apply runs the callable synchronously so tests
 # exercise the wrapped code paths without needing a real hub
