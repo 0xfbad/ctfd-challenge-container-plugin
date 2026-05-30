@@ -1043,9 +1043,9 @@
 					toolbox: { feature: { saveAsImage: {} } },
 					dataZoom: [
 						{ type: 'inside', yAxisIndex: 0, start: 0, end: endPct, zoomLock: data.length <= visibleRows },
-						{ type: 'slider', yAxisIndex: 0, start: 0, end: endPct, width: 14, right: 6, showDetail: false, showDataShadow: false }
+						{ type: 'slider', yAxisIndex: 0, start: 0, end: endPct, left: 0 }
 					],
-					grid: { left: 100, top: 10, bottom: 30, right: 40 },
+					grid: { left: 140, top: 10, bottom: 30, right: 30 },
 					xAxis: { type: 'value', axisLabel: { formatter: v => formatDuration(v) } },
 					yAxis: { type: 'category', data: names, inverse: true },
 					series: [{ type: 'bar', data: times, itemStyle: { color: '#007bff' } }]
