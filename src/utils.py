@@ -91,6 +91,10 @@ def is_team_mode() -> bool | None:
     return mode == TEAMS_MODE if mode in (TEAMS_MODE, USERS_MODE) else None
 
 
+def owner_filter(xid: int, is_team: bool) -> dict[str, int]:
+    return {"team_id" if is_team else "user_id": xid}
+
+
 def handle_container_errors(f):
     # routes_user wraps every container call in try/except dispatching on the
     # ContainerException subclass. centralizes that pattern so each route stays

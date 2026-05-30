@@ -11,7 +11,7 @@ from ..models import ContainerInfoModel, ContainerChallengeModel, ContainerHisto
 from ..exceptions import ContainerException, ContainerUnavailableException
 from ..container_manager import ContainerManager
 from ..docker_host_manager import LOCAL_CONTEXT_NAME
-from ..utils import get_setting
+from ..utils import get_setting, owner_filter
 from ..freshness import compute_token
 from ..event_logger import event_logger
 
@@ -234,9 +234,9 @@ def renew_container(chal_id: int, xid: int, is_team: bool) -> JsonResponse | tup
     if challenge is None:
         return {"error": "challenge not found"}, 400
 
-    filter_args = {"challenge_id": challenge.id, "is_entry": True}
-    filter_args["team_id" if is_team else "user_id"] = xid
-    running_container = ContainerInfoModel.query.filter_by(**filter_args).first()
+    running_container = ContainerInfoModel.query.filter_by(
+        challenge_id=challenge.id, is_entry=True, **owner_filter(xid, is_team)
+    ).first()
 
     if running_container is None:
         return {"error": "container not found, try resetting the container"}
@@ -330,9 +330,9 @@ def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> 
             "error": f"you can only spawn {max_containers_allowed} containers at a time, please stop other containers to continue"
         }, 409
 
-    filter_args = {"challenge_id": challenge.id}
-    filter_args["team_id" if is_team else "user_id"] = xid
-    running_container = ContainerInfoModel.query.filter_by(**filter_args).first()
+    running_container = ContainerInfoModel.query.filter_by(
+        challenge_id=challenge.id, **owner_filter(xid, is_team)
+    ).first()
 
     if running_container:
         try:
@@ -538,9 +538,9 @@ def view_container_info(chal_id: int, xid: int, is_team: bool) -> JsonResponse |
     if challenge is None:
         return {"error": "challenge not found"}, 400
 
-    filter_args = {"challenge_id": challenge.id, "is_entry": True}
-    filter_args["team_id" if is_team else "user_id"] = xid
-    running_container = ContainerInfoModel.query.filter_by(**filter_args).first()
+    running_container = ContainerInfoModel.query.filter_by(
+        challenge_id=challenge.id, is_entry=True, **owner_filter(xid, is_team)
+    ).first()
 
     if running_container:
         try:

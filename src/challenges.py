@@ -16,7 +16,7 @@ from CTFd.models import db, Users, Teams, Solves
 from CTFd.utils.user import get_current_user
 
 from .models import ContainerChallengeModel, ContainerInfoModel, ContainerHistoryModel
-from .utils import get_setting, _TOKEN_LENGTH_KEY, is_team_mode
+from .utils import get_setting, _TOKEN_LENGTH_KEY, is_team_mode, owner_filter
 from .freshness import compute_token, render_flag, extract_token
 from .event_logger import event_logger
 
@@ -70,9 +70,7 @@ def _shorten_after_solve(challenge_id: int, xid: int, team_mode: bool) -> int | 
         return None
     expiry_seconds = int(expiry_raw)
 
-    filter_args = {"challenge_id": challenge_id}
-    filter_args["team_id" if team_mode else "user_id"] = xid
-    container = ContainerInfoModel.query.filter_by(**filter_args).first()
+    container = ContainerInfoModel.query.filter_by(challenge_id=challenge_id, **owner_filter(xid, team_mode)).first()
 
     if not container:
         return None

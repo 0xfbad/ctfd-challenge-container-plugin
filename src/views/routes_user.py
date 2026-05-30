@@ -17,7 +17,7 @@ from .helpers import (
     renew_container,
     kill_container,
 )
-from ..utils import is_team_mode, DEFAULTS, ratelimit_per_user, handle_container_errors
+from ..utils import is_team_mode, DEFAULTS, ratelimit_per_user, handle_container_errors, owner_filter
 from ..models import ContainerInfoModel
 
 # rate limit values are evaluated at import time (before app context),
@@ -155,9 +155,7 @@ def route_stop_container():
     chal_id = int(request.json["chal_id"])
     xid, is_team = _resolve_identity(user)
 
-    filter_args = {"challenge_id": chal_id}
-    filter_args["team_id" if is_team else "user_id"] = xid
-    running_container = ContainerInfoModel.query.filter_by(**filter_args).first()
+    running_container = ContainerInfoModel.query.filter_by(challenge_id=chal_id, **owner_filter(xid, is_team)).first()
 
     if running_container:
         return kill_container(running_container.container_id)
