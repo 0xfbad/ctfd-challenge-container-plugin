@@ -264,6 +264,7 @@ def _load_subpackage(name):
 # load in dependency order
 _load_module("models")
 _load_module("event_logger")
+_load_module("event_bus")
 _load_module("utils")
 _load_module("freshness")
 _load_module("exceptions")

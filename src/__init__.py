@@ -20,6 +20,8 @@ from .models import ContainerInfoModel, ContainerHistoryModel, DockerContextMode
 from .views import containers_bp
 from .flag_type import register as register_freshness_flag
 from .freshness import generate_secret
+from .event_logger import event_logger
+from . import event_bus
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +154,8 @@ def load(app: Flask) -> None:
         _reconcile_containers(app, container_manager)
 
     app.container_manager = container_manager
+
+    event_bus.init(app, on_message=event_logger._deliver_local)
 
     app.register_blueprint(containers_bp)
 
