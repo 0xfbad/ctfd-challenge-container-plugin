@@ -102,6 +102,11 @@ def route_get_running_containers():
     container_manager = current_app.container_manager
     running_containers = (
         ContainerInfoModel.query.filter(ContainerInfoModel.entry_or_standalone())
+        .options(
+            db.joinedload(ContainerInfoModel.user),
+            db.joinedload(ContainerInfoModel.team),
+            db.joinedload(ContainerInfoModel.challenge),
+        )
         .order_by(ContainerInfoModel.timestamp.desc())
         .all()
     )
