@@ -36,7 +36,9 @@ def validate_request(
 ) -> tuple[dict[str, str] | None, int | None, Users | None]:
     user = get_current_user()
 
-    if request.json is None:
+    # also guard non-dict json bodies (lists, strings, numbers). without this
+    # check, request.json.get below raises AttributeError on a list payload
+    if not isinstance(request.json, dict):
         return {"error": "invalid request"}, 400, None
 
     for field in required_fields:
