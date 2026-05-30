@@ -284,6 +284,7 @@ class DockerHostManager:
             except Exception:
                 self._clear_client(context_name)
                 return False
+
         return self._call(context_name, _do)
 
     def is_container_running(self, context_name: str, container_id: str) -> bool:
@@ -297,6 +298,7 @@ class DockerHostManager:
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
                 self._clear_client(context_name)
                 raise
+
         return self._call(context_name, _do)
 
     def get_container_port(self, context_name: str, container_id: str) -> str | None:
@@ -314,6 +316,7 @@ class DockerHostManager:
                 self._clear_client(context_name)
                 raise
             return None
+
         return self._call(context_name, _do)
 
     def get_running_container_ids(self, context_name: str) -> set[str]:
@@ -327,6 +330,7 @@ class DockerHostManager:
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
                 self._clear_client(context_name)
                 return set()
+
         return self._call(context_name, _do)
 
     def run_container(
@@ -386,6 +390,7 @@ class DockerHostManager:
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
                 self._clear_client(context_name)
                 raise
+
         return self._call(context_name, _do)
 
     def create_network(
@@ -403,6 +408,7 @@ class DockerHostManager:
                 ipam=ipam_config,
                 labels=labels or {},
             )
+
         return self._call(context_name, _do)
 
     def run_container_on_network(
@@ -505,6 +511,7 @@ class DockerHostManager:
                 except docker.errors.APIError:
                     pass
             return killed
+
         return self._call(context_name, _do)
 
     def get_container_logs(self, context_name: str, container_id: str, tail: int = 200) -> str:
@@ -521,6 +528,7 @@ class DockerHostManager:
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
                 self._clear_client(context_name)
                 raise
+
         return self._call(context_name, _do)
 
     def get_images(self, context_name: str) -> list[str]:
@@ -537,6 +545,7 @@ class DockerHostManager:
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
                 self._clear_client(context_name)
                 return []
+
         return self._call(context_name, _do)
 
     def pull_image(self, context_name: str, image: str) -> str:
@@ -585,4 +594,5 @@ class DockerHostManager:
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
                 self._clear_client(context_name)
                 return None
+
         return self._call(context_name, _do)
