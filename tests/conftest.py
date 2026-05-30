@@ -49,6 +49,9 @@ _stub_modules = [
     "apscheduler.schedulers.background",
     "sqlalchemy",
     "sqlalchemy.orm",
+    "gevent",
+    "gevent.monkey",
+    "gevent.threadpool",
 ]
 
 for mod_name in _stub_modules:
@@ -163,6 +166,26 @@ _apscheduler_bg.BackgroundScheduler = MagicMock()
 _sqlalchemy_orm = sys.modules["sqlalchemy.orm"]
 _sqlalchemy_orm.relationship = MagicMock()
 sys.modules["sqlalchemy"].orm = _sqlalchemy_orm
+
+# gevent stub: ThreadPool.apply runs the callable synchronously so tests
+# exercise the wrapped code paths without needing a real hub
+_gevent = sys.modules["gevent"]
+_gevent_threadpool = sys.modules["gevent.threadpool"]
+_gevent_monkey = sys.modules["gevent.monkey"]
+
+
+class _StubThreadPool:
+    def __init__(self, maxsize=None):
+        pass
+
+    def apply(self, fn, args=None, kwds=None):
+        return fn(*(args or ()), **(kwds or {}))
+
+
+_gevent_threadpool.ThreadPool = _StubThreadPool
+_gevent_monkey.is_module_patched = lambda name: True
+_gevent.threadpool = _gevent_threadpool
+_gevent.monkey = _gevent_monkey
 
 # register src/ as a package so relative imports resolve
 src_dir = Path(__file__).resolve().parent.parent / "src"
