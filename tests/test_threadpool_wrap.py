@@ -80,7 +80,9 @@ def test_pull_image_uses_fresh_client_with_pull_timeout():
     # prime the cache so we can prove pull_image bypasses it
     with patch("docker_host_manager.docker.DockerClient", return_value=cached_client):
         hm._get_client("default")
-    assert hm._clients["default"] is cached_client
+    # cache is thread-local: keys are (context_name, thread_ident)
+    default_clients = [v for k, v in hm._clients.items() if k[0] == "default"]
+    assert default_clients == [cached_client]
 
     with patch("docker_host_manager.docker.DockerClient", return_value=pull_client) as mock_ctor:
         result = hm.pull_image("default", "ubuntu:latest")
@@ -163,9 +165,10 @@ def test_clear_client_removes_and_closes():
     with patch("docker_host_manager.docker.DockerClient", return_value=mock_client):
         hm._get_client("default")
 
-    assert "default" in hm._clients
+    # cache is thread-local: keys are (context_name, thread_ident)
+    assert any(k[0] == "default" for k in hm._clients)
     hm._clear_client("default")
-    assert "default" not in hm._clients
+    assert not any(k[0] == "default" for k in hm._clients)
     mock_client.close.assert_called_once()
 
 
@@ -179,7 +182,7 @@ def test_clear_client_swallows_close_errors():
 
     # must not raise even though close blows up
     hm._clear_client("default")
-    assert "default" not in hm._clients
+    assert not any(k[0] == "default" for k in hm._clients)
 
 
 def test_call_does_not_deadlock_when_fn_invokes_clear_client():
@@ -192,10 +195,10 @@ def test_call_does_not_deadlock_when_fn_invokes_clear_client():
 
     with patch("docker_host_manager.docker.DockerClient", return_value=mock_client):
         hm._get_client("default")
-        assert "default" in hm._clients
+        assert any(k[0] == "default" for k in hm._clients)
 
         result = hm.ping("default")
 
     assert result is False
-    assert "default" not in hm._clients
+    assert not any(k[0] == "default" for k in hm._clients)
     mock_client.close.assert_called_once()

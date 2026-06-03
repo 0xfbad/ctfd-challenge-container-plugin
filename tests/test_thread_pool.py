@@ -64,10 +64,11 @@ def test_clear_client_closes_and_removes():
     mock_client = MagicMock()
     with patch("docker_host_manager.docker.DockerClient", return_value=mock_client):
         hm._get_client("default")
-        assert "default" in hm._clients
+        # cache is thread-local: keys are (context_name, thread_ident)
+        assert any(k[0] == "default" for k in hm._clients)
 
         hm._clear_client("default")
-        assert "default" not in hm._clients
+        assert not any(k[0] == "default" for k in hm._clients)
         mock_client.close.assert_called_once()
 
 
