@@ -321,9 +321,7 @@ def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> 
         return {"error": "challenge not found"}, 400
 
     max_containers_allowed = get_setting("max_containers_per_user")
-    if not is_team:
-        uid = xid
-    user_containers = ContainerInfoModel.query.filter_by(user_id=uid)
+    user_containers = ContainerInfoModel.query.filter_by(**owner_filter(xid, is_team))
 
     if user_containers.count() >= max_containers_allowed:
         return {
