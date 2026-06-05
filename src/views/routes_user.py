@@ -16,6 +16,7 @@ from .helpers import (
     create_container,
     renew_container,
     kill_container,
+    requires_visible_challenge,
 )
 from ..utils import is_team_mode, DEFAULTS, ratelimit_per_user, handle_container_errors, owner_filter
 from ..models import ContainerInfoModel
@@ -88,6 +89,7 @@ def get_connect_type_route(challenge_id):
     interval=_RL_VIEW_INTERVAL,
 )
 @handle_container_errors
+@requires_visible_challenge
 def route_view_info():
     error_response, status_code, user = validate_request(["chal_id"])
     if error_response:
@@ -108,6 +110,7 @@ def route_view_info():
     interval=_RL_MUTATE_INTERVAL,
 )
 @handle_container_errors
+@requires_visible_challenge
 def route_request_container():
     error_response, status_code, user = validate_request(["chal_id"])
     if error_response:
@@ -128,6 +131,7 @@ def route_request_container():
     interval=_RL_MUTATE_INTERVAL,
 )
 @handle_container_errors
+@requires_visible_challenge
 def route_renew_container_route():
     error_response, status_code, user = validate_request(["chal_id"])
     if error_response:

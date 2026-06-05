@@ -76,6 +76,7 @@ for attr in (
     "Response",
     "stream_with_context",
     "current_app",
+    "g",
 ):
     setattr(_flask, attr, MagicMock())
 
@@ -90,6 +91,7 @@ _decorators.ratelimit = lambda **_kw: lambda f: f
 _user_utils = sys.modules["CTFd.utils.user"]
 _user_utils.get_current_user = MagicMock()
 _user_utils.get_ip = MagicMock(return_value="127.0.0.1")
+_user_utils.is_admin = MagicMock(return_value=False)
 
 _ctfd_utils = sys.modules["CTFd.utils"]
 _ctfd_utils.get_config = MagicMock(return_value="users")

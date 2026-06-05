@@ -3,9 +3,11 @@ from __future__ import annotations
 import time
 import logging
 import threading
+from functools import wraps
 
-from flask import current_app, request
+from flask import current_app, g, request
 from CTFd.models import db
+from CTFd.utils.user import is_admin
 
 from ..models import ContainerInfoModel, ContainerChallengeModel, ContainerHistoryModel, DockerContextModel
 from ..exceptions import ContainerException, ContainerUnavailableException
@@ -35,6 +37,56 @@ def _get_create_lock(chal_id: int, xid: int, is_team: bool) -> threading.Lock:
                     del _create_locks[k]
             _create_locks[key] = threading.Lock()
         return _create_locks[key]
+
+
+def _resolve_challenge(chal_id: int) -> ContainerChallengeModel | None:
+    """Return the challenge stashed by `requires_visible_challenge` if it matches,
+    else fall back to a direct query (helpers may be called outside the decorator,
+    e.g. from tests or admin paths)."""
+    stashed = getattr(g, "challenge", None)
+    if stashed is not None and getattr(stashed, "id", None) == chal_id:
+        return stashed
+    return ContainerChallengeModel.query.filter_by(id=chal_id).first()
+
+
+def requires_visible_challenge(f):
+    """Gate user routes on challenge visibility/state.
+
+    Resolves chal_id from kwargs or json body, loads the challenge once,
+    stashes it on flask.g, and aborts hidden/locked for non-admins. Mirrors
+    CTFd core's pattern (see CTFd/api/v1/challenges.py:705-709,1027,1198).
+    """
+
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        chal_id = kwargs.get("chal_id")
+        if chal_id is None:
+            chal_id = kwargs.get("challenge_id")
+        if chal_id is None and isinstance(request.json, dict):
+            chal_id = request.json.get("chal_id")
+
+        try:
+            chal_id = int(chal_id) if chal_id is not None else None
+        except (TypeError, ValueError):
+            chal_id = None
+
+        if chal_id is None:
+            return {"error": "challenge not found"}, 404
+
+        challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
+        if challenge is None:
+            return {"error": "challenge not found"}, 404
+
+        admin = is_admin()
+        if challenge.state == "hidden" and not admin:
+            return {"error": "challenge not found"}, 404
+        if challenge.state == "locked" and not admin:
+            return {"error": "challenge locked"}, 403
+
+        g.challenge = challenge
+        return f(*args, **kwargs)
+
+    return wrapper
 
 
 _USER_SAFE_PATTERNS = (
@@ -229,8 +281,7 @@ def kill_container(container_id: str) -> JsonResponse:
 
 
 def renew_container(chal_id: int, xid: int, is_team: bool) -> JsonResponse | tuple[JsonResponse, int]:
-    challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
-
+    challenge = _resolve_challenge(chal_id)
     if challenge is None:
         return {"error": "challenge not found"}, 400
 
@@ -315,8 +366,7 @@ def create_container(chal_id: int, xid: int, uid: int, is_team: bool) -> JsonRes
 
 def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> JsonResponse | tuple[JsonResponse, int]:
     container_manager = current_app.container_manager
-    challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
-
+    challenge = _resolve_challenge(chal_id)
     if challenge is None:
         return {"error": "challenge not found"}, 400
 
@@ -531,8 +581,7 @@ def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> 
 
 def view_container_info(chal_id: int, xid: int, is_team: bool) -> JsonResponse | tuple[JsonResponse, int]:
     container_manager = current_app.container_manager
-    challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
-
+    challenge = _resolve_challenge(chal_id)
     if challenge is None:
         return {"error": "challenge not found"}, 400
 
