@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 CPU_QUOTA_BASE = 100000
 _SSH_CAPS = ["SYS_CHROOT", "SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "AUDIT_WRITE"]
 
+# admin-supplied cap_add is filtered against this set. anything else (SYS_ADMIN,
+# SYS_MODULE, etc) is dropped with a warning - granted caps survive no-new-privileges
+_ALLOWED_CAPS = frozenset({"NET_ADMIN", "NET_RAW", "SYS_PTRACE", "SYS_NICE"})
+
 _VOLUME_BLOCKED_PATHS = frozenset(
     {
         "/etc/shadow",
@@ -39,15 +43,26 @@ _VOLUME_BLOCKED_PATHS = frozenset(
 )
 
 
-def _build_caps(ctype: str | None, cap_add: str | None) -> list[str]:
-    caps = []
+def _filter_admin_caps(cap_add: str | None, chal_id: int | str | None = None) -> list[str]:
+    if not cap_add:
+        return []
+    safe: list[str] = []
+    for c in cap_add.split(","):
+        c = c.strip().upper()
+        if not c:
+            continue
+        if c in _ALLOWED_CAPS:
+            safe.append(c)
+        else:
+            logger.warning("dropping disallowed cap %r for challenge %s", c, chal_id)
+    return safe
+
+
+def _build_caps(ctype: str | None, cap_add: str | None, chal_id: int | str | None = None) -> list[str]:
+    caps: list[str] = []
     if ctype == "ssh":
         caps.extend(_SSH_CAPS)
-    if cap_add:
-        for c in cap_add.split(","):
-            c = c.strip().upper()
-            if c:
-                caps.append(c)
+    caps.extend(_filter_admin_caps(cap_add, chal_id))
     return list(set(caps)) if caps else []
 
 
@@ -252,7 +267,7 @@ class ContainerManager:
         kwargs["name"] = container_name
         kwargs["hostname"] = container_hostname
 
-        caps = _build_caps(ctype, cap_add)
+        caps = _build_caps(ctype, cap_add, chal_id)
         if caps:
             kwargs["cap_add"] = caps
 
@@ -403,7 +418,7 @@ class ContainerManager:
             self.host_manager.create_network(context_name, net_name, subnet=subnet, labels=stack_labels)
 
             entry_kwargs: dict[str, _DockerRunVal] = {"labels": stack_labels}
-            entry_caps = _build_caps(ctype, cap_add)
+            entry_caps = _build_caps(ctype, cap_add, chal_id)
             if entry_caps:
                 entry_kwargs["cap_add"] = entry_caps
             if max_memory_mb:
@@ -437,7 +452,7 @@ class ContainerManager:
                 svc_caps: list[str] = []
                 svc_cap_add = svc_cfg.get("cap_add")
                 if isinstance(svc_cap_add, str) and svc_cap_add:
-                    svc_caps = [c.strip() for c in svc_cap_add.split(",") if c.strip()]
+                    svc_caps = _filter_admin_caps(svc_cap_add, chal_id)
 
                 svc_kwargs: dict[str, _DockerRunVal] = {"labels": stack_labels}
                 if svc_caps:
