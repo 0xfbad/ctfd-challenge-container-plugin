@@ -608,3 +608,65 @@ class ContainerManager:
                 db.session.delete(row)
             if killed_rows:
                 db.session.commit()
+
+            self._reconcile_orphans()
+
+    # create_stack rolls back on failure but a docker/ssh outage mid-create can leave
+    # containers running with no DB row to expire them. this sweep diffs actual docker
+    # state against ContainerInfoModel and kills anything stale enough to be safe.
+    # matches stacks by the ctf.stack_id label and standalones by the chal- name prefix
+    RECONCILE_STACK_LABEL = "ctf.stack_id"
+    RECONCILE_NAME_PREFIX = "chal-"
+    RECONCILE_SAFETY_AGE_SECONDS = 300
+
+    def _reconcile_orphans(self) -> None:
+        db_ids = {r.container_id for r in ContainerInfoModel.query.with_entities(ContainerInfoModel.container_id).all()}
+        now = time.time()
+
+        for ctx_name in self.host_manager.get_connected_contexts():
+            seen_ids: set[str] = set()
+            entries: list[dict[str, str | float]] = []
+
+            try:
+                entries.extend(self.host_manager.list_containers_by_label(ctx_name, self.RECONCILE_STACK_LABEL))
+            except Exception as e:
+                logger.warning(f"reconcile: list by label failed on {ctx_name}: {e}")
+
+            try:
+                entries.extend(self.host_manager.list_containers_by_prefix(ctx_name, self.RECONCILE_NAME_PREFIX))
+            except Exception as e:
+                logger.warning(f"reconcile: list by prefix failed on {ctx_name}: {e}")
+
+            for entry in entries:
+                cid = str(entry.get("id", ""))
+                name = str(entry.get("name", ""))
+                if not cid or cid in seen_ids:
+                    continue
+                seen_ids.add(cid)
+
+                if cid in db_ids:
+                    continue
+
+                created_ts = float(entry.get("created_ts", 0) or 0)
+                # safety window guards against racing a brand-new container whose DB row
+                # hasn't committed yet. created_ts == 0 means parse failed, treat as too-young
+                age = now - created_ts if created_ts > 0 else 0
+                if age < self.RECONCILE_SAFETY_AGE_SECONDS:
+                    continue
+
+                logger.warning(f"reconcile: stopping orphan {name} ({cid[:12]}) on {ctx_name} (age {int(age)}s)")
+                try:
+                    self.host_manager.stop_container(ctx_name, cid)
+                    event_logger.log_event(
+                        "orphan_reaped",
+                        f"reaped orphan container {name} on {ctx_name}",
+                        level="warning",
+                        metadata={
+                            "context": ctx_name,
+                            "container_name": name,
+                            "container_id": cid,
+                            "age_seconds": int(age),
+                        },
+                    )
+                except Exception as e:
+                    logger.error(f"reconcile: failed to stop {name} on {ctx_name}: {e}")
