@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import docker
+import paramiko
 import pytest
 
 from docker_host_manager import (
@@ -11,6 +12,7 @@ from docker_host_manager import (
     PULL_CLIENT_TIMEOUT,
     THREADPOOL_SIZE,
 )
+from exceptions import ContainerUnavailableException
 
 
 def make_host_manager(contexts=None):
@@ -202,3 +204,129 @@ def test_call_does_not_deadlock_when_fn_invokes_clear_client():
     assert result is False
     assert not any(k[0] == "default" for k in hm._clients)
     mock_client.close.assert_called_once()
+
+
+def test_invoke_client_op_passes_through_return_value():
+    hm = make_host_manager()
+    result = hm._invoke_client_op("default", lambda: 42)
+    assert result == 42
+
+
+def test_invoke_client_op_dockerexception_clears_client_and_reraises():
+    hm = make_host_manager()
+    mock_client = MagicMock()
+    with patch("docker_host_manager.docker.DockerClient", return_value=mock_client):
+        hm._get_client("default")
+    assert any(k[0] == "default" for k in hm._clients)
+
+    sentinel = docker.errors.DockerException("nope")
+
+    def _do():
+        raise sentinel
+
+    with pytest.raises(docker.errors.DockerException) as exc_info:
+        hm._invoke_client_op("default", _do)
+    assert exc_info.value is sentinel
+    assert not any(k[0] == "default" for k in hm._clients)
+    mock_client.close.assert_called_once()
+
+
+def test_invoke_client_op_sshexception_clears_client_and_reraises():
+    hm = make_host_manager()
+    mock_client = MagicMock()
+    with patch("docker_host_manager.docker.DockerClient", return_value=mock_client):
+        hm._get_client("default")
+
+    sentinel = paramiko.ssh_exception.SSHException("ssh dead")
+
+    def _do():
+        raise sentinel
+
+    with pytest.raises(paramiko.ssh_exception.SSHException) as exc_info:
+        hm._invoke_client_op("default", _do)
+    assert exc_info.value is sentinel
+    assert not any(k[0] == "default" for k in hm._clients)
+
+
+def test_invoke_client_op_broad_exception_maps_to_container_unavailable():
+    # the gevent.InvalidThreadUseError case: a non-docker, non-ssh exception
+    # must be converted to ContainerUnavailableException and the cached client
+    # dropped so the next call rebuilds from scratch
+    hm = make_host_manager()
+    mock_client = MagicMock()
+    with patch("docker_host_manager.docker.DockerClient", return_value=mock_client):
+        hm._get_client("default")
+    assert any(k[0] == "default" for k in hm._clients)
+
+    class FakeInvalidThreadUseError(Exception):
+        pass
+
+    def _do():
+        raise FakeInvalidThreadUseError("hub mismatch")
+
+    with pytest.raises(ContainerUnavailableException) as exc_info:
+        hm._invoke_client_op("default", _do)
+    assert "default" in str(exc_info.value)
+    assert not any(k[0] == "default" for k in hm._clients)
+    mock_client.close.assert_called_once()
+
+
+def test_invoke_client_op_preserves_method_specific_return():
+    # method-specific exceptions (NotFound, KeyError) are meant to be caught
+    # inside fn and translated to a return value. confirm a fn that handles its
+    # own NotFound and returns False is passed through unchanged
+    hm = make_host_manager()
+
+    def _do():
+        try:
+            raise docker.errors.NotFound("missing")
+        except docker.errors.NotFound:
+            return False
+
+    assert hm._invoke_client_op("default", _do) is False
+
+
+def test_create_network_clears_client_on_transient_failure():
+    # create_network was previously unpatched; confirm the refactor gives it
+    # the broad coverage by simulating a non-docker transient error
+    hm = make_host_manager()
+    mock_client = MagicMock()
+
+    class FakeInvalidThreadUseError(Exception):
+        pass
+
+    mock_client.networks.create.side_effect = FakeInvalidThreadUseError("hub mismatch")
+
+    with patch("docker_host_manager.docker.DockerClient", return_value=mock_client):
+        hm._get_client("default")
+        assert any(k[0] == "default" for k in hm._clients)
+
+        with pytest.raises(ContainerUnavailableException):
+            hm.create_network("default", "net-1")
+
+    assert not any(k[0] == "default" for k in hm._clients)
+
+
+def test_run_container_on_network_clears_client_on_transient_failure():
+    # same coverage check for run_container_on_network (no-port branch)
+    hm = make_host_manager()
+    mock_client = MagicMock()
+
+    class FakeInvalidThreadUseError(Exception):
+        pass
+
+    mock_client.containers.run.side_effect = FakeInvalidThreadUseError("hub mismatch")
+
+    with patch("docker_host_manager.docker.DockerClient", return_value=mock_client):
+        hm._get_client("default")
+        with pytest.raises(ContainerUnavailableException):
+            hm.run_container_on_network(
+                "default",
+                "alpine",
+                "net-1",
+                "container-1",
+                None,
+                {},
+            )
+
+    assert not any(k[0] == "default" for k in hm._clients)

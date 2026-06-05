@@ -223,6 +223,25 @@ class DockerHostManager:
             except Exception:
                 pass
 
+    def _invoke_client_op(self, context_name, fn):
+        # shared broad-catch: DockerException/SSHException drop the cached client
+        # and re-raise as is. anything else (gevent.InvalidThreadUseError, paramiko
+        # ChannelException, etc) surfaces when the cached client is reused from a
+        # different gevent hub, drop the client and surface as a typed transient.
+        # method-specific exceptions (NotFound, KeyError, etc) MUST be handled
+        # inside fn before they reach this layer
+        try:
+            return fn()
+        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+            self._clear_client(context_name)
+            raise
+        except Exception:
+            self._clear_client(context_name)
+            raise ContainerUnavailableException(f"transient client failure on {context_name}")
+
+    def _call_with_client_op(self, context_name, fn):
+        return self._call(context_name, lambda: self._invoke_client_op(context_name, fn))
+
     def _init_semaphores(self, limit: int) -> None:
         new_semaphores = {}
         for ctx_name in self._context_configs:
@@ -319,17 +338,8 @@ class DockerHostManager:
                 return container.status == "running"
             except docker.errors.NotFound:
                 return False
-            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
-                self._clear_client(context_name)
-                raise
-            except Exception:
-                # gevent.InvalidThreadUseError, paramiko ChannelException etc surface when the cached
-                # client is reused from a different gevent hub. drop the client and surface as a typed
-                # transient
-                self._clear_client(context_name)
-                raise ContainerUnavailableException(f"transient client failure on {context_name}")
 
-        return self._call(context_name, _do)
+        return self._call_with_client_op(context_name, _do)
 
     def get_container_port(self, context_name: str, container_id: str) -> str | None:
         def _do():
@@ -342,18 +352,9 @@ class DockerHostManager:
                         return port_mappings[0]["HostPort"]
             except (KeyError, IndexError, docker.errors.NotFound):
                 return None
-            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
-                self._clear_client(context_name)
-                raise
-            except Exception:
-                # gevent.InvalidThreadUseError, paramiko ChannelException etc surface when the cached
-                # client is reused from a different gevent hub. drop the client and surface as a typed
-                # transient
-                self._clear_client(context_name)
-                raise ContainerUnavailableException(f"transient client failure on {context_name}")
             return None
 
-        return self._call(context_name, _do)
+        return self._call_with_client_op(context_name, _do)
 
     def get_running_container_ids(self, context_name: str) -> set[str]:
         def _do():
@@ -404,21 +405,11 @@ class DockerHostManager:
                     if "port is already allocated" in str(e) or "address already in use" in str(e):
                         last_err = e
                         continue
-                    self._clear_client(context_name)
                     raise
-                except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
-                    self._clear_client(context_name)
-                    raise
-                except Exception:
-                    # gevent.InvalidThreadUseError, paramiko ChannelException etc surface when the cached
-                    # client is reused from a different gevent hub. drop the client and surface as a typed
-                    # transient
-                    self._clear_client(context_name)
-                    raise ContainerUnavailableException(f"transient client failure on {context_name}")
 
             raise docker.errors.DockerException(f"failed to find available port after retries: {last_err}")
 
-        return self._call(context_name, _do)
+        return self._call_with_client_op(context_name, _do)
 
     def kill_container(self, context_name: str, container_id: str) -> bool:
         def _do():
@@ -429,17 +420,8 @@ class DockerHostManager:
                 return True
             except docker.errors.NotFound:
                 return False
-            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
-                self._clear_client(context_name)
-                raise
-            except Exception:
-                # gevent.InvalidThreadUseError, paramiko ChannelException etc surface when the cached
-                # client is reused from a different gevent hub. drop the client and surface as a typed
-                # transient
-                self._clear_client(context_name)
-                raise ContainerUnavailableException(f"transient client failure on {context_name}")
 
-        return self._call(context_name, _do)
+        return self._call_with_client_op(context_name, _do)
 
     def create_network(
         self, context_name: str, network_name: str, subnet: str | None = None, labels: dict[str, str] | None = None
@@ -457,7 +439,7 @@ class DockerHostManager:
                 labels=labels or {},
             )
 
-        return self._call(context_name, _do)
+        return self._call_with_client_op(context_name, _do)
 
     def run_container_on_network(
         self,
@@ -533,7 +515,7 @@ class DockerHostManager:
                     network.connect(container, ipv4_address=ip_address)
                 return container, None
 
-        return self._call(context_name, _do)
+        return self._call_with_client_op(context_name, _do)
 
     def kill_stack(self, context_name: str, stack_id: str) -> int:
         # background expiry runs against rows whose context may have failed to
@@ -543,34 +525,24 @@ class DockerHostManager:
                 return 0
 
         def _do():
-            try:
-                client = self._get_client(context_name)
-                killed = 0
-                containers = client.containers.list(filters={"label": f"ctf.stack_id={stack_id}"}, all=True)
-                for c in containers:
-                    try:
-                        c.kill()
-                        killed += 1
-                    except (docker.errors.NotFound, docker.errors.APIError):
-                        pass
-                networks = client.networks.list(filters={"label": f"ctf.stack_id={stack_id}"})
-                for n in networks:
-                    try:
-                        n.remove()
-                    except docker.errors.APIError:
-                        pass
-                return killed
-            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
-                self._clear_client(context_name)
-                raise
-            except Exception:
-                # gevent.InvalidThreadUseError, paramiko ChannelException etc surface when the cached
-                # client is reused from a different gevent hub. drop the client and surface as a typed
-                # transient
-                self._clear_client(context_name)
-                raise ContainerUnavailableException(f"transient client failure on {context_name}")
+            client = self._get_client(context_name)
+            killed = 0
+            containers = client.containers.list(filters={"label": f"ctf.stack_id={stack_id}"}, all=True)
+            for c in containers:
+                try:
+                    c.kill()
+                    killed += 1
+                except (docker.errors.NotFound, docker.errors.APIError):
+                    pass
+            networks = client.networks.list(filters={"label": f"ctf.stack_id={stack_id}"})
+            for n in networks:
+                try:
+                    n.remove()
+                except docker.errors.APIError:
+                    pass
+            return killed
 
-        return self._call(context_name, _do)
+        return self._call_with_client_op(context_name, _do)
 
     def get_container_logs(self, context_name: str, container_id: str, tail: int = 200) -> str:
         def _do():
@@ -583,17 +555,8 @@ class DockerHostManager:
                 return output
             except docker.errors.NotFound:
                 return ""
-            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
-                self._clear_client(context_name)
-                raise
-            except Exception:
-                # gevent.InvalidThreadUseError, paramiko ChannelException etc surface when the cached
-                # client is reused from a different gevent hub. drop the client and surface as a typed
-                # transient
-                self._clear_client(context_name)
-                raise ContainerUnavailableException(f"transient client failure on {context_name}")
 
-        return self._call(context_name, _do)
+        return self._call_with_client_op(context_name, _do)
 
     def get_images(self, context_name: str) -> list[str]:
         def _do():
