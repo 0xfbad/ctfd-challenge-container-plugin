@@ -816,21 +816,6 @@
 		if (wrapper) wrapper.scrollTop = 0;
 	}
 
-	function loadRecentEvents() {
-		fetch('/containers/api/events/recent')
-			.then(response => response.json())
-			.then(data => {
-				const feed = document.getElementById('event-feed');
-				feed.innerHTML = '';
-				if (!data.events || data.events.length === 0) {
-					feed.innerHTML = '<tr id="event-feed-empty"><td colspan="4" class="text-center text-muted py-3">No activity yet</td></tr>';
-					return;
-				}
-				data.events.forEach(event => addEventToFeed(event));
-			})
-			.catch(error => console.error('Error loading events:', error));
-	}
-
 	function connectEventStream() {
 		if (eventSource) {
 			eventSource.close();
@@ -871,21 +856,6 @@
 			clearInterval(countdownInterval);
 			countdownInterval = null;
 		}
-	}
-
-	function clearHistory() {
-		if (!confirm('Clear all container history? This resets stats and charts.')) return;
-		fetch('/containers/api/clear_history', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json', 'CSRF-Token': init.csrfNonce }
-		})
-		.then(r => r.json())
-		.then(data => {
-			if (data.success) {
-				refreshStats();
-				loadAllCharts();
-			}
-		});
 	}
 
 	function purgeContainers() {

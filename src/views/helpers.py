@@ -13,7 +13,7 @@ from ..models import ContainerInfoModel, ContainerChallengeModel, ContainerHisto
 from ..exceptions import ContainerException, ContainerUnavailableException
 from ..container_manager import ContainerManager
 from ..docker_host_manager import LOCAL_CONTEXT_NAME
-from ..utils import get_setting, owner_filter
+from ..utils import get_setting, owner_filter, sanitize_container_error
 from ..freshness import compute_token
 from ..event_logger import event_logger
 
@@ -89,27 +89,6 @@ def requires_visible_challenge(f):
     return wrapper
 
 
-_USER_SAFE_PATTERNS = (
-    "no renewals remaining",
-    "container not found",
-    "challenge not found",
-    "you can only spawn",
-    "another container request is in progress",
-    "docker image not found",
-    "memory limit must be",
-    "cpu limit must be",
-)
-
-
-def sanitize_container_error(err: ContainerException | Exception) -> str:
-    msg = str(err)
-    lower = msg.lower()
-    if any(p in lower for p in _USER_SAFE_PATTERNS):
-        return msg
-    logger.error(f"container error (sanitized): {msg}")
-    return "a server error occurred, please try again"
-
-
 def log_container_event(
     event_type: str,
     message: str,
@@ -138,15 +117,33 @@ def log_container_event(
     )
 
 
+def resolve_expiration(challenge: ContainerChallengeModel) -> int:
+    return int(challenge.expiration_seconds or get_setting("default_expiration_seconds", 1800) or 1800)
+
+
+def resolve_max_renewals(challenge: ContainerChallengeModel) -> int:
+    # `is None` (not `or`) so a challenge with max_renewals=0 keeps renewals disabled
+    max_renewals = challenge.max_renewals
+    if max_renewals is None:
+        max_renewals = get_setting("default_max_renewals", 2)
+    return int(max_renewals)
+
+
+def _delete_container_rows(container: ContainerInfoModel) -> None:
+    # stack rows share a stack_id; deleting the entry alone would leak companion rows
+    if container.stack_id:
+        for row in ContainerInfoModel.query.filter_by(stack_id=container.stack_id).all():
+            db.session.delete(row)
+    else:
+        db.session.delete(container)
+
+
 def build_connection_response(
     status: str,
     challenge: ContainerChallengeModel,
     container: ContainerInfoModel,
     context_name: str | None,
 ) -> JsonResponse:
-    max_renewals = challenge.max_renewals
-    if max_renewals is None:
-        max_renewals = get_setting("default_max_renewals", 2)
     return {
         "status": status,
         "hostname": get_hostname_for_context(context_name),
@@ -156,7 +153,7 @@ def build_connection_response(
         "connect": challenge.ctype,
         "expires": container.expires,
         "renewals_used": container.renewals_used or 0,
-        "max_renewals": max_renewals,
+        "max_renewals": resolve_max_renewals(challenge),
     }
 
 
@@ -295,19 +292,13 @@ def renew_container(chal_id: int, xid: int, is_team: bool) -> JsonResponse | tup
     container_manager = current_app.container_manager
     try:
         if not container_manager.is_container_running(running_container.container_id, running_container.docker_context):
-            if running_container.stack_id:
-                for s in ContainerInfoModel.query.filter_by(stack_id=running_container.stack_id).all():
-                    db.session.delete(s)
-            else:
-                db.session.delete(running_container)
+            _delete_container_rows(running_container)
             db.session.commit()
             return {"error": "container not found, try resetting the container"}
     except ContainerException:
         return {"error": "the container host is temporarily unreachable, please wait"}
 
-    max_renewals = challenge.max_renewals
-    if max_renewals is None:
-        max_renewals = get_setting("default_max_renewals", 2)
+    max_renewals = resolve_max_renewals(challenge)
     renewals_used = running_container.renewals_used or 0
 
     if renewals_used >= max_renewals:
@@ -316,7 +307,7 @@ def renew_container(chal_id: int, xid: int, is_team: bool) -> JsonResponse | tup
     now = int(time.time())
     time_remaining = max(0, (running_container.expires or 0) - now)
 
-    expiration = int(challenge.expiration_seconds or get_setting("default_expiration_seconds", 1800) or 1800)
+    expiration = resolve_expiration(challenge)
     new_expires = now + expiration
     running_container.expires = new_expires
     running_container.renewals_used = renewals_used + 1
@@ -390,7 +381,7 @@ def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> 
                 )
                 return response
             else:
-                db.session.delete(running_container)
+                _delete_container_rows(running_container)
                 db.session.commit()
         except ContainerUnavailableException:
             return {"error": "container service temporarily unavailable"}, 503
@@ -412,7 +403,7 @@ def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> 
 
     extra_env_or_none: dict[str, str] | None = extra_env or None
 
-    expiration = int(challenge.expiration_seconds or get_setting("default_expiration_seconds", 1800) or 1800)
+    expiration = resolve_expiration(challenge)
     expires = int(time.time() + expiration)
     now = int(time.time())
 
@@ -430,7 +421,7 @@ def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> 
                     "containers": h["active_containers"],
                     "weight": h["weight"],
                     "healthy": h["healthy"],
-                    "score": round(h["weight"] / (h["active_containers"] + 1), 2) if h["healthy"] else 0,
+                    "score": round(h["score"], 2) if h["healthy"] else 0,
                 }
                 for h in host_status
             },
@@ -504,7 +495,9 @@ def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> 
             try:
                 container_manager.host_manager.kill_stack(context_name, stack_id)
             except Exception:
-                logger.debug("failed to clean up stack %s after db error", stack_id, exc_info=True)
+                logger.warning(
+                    "failed to clean up stack %s after db error (may leak until reconcile)", stack_id, exc_info=True
+                )
             return {"error": "database error, stack has been cleaned up"}, 500
 
         new_container = entry_row
@@ -554,7 +547,7 @@ def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> 
             try:
                 container_manager.kill_container(created_container.id, context_name)
             except Exception:
-                logger.debug("failed to clean up container after db error", exc_info=True)
+                logger.warning("failed to clean up container after db error (may leak until reconcile)", exc_info=True)
             return {"error": "database error, container has been cleaned up"}, 500
 
     user_id = new_container.user_id
@@ -597,12 +590,7 @@ def view_container_info(chal_id: int, xid: int, is_team: bool) -> JsonResponse |
                 )
                 return response
             else:
-                if running_container.stack_id:
-                    stale = ContainerInfoModel.query.filter_by(stack_id=running_container.stack_id).all()
-                    for s in stale:
-                        db.session.delete(s)
-                else:
-                    db.session.delete(running_container)
+                _delete_container_rows(running_container)
                 db.session.commit()
                 return {"status": "instance not started"}
         except ContainerException:

@@ -20,8 +20,8 @@ from CTFd.utils.decorators import admins_only
 from CTFd.utils.user import get_current_user
 
 from . import containers_bp
-from .helpers import get_hostname_for_context, kill_container
-from ..container_manager import ContainerManager
+from .helpers import get_hostname_for_context, kill_container, resolve_expiration
+from ..container_manager import ContainerManager, container_name
 from ..exceptions import ContainerException
 from ..docker_host_manager import (
     LOCAL_CONTEXT_NAME,
@@ -31,7 +31,14 @@ from ..docker_host_manager import (
     discover_contexts,
     ping_endpoint,
 )
-from ..event_logger import event_logger
+from ..event_logger import (
+    dense_user_flags,
+    event_logger,
+    flag_share_message,
+    flag_share_metadata,
+    sparse_user_flags,
+    user_flag_values,
+)
 from ..models import (
     ContainerChallengeModel,
     ContainerFlagShareModel,
@@ -59,21 +66,19 @@ def _flag_share_to_event(row: ContainerFlagShareModel) -> dict:
         source_id = row.owner_user_id
         source_entity = row.owner_user.name if row.owner_user else None
 
-    meta: dict = {
-        "challenge_id": row.challenge_id,
-        "challenge_name": row.challenge.name if row.challenge else None,
-        "source_id": source_id,
-        "source_entity": source_entity,
-        "source_type": source_type,
-    }
-    if row.submitter_team_id:
-        meta["team_id"] = row.submitter_team_id
-        if row.submitter_team:
-            meta["team_name"] = row.submitter_team.name
+    meta = flag_share_metadata(
+        row.challenge_id,
+        row.challenge.name if row.challenge else None,
+        source_id,
+        source_entity,
+        source_type,
+        team_id=row.submitter_team_id,
+        team_name=row.submitter_team.name if row.submitter_team else None,
+    )
 
     submitter_name = row.submitter_user.name if row.submitter_user else None
     chal_name = row.challenge.name if row.challenge else "unknown"
-    msg = f"submitted a flag belonging to '{source_entity or 'unknown'}' on challenge '{chal_name}'"
+    msg = flag_share_message(submitter_name, source_entity or "unknown", chal_name)
 
     return {
         "id": row.id,
@@ -145,20 +150,18 @@ def route_get_running_containers():
 
         hostname = get_hostname_for_context(container.docker_context)
 
-        container_name = f"chal-u{container.user_id}-c{container.challenge_id}-{container.timestamp}"
+        cname = container_name(container.user_id, container.challenge_id, container.timestamp)
 
         user_obj = container.user
         container_data = {
             "container_id": container.container_id,
-            "container_name": container_name,
+            "container_name": cname,
             "image": container.challenge.image,
             "challenge": container.challenge.name,
             "challenge_id": container.challenge_id,
             "user": user_obj.name,
             "user_id": container.user_id,
-            "is_admin": user_obj.type == "admin" if user_obj else False,
-            "is_hidden": getattr(user_obj, "hidden", False),
-            "is_banned": getattr(user_obj, "banned", False),
+            **dense_user_flags(user_flag_values(user_obj)),
             "port": container.port,
             "created": container.timestamp,
             "expires": container.expires,
@@ -194,13 +197,7 @@ def route_user_flags():
     rows = Users.query.with_entities(Users.id, Users.type, Users.hidden, Users.banned).all()
     flags = {}
     for uid, utype, hidden, banned in rows:
-        f = {}
-        if utype == "admin":
-            f["is_admin"] = True
-        if hidden:
-            f["is_hidden"] = True
-        if banned:
-            f["is_banned"] = True
+        f = sparse_user_flags((utype == "admin", hidden, banned))
         if f:
             flags[uid] = f
     return jsonify(flags)
@@ -405,7 +402,7 @@ def route_admin_extend():
     if not challenge:
         return jsonify(error="challenge not found"), 404
 
-    expiration = challenge.expiration_seconds or get_setting("default_expiration_seconds", 1800)
+    expiration = resolve_expiration(challenge)
     new_expires = int(time.time() + expiration)
 
     container.expires = new_expires
@@ -907,14 +904,24 @@ def route_get_container_logs(container_id):
     return jsonify(logs=logs)
 
 
+def _range_param() -> str:
+    return request.args.get("range", "7d")
+
+
 def _range_cutoff() -> float:
-    range_param = request.args.get("range", "7d")
     now = time.time()
     ranges = {"24h": 86400, "7d": 604800, "30d": 2592000}
-    delta = ranges.get(range_param)
+    delta = ranges.get(_range_param())
     if delta:
         return now - delta
     return 0
+
+
+def _history_rows_since(cutoff: float) -> list[ContainerHistoryModel]:
+    query = ContainerHistoryModel.query
+    if cutoff > 0:
+        query = query.filter(ContainerHistoryModel.created_at >= cutoff)
+    return query.order_by(ContainerHistoryModel.created_at.desc()).limit(_MAX_ANALYTICS_ROWS).all()
 
 
 def _excluded_user_ids() -> set[int]:
@@ -927,15 +934,9 @@ def _excluded_user_ids() -> set[int]:
 @containers_bp.route("/api/analytics/activity", methods=["GET"])
 @admins_only
 def route_analytics_activity():
-    cutoff = _range_cutoff()
-    range_param = request.args.get("range", "7d")
+    rows = _history_rows_since(_range_cutoff())
 
-    query = ContainerHistoryModel.query
-    if cutoff > 0:
-        query = query.filter(ContainerHistoryModel.created_at >= cutoff)
-    rows = query.order_by(ContainerHistoryModel.created_at.desc()).limit(_MAX_ANALYTICS_ROWS).all()
-
-    if range_param == "24h":
+    if _range_param() == "24h":
         bucket_size = 3600
     else:
         bucket_size = 86400
@@ -963,13 +964,8 @@ def route_analytics_activity():
 def route_analytics_top_users():
     from CTFd.models import Users
 
-    cutoff = _range_cutoff()
     now = time.time()
-
-    query = ContainerHistoryModel.query
-    if cutoff > 0:
-        query = query.filter(ContainerHistoryModel.created_at >= cutoff)
-    rows = query.order_by(ContainerHistoryModel.created_at.desc()).limit(_MAX_ANALYTICS_ROWS).all()
+    rows = _history_rows_since(_range_cutoff())
 
     excluded = _excluded_user_ids()
     user_stats = defaultdict(lambda: {"total_seconds": 0, "container_count": 0, "challenges": set()})
@@ -993,9 +989,7 @@ def route_analytics_top_users():
             {
                 "user_id": user_id,
                 "username": user_obj.name if user_obj else f"user#{user_id}",
-                "is_admin": user_obj.type == "admin" if user_obj else False,
-                "is_hidden": getattr(user_obj, "hidden", False) if user_obj else False,
-                "is_banned": getattr(user_obj, "banned", False) if user_obj else False,
+                **dense_user_flags(user_flag_values(user_obj)),
                 "total_seconds": round(stats["total_seconds"], 1),
                 "container_count": stats["container_count"],
                 "unique_challenges": len(stats["challenges"]),
@@ -1011,13 +1005,8 @@ def route_analytics_top_users():
 def route_analytics_challenges():
     from CTFd.models import Challenges
 
-    cutoff = _range_cutoff()
     now = time.time()
-
-    query = ContainerHistoryModel.query
-    if cutoff > 0:
-        query = query.filter(ContainerHistoryModel.created_at >= cutoff)
-    rows = query.order_by(ContainerHistoryModel.created_at.desc()).limit(_MAX_ANALYTICS_ROWS).all()
+    rows = _history_rows_since(_range_cutoff())
 
     excluded = _excluded_user_ids()
     chal_stats = defaultdict(lambda: {"count": 0, "users": set(), "lifetimes": []})
@@ -1106,9 +1095,7 @@ def route_analytics_solve_times():
     for stats in chal_times.values():
         for s in stats["solves"]:
             all_user_ids.add(s["user_id"])
-    user_names = (
-        {u.id: u.name for u in Users.query.filter(Users.id.in_(all_user_ids)).all()} if all_user_ids else {}
-    )
+    user_names = {u.id: u.name for u in Users.query.filter(Users.id.in_(all_user_ids)).all()} if all_user_ids else {}
 
     result = []
     for chal_id, stats in chal_times.items():
@@ -1171,8 +1158,7 @@ def route_analytics_flag_sharing():
 @admins_only
 def route_analytics_heatmap():
     cutoff = _range_cutoff()
-    range_param = request.args.get("range", "7d")
-    week_mode = range_param == "7d"
+    week_mode = _range_param() == "7d"
 
     excluded = _excluded_user_ids()
     rows = ContainerHistoryModel.query.filter(ContainerHistoryModel.created_at >= cutoff).all()

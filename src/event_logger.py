@@ -18,6 +18,63 @@ MetadataDict = dict[str, MetadataVal | dict[str, MetadataVal | dict[str, Metadat
 # shape of event dicts produced by EventLogger.log_event
 EventDict = dict[str, str | int | float | bool | None | MetadataDict]
 
+# is_admin is always a real bool; hidden/banned are raw column values that may be None
+UserFlagValues = tuple[bool, bool | None, bool | None]
+
+
+def user_flag_values(user: object) -> UserFlagValues:
+    # mirrors how callers derive the three flags off a Users row (or None)
+    is_admin = user.type == "admin" if user else False  # type: ignore[attr-defined]
+    return is_admin, getattr(user, "hidden", False), getattr(user, "banned", False)
+
+
+def flag_share_metadata(
+    challenge_id: int | None,
+    challenge_name: str | None,
+    source_id: int | None,
+    source_entity: str | None,
+    source_type: str,
+    team_id: int | None = None,
+    team_name: str | None = None,
+) -> dict:
+    # shared shape for flag_sharing events, both live at submit time and replayed for the admin feed
+    meta: dict = {
+        "challenge_id": challenge_id,
+        "challenge_name": challenge_name,
+        "source_entity": source_entity,
+        "source_id": source_id,
+        "source_type": source_type,
+    }
+    if team_id is not None:
+        meta["team_id"] = team_id
+    if team_name is not None:
+        meta["team_name"] = team_name
+    return meta
+
+
+def flag_share_message(submitter_name: str | None, source_entity: str | None, challenge_name: str | None) -> str:
+    return f"user '{submitter_name}' submitted a flag belonging to '{source_entity}' on challenge '{challenge_name}'"
+
+
+def dense_user_flags(values: UserFlagValues) -> dict[str, bool | None]:
+    # always emits all three keys (preserves raw hidden/banned, which may be None)
+    is_admin, is_hidden, is_banned = values
+    return {"is_admin": is_admin, "is_hidden": is_hidden, "is_banned": is_banned}
+
+
+def sparse_user_flags(values: UserFlagValues, out: dict | None = None) -> dict:
+    # only emits keys whose value is truthy, always as literal True
+    is_admin, is_hidden, is_banned = values
+    if out is None:
+        out = {}
+    if is_admin:
+        out["is_admin"] = True
+    if is_hidden:
+        out["is_hidden"] = True
+    if is_banned:
+        out["is_banned"] = True
+    return out
+
 
 class EventLogger:
     def __init__(self, max_events: int = 2000) -> None:
@@ -41,7 +98,7 @@ class EventLogger:
             event_id = f"{event_bus.WORKER_ID}:{self._next_id}"
             self._next_id += 1
 
-        user_flags = {}
+        user_flags: dict = {}
         if user_id:
             from CTFd.models import Users
 
@@ -49,12 +106,7 @@ class EventLogger:
             if user:
                 if not username:
                     username = user.name
-                if user.type == "admin":
-                    user_flags["is_admin"] = True
-                if getattr(user, "hidden", False):
-                    user_flags["is_hidden"] = True
-                if getattr(user, "banned", False):
-                    user_flags["is_banned"] = True
+                sparse_user_flags(user_flag_values(user), user_flags)
 
         event = {
             "id": event_id,

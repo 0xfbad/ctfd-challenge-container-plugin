@@ -60,7 +60,6 @@ def test_defaults_dict_has_expected_keys():
         "rate_limit_requests",
         "rate_limit_interval",
         "expiration_check_interval",
-        "thread_pool_size",
         "max_concurrent_creates",
         "freshness_secret",
         "freshness_token_length",

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import functools
+import logging
 
 from flask import jsonify, request
 from CTFd.utils import get_config
 
+from .exceptions import ContainerException, ContainerUnavailableException
 from .models import ContainerSettingsModel
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULTS: dict[str, int | str] = {
@@ -13,7 +17,6 @@ DEFAULTS: dict[str, int | str] = {
     "rate_limit_requests": 45,
     "rate_limit_interval": 60,
     "expiration_check_interval": 5,
-    "thread_pool_size": 4,
     "max_concurrent_creates": 2,
     "freshness_secret": "",
     "freshness_token_length": 6,
@@ -87,11 +90,29 @@ def owner_filter(xid: int, is_team: bool) -> dict[str, int]:
     return {"team_id" if is_team else "user_id": xid}
 
 
+_USER_SAFE_PATTERNS = (
+    "no renewals remaining",
+    "container not found",
+    "challenge not found",
+    "you can only spawn",
+    "another container request is in progress",
+    "docker image not found",
+    "memory limit must be",
+    "cpu limit must be",
+)
+
+
+def sanitize_container_error(err: ContainerException | Exception) -> str:
+    msg = str(err)
+    lower = msg.lower()
+    if any(p in lower for p in _USER_SAFE_PATTERNS):
+        return msg
+    logger.error(f"container error (sanitized): {msg}")
+    return "a server error occurred, please try again"
+
+
 def handle_container_errors(f):
     # centralize ContainerException dispatch so routes stay focused on happy paths
-    from .exceptions import ContainerException, ContainerUnavailableException
-    from .views.helpers import sanitize_container_error
-
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
         try:

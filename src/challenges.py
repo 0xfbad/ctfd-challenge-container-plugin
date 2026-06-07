@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from .models import ContainerChallengeModel, ContainerInfoModel, ContainerHistoryModel, ContainerFlagShareModel
 from .utils import get_setting, _TOKEN_LENGTH_KEY, is_team_mode, owner_filter
 from .freshness import compute_token, render_flag, extract_token
-from .event_logger import event_logger
+from .event_logger import event_logger, flag_share_message, flag_share_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -289,20 +289,20 @@ class ContainerChallenge(BaseChallenge):
             owner = _find_token_owner(secret, challenge.id, submitted_token, xid, team_mode)
             if owner:
                 source_id, identifier = owner
-                meta = {
-                    "challenge_id": challenge.id,
-                    "challenge_name": challenge.name,
-                    "source_entity": identifier,
-                    "source_id": source_id,
-                    "source_type": "teams" if team_mode else "users",
-                }
-                if team_mode and user.team:
-                    meta["team_id"] = user.team.id
-                    meta["team_name"] = user.team.name
+                in_team = bool(team_mode and user.team)
+                meta = flag_share_metadata(
+                    challenge.id,
+                    challenge.name,
+                    source_id,
+                    identifier,
+                    "teams" if team_mode else "users",
+                    team_id=user.team.id if in_team else None,
+                    team_name=user.team.name if in_team else None,
+                )
 
                 event_logger.log_event(
                     "flag_sharing",
-                    f"user '{user.name}' submitted a flag belonging to '{identifier}' on challenge '{challenge.name}'",
+                    flag_share_message(user.name, identifier, challenge.name),
                     user_id=user.id,
                     username=user.name,
                     level="warning",

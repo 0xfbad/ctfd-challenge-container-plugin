@@ -57,7 +57,7 @@ docker context create server1 --docker "host=ssh://user@server1.example.com"
 Select "Container" challenge type when creating a challenge. The typical web challenge only needs an image and point value, everything else has sensible defaults
 
 - Docker Context: which host runs containers (default Auto, load-balanced)
-- Image: fuzzy searchable by name or tag
+- Image: Docker image name and tag, with a live indicator showing which contexts already have it
 - Port: internal container port (default 80), host port assigned randomly
 - Connection Type: `tcp`, `ssh`, or `web` (default web)
 - SSH Credentials: username/password, or `auto` to generate a random password
@@ -88,7 +88,6 @@ Managed through `/admin/config`, no config files
 | Key | Default | Description |
 |-----|---------|-------------|
 | max_containers_per_user | 4 | simultaneous container limit per user |
-| thread_pool_size | 4 | worker threads for Docker operations |
 | max_concurrent_creates | 2 | parallel container creation limit per host |
 | expiration_check_interval | 5 | seconds between expiry sweeps |
 | rate_limit_requests | 45 | max requests per rate limit interval |

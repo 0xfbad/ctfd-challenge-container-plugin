@@ -23,7 +23,42 @@ from .event_logger import event_logger
 logger = logging.getLogger(__name__)
 
 CPU_QUOTA_BASE = 100000
+
+# container/stack names are built from this prefix and also prefix-matched during
+# reconcile (see RECONCILE_NAME_PREFIX), so container_name() output must stay byte-identical
+NAME_PREFIX = "chal-"
+
 _SSH_CAPS = ["SYS_CHROOT", "SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "AUDIT_WRITE"]
+
+
+def container_name(user_id: int | str, chal_id: int | str, ts: int) -> str:
+    return f"{NAME_PREFIX}u{user_id}-c{chal_id}-{ts}"
+
+
+def _resource_kwargs(max_memory_mb: int | None, max_cpu: float | None) -> dict[str, _DockerRunVal]:
+    kwargs: dict[str, _DockerRunVal] = {}
+
+    if max_memory_mb:
+        try:
+            mem_limit = int(max_memory_mb)
+            if mem_limit > 0:
+                kwargs["mem_limit"] = f"{mem_limit}m"
+        except ValueError:
+            raise ContainerException("memory limit must be an integer")
+
+    if max_cpu:
+        try:
+            cpu_quota = float(max_cpu)
+            if cpu_quota > 0:
+                kwargs["cpu_quota"] = int(cpu_quota * CPU_QUOTA_BASE)
+                kwargs["cpu_period"] = CPU_QUOTA_BASE
+            else:
+                raise ValueError
+        except ValueError:
+            raise ContainerException("cpu limit must be a positive number")
+
+    return kwargs
+
 
 # admin-supplied cap_add is filtered against this set. anything else (SYS_ADMIN,
 # SYS_MODULE, etc) is dropped with a warning - granted caps survive no-new-privileges
@@ -218,26 +253,7 @@ class ContainerManager:
     ) -> tuple[Container, str]:
         self._ensure_connected()
 
-        kwargs: dict[str, _DockerRunVal] = {}
-
-        if max_memory_mb:
-            try:
-                mem_limit = int(max_memory_mb)
-                if mem_limit > 0:
-                    kwargs["mem_limit"] = f"{mem_limit}m"
-            except ValueError:
-                raise ContainerException("memory limit must be an integer")
-
-        if max_cpu:
-            try:
-                cpu_quota = float(max_cpu)
-                if cpu_quota > 0:
-                    kwargs["cpu_quota"] = int(cpu_quota * CPU_QUOTA_BASE)
-                    kwargs["cpu_period"] = CPU_QUOTA_BASE
-                else:
-                    raise ValueError
-            except ValueError:
-                raise ContainerException("cpu limit must be a positive number")
+        kwargs: dict[str, _DockerRunVal] = _resource_kwargs(max_memory_mb, max_cpu)
 
         if volumes:
             try:
@@ -261,10 +277,10 @@ class ContainerManager:
         }
 
         ts = int(time.time())
-        container_name = f"chal-u{user_id}-c{chal_id}-{ts}"
+        name = container_name(user_id, chal_id, ts)
         # sets shell prompt to image name instead of container hash
-        container_hostname = image.split(":")[0] if image else container_name
-        kwargs["name"] = container_name
+        container_hostname = image.split(":")[0] if image else name
+        kwargs["name"] = name
         kwargs["hostname"] = container_hostname
 
         caps = _build_caps(ctype, cap_add, chal_id)
@@ -389,7 +405,7 @@ class ContainerManager:
 
         stack_id = uuid.uuid4().hex
         ts = int(time.time())
-        base_name = f"chal-u{user_id}-c{chal_id}-{ts}"
+        base_name = container_name(user_id, chal_id, ts)
         net_name = f"{base_name}-net"
 
         if context_name:
@@ -421,11 +437,7 @@ class ContainerManager:
             entry_caps = _build_caps(ctype, cap_add, chal_id)
             if entry_caps:
                 entry_kwargs["cap_add"] = entry_caps
-            if max_memory_mb:
-                entry_kwargs["mem_limit"] = f"{int(max_memory_mb)}m"
-            if max_cpu:
-                entry_kwargs["cpu_quota"] = int(float(max_cpu) * 100000)
-                entry_kwargs["cpu_period"] = 100000
+            entry_kwargs.update(_resource_kwargs(max_memory_mb, max_cpu))
 
             entry_hostname = image.split(":")[0] if image else base_name
             entry_container, host_port = self.host_manager.run_container_on_network(
@@ -482,7 +494,9 @@ class ContainerManager:
             try:
                 self.host_manager.kill_stack(context_name, stack_id)
             except Exception:
-                logger.debug("failed to clean up partial stack %s", stack_id, exc_info=True)
+                logger.warning(
+                    "failed to clean up partial stack %s (may leak until reconcile)", stack_id, exc_info=True
+                )
             self.orchestrator.release_slot(context_name)
             raise
 

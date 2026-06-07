@@ -19,6 +19,7 @@ class HostStatus(TypedDict):
     active_containers: int
     healthy: bool
     weight: int
+    score: float
 
 
 class Orchestrator:
@@ -89,16 +90,20 @@ class Orchestrator:
         healthy_count = sum(1 for h in new_health.values() if h)
         logger.info(f"loaded {len(contexts)} contexts, {healthy_count} healthy")
 
+    def _score_locked(self, name: str) -> float:
+        # load-balancer score; caller must hold self.lock. authoritative for placement
+        # in _pick_best_context and surfaced via get_status for observability
+        count = self.container_counts[name]
+        weight = self.weights.get(name, 1)
+        return weight / (count + 1)
+
     def _pick_best_context(self) -> str | None:
         # caller must hold self.lock
         candidates = []
         for name, healthy in self.health.items():
             if not healthy:
                 continue
-            count = self.container_counts[name]
-            weight = self.weights.get(name, 1)
-            score = weight / (count + 1)
-            candidates.append((score, name))
+            candidates.append((self._score_locked(name), name))
 
         if not candidates:
             return None
@@ -170,6 +175,7 @@ class Orchestrator:
                         "active_containers": self.container_counts.get(name, 0),
                         "healthy": self.health[name],
                         "weight": self.weights.get(name, 1),
+                        "score": self._score_locked(name),
                     }
                 )
             return status
