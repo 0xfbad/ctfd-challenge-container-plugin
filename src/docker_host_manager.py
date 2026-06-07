@@ -530,6 +530,20 @@ class DockerHostManager:
 
         return self._call_with_client_op(context_name, _do)
 
+    def force_remove_container(self, context_name: str, name_or_id: str) -> None:
+        # stop() is a no-op against Created-state containers (never started so nothing to stop)
+        # and auto_remove doesn't fire from a no-op stop, so reconciler-style cleanup needs
+        # remove(force=True) to handle Created/Running/Exited in one call
+        def _do():
+            try:
+                client = self._get_client(context_name)
+                container = client.containers.get(name_or_id)
+                container.remove(force=True)
+            except docker.errors.NotFound:
+                logger.debug(f"container {name_or_id} already removed")
+
+        return self._call_with_client_op(context_name, _do)
+
     def _parse_container_created(self, created_raw: str) -> float:
         # docker emits 9-digit fractional seconds, fromisoformat only accepts 6
         if not created_raw:

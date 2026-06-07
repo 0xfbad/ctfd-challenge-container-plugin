@@ -668,9 +668,11 @@ class ContainerManager:
                 if age < self.RECONCILE_SAFETY_AGE_SECONDS:
                     continue
 
-                logger.warning(f"reconcile: stopping orphan {name} ({cid[:12]}) on {ctx_name} (age {int(age)}s)")
+                logger.warning(f"reconcile: removing orphan {name} ({cid[:12]}) on {ctx_name} (age {int(age)}s)")
                 try:
-                    self.host_manager.stop_container(ctx_name, cid)
+                    # force_remove handles Created-state orphans where stop+auto_remove is a no-op,
+                    # which otherwise spams the log every cleanup tick forever
+                    self.host_manager.force_remove_container(ctx_name, cid)
                     event_logger.log_event(
                         "orphan_reaped",
                         f"reaped orphan container {name} on {ctx_name}",
@@ -683,4 +685,4 @@ class ContainerManager:
                         },
                     )
                 except Exception as e:
-                    logger.error(f"reconcile: failed to stop {name} on {ctx_name}: {e}")
+                    logger.error(f"reconcile: failed to remove {name} on {ctx_name}: {e}")

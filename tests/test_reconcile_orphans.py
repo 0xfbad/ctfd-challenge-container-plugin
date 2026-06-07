@@ -39,7 +39,7 @@ def test_only_old_orphan_is_killed():
 
         cm._reconcile_orphans()
 
-    cm.host_manager.stop_container.assert_called_once_with("default", old_orphan_id)
+    cm.host_manager.force_remove_container.assert_called_once_with("default", old_orphan_id)
 
 
 def test_safety_window_holds_young_container():
@@ -58,7 +58,7 @@ def test_safety_window_holds_young_container():
 
         cm._reconcile_orphans()
 
-    cm.host_manager.stop_container.assert_not_called()
+    cm.host_manager.force_remove_container.assert_not_called()
 
 
 def test_dedupe_across_label_and_prefix():
@@ -78,7 +78,7 @@ def test_dedupe_across_label_and_prefix():
 
         cm._reconcile_orphans()
 
-    cm.host_manager.stop_container.assert_called_once_with("default", orphan_id)
+    cm.host_manager.force_remove_container.assert_called_once_with("default", orphan_id)
 
 
 def test_list_failure_does_not_abort_sweep():
@@ -102,7 +102,7 @@ def test_list_failure_does_not_abort_sweep():
 
         cm._reconcile_orphans()
 
-    cm.host_manager.stop_container.assert_called_once_with("healthy", orphan_id)
+    cm.host_manager.force_remove_container.assert_called_once_with("healthy", orphan_id)
 
 
 def test_reconcile_runs_at_end_of_kill_expired():
