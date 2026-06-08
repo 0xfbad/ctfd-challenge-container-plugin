@@ -560,7 +560,16 @@ class ContainerManager:
         self.host_manager._init_semaphores(max_concurrent)
 
     def kill_expired_containers(self, app: Flask) -> None:
+        # Flask-SQLAlchemy auto-teardown only fires on REQUEST contexts; manually-opened app
+        # contexts leak the scoped session's connection. explicit remove() in finally.
         with app.app_context():
+            try:
+                self._kill_expired_containers_inner()
+            finally:
+                db.session.remove()
+
+    def _kill_expired_containers_inner(self) -> None:
+        if True:  # preserved nesting so the existing body's indentation doesn't need to change
             if not self.host_manager.has_contexts():
                 # reload from db only, don't call initialize_connection, it
                 # tears down the scheduler running this very job and raises
