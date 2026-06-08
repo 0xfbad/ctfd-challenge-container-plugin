@@ -58,7 +58,7 @@ def validate_request(
     return None, None, user
 
 
-def _resolve_identity(user):
+def _resolve_identity(user: Users) -> tuple[int, bool]:
     """Return (xid, is_team) for the current user based on user/team mode"""
     if is_team_mode():
         return user.team.id, True

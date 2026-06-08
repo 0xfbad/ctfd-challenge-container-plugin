@@ -14,7 +14,7 @@ import paramiko
 
 from CTFd.models import db
 from .models import ContainerInfoModel, ContainerHistoryModel
-from .docker_host_manager import DockerHostManager, _DockerRunVal
+from .docker_host_manager import DockerHostManager, ReconcileEntry, _DockerRunVal
 from .orchestrator import Orchestrator
 from .exceptions import ContainerException, ContainerUnavailableException
 from .utils import get_setting
@@ -451,7 +451,7 @@ class ContainerManager:
                 publish_port=True,
                 hostname=entry_hostname,
                 internal_port=port,
-                **entry_kwargs,  # type: ignore[arg-type]  # mypy can't narrow **dict unpacking
+                **entry_kwargs,
             )
 
             companions: list[tuple[str, Container]] = []
@@ -648,7 +648,7 @@ class ContainerManager:
 
         for ctx_name in self.host_manager.get_connected_contexts():
             seen_ids: set[str] = set()
-            entries: list[dict[str, str | float]] = []
+            entries: list[ReconcileEntry] = []
 
             try:
                 entries.extend(self.host_manager.list_containers_by_label(ctx_name, self.RECONCILE_STACK_LABEL))

@@ -433,10 +433,7 @@ def route_admin_extend():
 def route_purge_containers():
     container_ids = [c.container_id for c in ContainerInfoModel.query.all()]
     for cid in container_ids:
-        try:
-            kill_container(cid)
-        except ContainerException:
-            pass
+        kill_container(cid)
     admin = get_current_user()
     event_logger.log_event(
         "admin_action",
@@ -768,9 +765,9 @@ def route_api_images_matrix():
                     docker_name = normalized if normalized in tags else img
                     pending.append((display, ctx, pool.submit(_info, ctx, docker_name)))
 
-        for display, ctx, future in pending:
+        for display, ctx, info_future in pending:
             try:
-                _, _, info = future.result(timeout=15)
+                _, _, info = info_future.result(timeout=15)
                 matrix[display][ctx]["info"] = info
             except Exception:
                 pass

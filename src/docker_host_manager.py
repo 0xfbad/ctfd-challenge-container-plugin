@@ -44,6 +44,12 @@ class DiscoveredContext(TypedDict):
     endpoint: str
 
 
+class ReconcileEntry(TypedDict):
+    name: str
+    id: str
+    created_ts: float
+
+
 # docker context metadata from ~/.docker/contexts/meta/*/meta.json
 _ContextMeta = dict[str, object]
 
@@ -517,19 +523,6 @@ class DockerHostManager:
 
         return self._call_with_client_op(context_name, _do)
 
-    def stop_container(self, context_name: str, name_or_id: str, timeout: int = 10) -> None:
-        # used by the reconcile sweep; tolerates already-gone containers since
-        # a parallel kill may have removed the target between list and stop
-        def _do():
-            try:
-                client = self._get_client(context_name)
-                container = client.containers.get(name_or_id)
-                container.stop(timeout=timeout)
-            except docker.errors.NotFound:
-                logger.debug(f"container {name_or_id} already removed")
-
-        return self._call_with_client_op(context_name, _do)
-
     def force_remove_container(self, context_name: str, name_or_id: str) -> None:
         # stop() is a no-op against Created-state containers (never started so nothing to stop)
         # and auto_remove doesn't fire from a no-op stop, so reconciler-style cleanup needs
@@ -564,15 +557,14 @@ class DockerHostManager:
         except (ValueError, AttributeError):
             return 0.0
 
-    def list_containers_by_label(self, context_name: str, label_key: str) -> list[dict[str, str | float]]:
-        # used by the reconcile sweep; returns [{"name", "id", "created_ts"}] for any container
-        # carrying the given label (any value, any state). swallows errors and returns []
-        # so a flapping host can't break the sweep loop
-        def _do() -> list[dict[str, str | float]]:
+    def _list_containers(self, context_name: str, filters: dict[str, str]) -> list[ReconcileEntry]:
+        # returns [{"name", "id", "created_ts"}] for any matching container (any state).
+        # swallows errors and returns [] so a flapping host can't break the sweep loop
+        def _do() -> list[ReconcileEntry]:
             try:
                 client = self._get_client(context_name)
-                containers = client.containers.list(all=True, filters={"label": label_key})
-                results: list[dict[str, str | float]] = []
+                containers = client.containers.list(all=True, filters=filters)
+                results: list[ReconcileEntry] = []
                 for c in containers:
                     created_raw = c.attrs.get("Created", "") if c.attrs else ""
                     results.append(
@@ -592,31 +584,13 @@ class DockerHostManager:
 
         return self._call(context_name, _do)
 
-    def list_containers_by_prefix(self, context_name: str, name_prefix: str) -> list[dict[str, str | float]]:
+    def list_containers_by_label(self, context_name: str, label_key: str) -> list[ReconcileEntry]:
+        # used by the reconcile sweep for any container carrying the given label (any value)
+        return self._list_containers(context_name, {"label": label_key})
+
+    def list_containers_by_prefix(self, context_name: str, name_prefix: str) -> list[ReconcileEntry]:
         # used by the reconcile sweep for standalone (non-stack) containers
-        def _do() -> list[dict[str, str | float]]:
-            try:
-                client = self._get_client(context_name)
-                containers = client.containers.list(all=True, filters={"name": name_prefix})
-                results: list[dict[str, str | float]] = []
-                for c in containers:
-                    created_raw = c.attrs.get("Created", "") if c.attrs else ""
-                    results.append(
-                        {
-                            "name": c.name or "",
-                            "id": c.id or "",
-                            "created_ts": self._parse_container_created(created_raw),
-                        }
-                    )
-                return results
-            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
-                self._clear_client(context_name)
-                return []
-            except Exception:
-                self._clear_client(context_name)
-                return []
-
-        return self._call(context_name, _do)
+        return self._list_containers(context_name, {"name": name_prefix})
 
     def kill_stack(self, context_name: str, stack_id: str) -> int:
         # background expiry runs against rows whose context may have failed to
