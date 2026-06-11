@@ -19,7 +19,7 @@ from flask import request as flask_request
 from sqlalchemy.exc import IntegrityError
 
 from .models import ContainerChallengeModel, ContainerInfoModel, ContainerHistoryModel, ContainerFlagShareModel
-from .utils import get_setting, _TOKEN_LENGTH_KEY, is_team_mode, owner_filter
+from .utils import get_setting, _TOKEN_LENGTH_KEY, is_team_mode, resolve_xid, owner_filter
 from .freshness import compute_token, render_flag, extract_token
 from .event_logger import event_logger, flag_share_message, flag_share_metadata
 
@@ -245,12 +245,9 @@ class ContainerChallenge(BaseChallenge):
             return False, "user not found"
 
         team_mode = bool(is_team_mode())
-        if team_mode:
-            if not user.team:
-                return False, "you must be on a team to submit flags"
-            xid = user.team.id
-        else:
-            xid = user.id
+        xid = resolve_xid(user)
+        if xid is None:
+            return False, "you must be on a team to submit flags"
 
         for flag in freshness_flags:
             template = flag.content

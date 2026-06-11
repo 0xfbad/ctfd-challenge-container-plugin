@@ -7,7 +7,7 @@ from CTFd.plugins.flags import BaseFlag, FLAG_CLASSES
 from CTFd.utils.user import get_current_user
 
 from .freshness import compute_token, render_flag
-from .utils import get_setting, _TOKEN_LENGTH_KEY, is_team_mode
+from .utils import get_setting, _TOKEN_LENGTH_KEY, resolve_xid
 
 
 class FreshnessFlag(BaseFlag):
@@ -28,12 +28,9 @@ class FreshnessFlag(BaseFlag):
         if not user:
             return False
 
-        if is_team_mode():
-            if not user.team:
-                return False
-            xid = user.team.id
-        else:
-            xid = user.id
+        xid = resolve_xid(user)
+        if xid is None:
+            return False
 
         template = chal_key_obj.content
         challenge_id = chal_key_obj.challenge_id

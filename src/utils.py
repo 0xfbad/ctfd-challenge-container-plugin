@@ -86,6 +86,15 @@ def is_team_mode() -> bool | None:
     return mode == TEAMS_MODE if mode in (TEAMS_MODE, USERS_MODE) else None
 
 
+def resolve_xid(user) -> int | None:
+    # team id in team mode (None when team mode but the user has no team), user id otherwise
+    if is_team_mode():
+        if not user.team:
+            return None
+        return user.team.id
+    return user.id
+
+
 def owner_filter(xid: int, is_team: bool) -> dict[str, int]:
     return {"team_id" if is_team else "user_id": xid}
 
