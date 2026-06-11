@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 import json
+import random
 import threading
 import logging
-from typing import TypedDict, overload
+from collections.abc import Callable
+from typing import TypedDict, TypeVar, overload
 
 import docker
 from docker import DockerClient
@@ -31,6 +33,25 @@ THREADPOOL_SIZE = 4
 
 # value types that appear in kwargs forwarded to docker containers.run
 _DockerRunVal = str | int | bool | list[str] | dict[str, str] | dict[str, dict[str, str]]
+
+_T = TypeVar("_T")
+
+
+def _run_with_port_retry(attempt: Callable[[int], _T], *, exhausted_message: str) -> _T:
+    # retry containers.run on a fresh random host port when docker reports the port taken,
+    # the attempt callable owns the actual run (and any static-ip reconnect) for one candidate
+    last_err: docker.errors.APIError | None = None
+    for _ in range(50):
+        host_port = random.randint(40000, 59999)
+        try:
+            return attempt(host_port)
+        except docker.errors.APIError as e:
+            if "port is already allocated" in str(e) or "address already in use" in str(e):
+                last_err = e
+                continue
+            raise
+
+    raise docker.errors.DockerException(f"{exhausted_message}: {last_err}")
 
 
 class ImageInfo(TypedDict):
@@ -386,34 +407,24 @@ class DockerHostManager:
         # docker run kwargs (name, hostname, mem_limit, cpu_quota, volumes, cap_add, etc.)
         **kwargs: _DockerRunVal,
     ) -> Container:
-        import random
-
         def _do():
             client = self._get_client(context_name)
-            last_err = None
-            for _ in range(50):
-                host_port = random.randint(40000, 59999)
-                try:
-                    container = client.containers.run(
-                        image,
-                        ports={str(port): host_port},
-                        command=command,
-                        detach=True,
-                        auto_remove=True,
-                        cap_drop=["ALL"],
-                        security_opt=["no-new-privileges:true"],
-                        pids_limit=256,
-                        environment=environment,
-                        **kwargs,
-                    )
-                    return container
-                except docker.errors.APIError as e:
-                    if "port is already allocated" in str(e) or "address already in use" in str(e):
-                        last_err = e
-                        continue
-                    raise
 
-            raise docker.errors.DockerException(f"failed to find available port after retries: {last_err}")
+            def attempt(host_port: int) -> Container:
+                return client.containers.run(
+                    image,
+                    ports={str(port): host_port},
+                    command=command,
+                    detach=True,
+                    auto_remove=True,
+                    cap_drop=["ALL"],
+                    security_opt=["no-new-privileges:true"],
+                    pids_limit=256,
+                    environment=environment,
+                    **kwargs,
+                )
+
+            return _run_with_port_retry(attempt, exhausted_message="failed to find available port after retries")
 
         return self._call_with_client_op(context_name, _do)
 
@@ -462,44 +473,36 @@ class DockerHostManager:
         # forwarded to docker containers.run (labels, cap_add, mem_limit, etc.)
         **kwargs: _DockerRunVal,
     ) -> tuple[Container, int | None]:
-        import random
-
         def _do():
             client = self._get_client(context_name)
             sec_opt = ["no-new-privileges:true"]
 
             if publish_port and internal_port:
-                last_err = None
-                for _ in range(50):
-                    host_port = random.randint(40000, 59999)
-                    try:
-                        container = client.containers.run(
-                            image,
-                            name=container_name,
-                            hostname=hostname or container_name,
-                            command=command or None,
-                            detach=True,
-                            auto_remove=True,
-                            cap_drop=["ALL"],
-                            security_opt=sec_opt,
-                            pids_limit=256,
-                            environment=environment,
-                            network=network_name,
-                            ports={str(internal_port): host_port},
-                            **kwargs,
-                        )
-                        if ip_address:
-                            # reconnect with static IP (initial connect used DHCP)
-                            network = client.networks.get(network_name)
-                            network.disconnect(container)
-                            network.connect(container, ipv4_address=ip_address)
-                        return container, host_port
-                    except docker.errors.APIError as e:
-                        if "port is already allocated" in str(e) or "address already in use" in str(e):
-                            last_err = e
-                            continue
-                        raise
-                raise docker.errors.DockerException(f"failed to find available port: {last_err}")
+
+                def attempt(host_port: int) -> tuple[Container, int]:
+                    container = client.containers.run(
+                        image,
+                        name=container_name,
+                        hostname=hostname or container_name,
+                        command=command or None,
+                        detach=True,
+                        auto_remove=True,
+                        cap_drop=["ALL"],
+                        security_opt=sec_opt,
+                        pids_limit=256,
+                        environment=environment,
+                        network=network_name,
+                        ports={str(internal_port): host_port},
+                        **kwargs,
+                    )
+                    if ip_address:
+                        # reconnect with static IP (initial connect used DHCP)
+                        network = client.networks.get(network_name)
+                        network.disconnect(container)
+                        network.connect(container, ipv4_address=ip_address)
+                    return container, host_port
+
+                return _run_with_port_retry(attempt, exhausted_message="failed to find available port")
             else:
                 container = client.containers.run(
                     image,
