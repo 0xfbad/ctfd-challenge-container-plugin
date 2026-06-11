@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 MetadataVal = str | int | float | bool | None
 
 # metadata can contain nested dicts (e.g. ImageInfo, host scores)
-MetadataDict = dict[str, MetadataVal | dict[str, MetadataVal | dict[str, MetadataVal]]]
+MetadataValue = MetadataVal | dict[str, MetadataVal | dict[str, MetadataVal]]
+MetadataDict = dict[str, MetadataValue]
 
 # shape of event dicts produced by EventLogger.log_event
 EventDict = dict[str, str | int | float | bool | None | MetadataDict]

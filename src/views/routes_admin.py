@@ -32,6 +32,7 @@ from ..docker_host_manager import (
     ping_endpoint,
 )
 from ..event_logger import (
+    MetadataValue,
     dense_user_flags,
     event_logger,
     flag_share_message,
@@ -54,6 +55,18 @@ _MAX_ANALYTICS_ROWS = 50000
 _MAX_SSE_CONNECTIONS = 10
 _sse_connection_count = 0
 _sse_connection_lock = threading.Lock()
+
+
+def _log_admin_action(message: str, *, level: str = "info", **metadata: MetadataValue) -> None:
+    admin = get_current_user()
+    event_logger.log_event(
+        "admin_action",
+        message,
+        user_id=admin.id if admin else None,
+        username=admin.name if admin else None,
+        level=level,
+        metadata=metadata,
+    )
 
 
 def _flag_share_to_event(row: ContainerFlagShareModel) -> dict:
@@ -364,20 +377,14 @@ def route_kill_container():
     result = kill_container(container_id)
 
     if "success" in result:
-        admin = get_current_user()
-        event_logger.log_event(
-            "admin_action",
+        _log_admin_action(
             f"admin killed container for {user_name or 'unknown'}",
-            user_id=admin.id if admin else None,
-            username=admin.name if admin else None,
             level="warning",
-            metadata={
-                "action": "kill",
-                "target": user_name,
-                "target_id": user_id,
-                "challenge_name": chal_name,
-                "container_id": container_id[:12],
-            },
+            action="kill",
+            target=user_name,
+            target_id=user_id,
+            challenge_name=chal_name,
+            container_id=container_id[:12],
         )
 
     status_code = 200 if "success" in result else 400
@@ -410,19 +417,13 @@ def route_admin_extend():
         ContainerInfoModel.query.filter_by(stack_id=container.stack_id).update({"expires": new_expires})
     db.session.commit()
 
-    admin = get_current_user()
-    event_logger.log_event(
-        "admin_action",
+    _log_admin_action(
         f"admin extended container for {container.user.name if container.user else 'unknown'}",
-        user_id=admin.id if admin else None,
-        username=admin.name if admin else None,
         level="info",
-        metadata={
-            "action": "extend",
-            "target": container.user.name if container.user else None,
-            "target_id": container.user_id,
-            "challenge_name": challenge.name,
-        },
+        action="extend",
+        target=container.user.name if container.user else None,
+        target_id=container.user_id,
+        challenge_name=challenge.name,
     )
 
     return jsonify(success="extended")
@@ -434,14 +435,11 @@ def route_purge_containers():
     container_ids = [c.container_id for c in ContainerInfoModel.query.all()]
     for cid in container_ids:
         kill_container(cid)
-    admin = get_current_user()
-    event_logger.log_event(
-        "admin_action",
+    _log_admin_action(
         f"purged {len(container_ids)} containers",
-        user_id=admin.id if admin else None,
-        username=admin.name if admin else None,
         level="warning",
-        metadata={"action": "purge", "count": len(container_ids)},
+        action="purge",
+        count=len(container_ids),
     )
     return jsonify(success="purged all containers"), 200
 
@@ -453,14 +451,11 @@ def route_clear_history():
     ContainerHistoryModel.query.delete()
     db.session.commit()
 
-    admin = get_current_user()
-    event_logger.log_event(
-        "admin_action",
+    _log_admin_action(
         f"cleared {count} history records",
-        user_id=admin.id if admin else None,
-        username=admin.name if admin else None,
         level="warning",
-        metadata={"action": "clear_history", "count": count},
+        action="clear_history",
+        count=count,
     )
     return jsonify(success=f"cleared {count} history records")
 
