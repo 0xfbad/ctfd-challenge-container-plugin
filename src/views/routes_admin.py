@@ -9,7 +9,8 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, tzinfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from statistics import median
 
 import docker
@@ -909,6 +910,17 @@ def _range_cutoff() -> float:
     return 0
 
 
+def _request_tz() -> tzinfo:
+    """viewer's IANA timezone for localizing analytics buckets; falls back to UTC"""
+    name = request.args.get("tz", "")
+    if name:
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    return UTC
+
+
 def _history_rows_since(cutoff: float) -> list[ContainerHistoryModel]:
     query = ContainerHistoryModel.query
     if cutoff > 0:
@@ -1150,28 +1162,17 @@ def route_analytics_flag_sharing():
 @admins_only
 def route_analytics_heatmap():
     cutoff = _range_cutoff()
-    week_mode = _range_param() == "7d"
-
+    tz = _request_tz()
     excluded = _excluded_user_ids()
     rows = ContainerHistoryModel.query.filter(ContainerHistoryModel.created_at >= cutoff).all()
 
+    # weekday() is Monday=0..Sunday=6, so the matrix is always Mon-first in the viewer's tz
     matrix = [[0] * 7 for _ in range(24)]
-
-    if week_mode:
-        utc_now = datetime.now(UTC)
-        start_date = (utc_now - timedelta(days=6)).date()
-
     for r in rows:
         if not r.created_at or r.user_id in excluded:
             continue
-        dt = datetime.fromtimestamp(r.created_at, tz=UTC)
-        if week_mode:
-            day_idx = (dt.date() - start_date).days
-            if not (0 <= day_idx < 7):
-                continue
-        else:
-            day_idx = dt.weekday()
-        matrix[dt.hour][day_idx] += 1
+        dt = datetime.fromtimestamp(r.created_at, tz=tz)
+        matrix[dt.hour][dt.weekday()] += 1
 
     # echarts expects [[day, hour, value], ...]
     data = []
@@ -1180,12 +1181,4 @@ def route_analytics_heatmap():
             if matrix[hour][day] > 0:
                 data.append([day, hour, matrix[hour][day]])
 
-    result: dict[str, list[list[int]] | int | list[str]] = {"data": data}
-    if week_mode:
-        epoch = datetime(1970, 1, 1, tzinfo=UTC)
-        result["start_ts"] = int(
-            (datetime.combine(start_date, datetime.min.time(), tzinfo=UTC) - epoch).total_seconds()
-        )
-    else:
-        result["days"] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    return jsonify(result)
+    return jsonify({"data": data, "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]})
