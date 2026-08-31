@@ -1,38 +1,108 @@
 import atexit
-import sys
-import os
-import time
+import fcntl
+import hashlib
 import json
 import logging
+import os
+import re
+import sys
+import tempfile
+import time
+import uuid
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 
-from flask import Flask
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.schedulers import SchedulerNotRunningError
 import docker
-from docker.models.containers import Container
 import paramiko
+from apscheduler.schedulers import SchedulerNotRunningError
+from apscheduler.schedulers.background import BackgroundScheduler
+from docker.models.containers import Container
+from flask import Flask
+from sqlalchemy import text
 
 from CTFd.models import db
-from .models import ContainerInfoModel, ContainerHistoryModel
+
+from .coordination import InstanceCoordinator
 from .docker_host_manager import DockerHostManager, ReconcileEntry, _DockerRunVal
-from .orchestrator import Orchestrator
-from .exceptions import ContainerException, ContainerUnavailableException
-from .utils import get_setting
 from .event_logger import event_logger
+from .exceptions import ContainerException, ContainerUnavailableException
+from .models import ContainerInfoModel, ContainerInstanceModel, ContainerMaintenanceModel
+from .orchestrator import Orchestrator
+from .utils import get_setting
 
 logger = logging.getLogger(__name__)
 
 CPU_QUOTA_BASE = 100000
 
-# container/stack names are built from this prefix and also prefix-matched during
-# reconcile (see RECONCILE_NAME_PREFIX), so container_name() output must stay byte-identical
+# Human-readable prefix for container and stack names.
 NAME_PREFIX = "chal-"
 
 _SSH_CAPS = ["SYS_CHROOT", "SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "AUDIT_WRITE"]
+_RESERVATION_ID = re.compile(r"^[0-9a-f]{32}$")
+_MAINTENANCE_LOCK_PREFIX = "ctfd-challenge-containers"
 
 
-def container_name(user_id: int | str, chal_id: int | str, ts: int) -> str:
-    return f"{NAME_PREFIX}u{user_id}-c{chal_id}-{ts}"
+@contextmanager
+def _maintenance_lock(app: Flask, job_name: str) -> Iterator[bool]:
+    """Take a cross-process maintenance lock for the duration of one job."""
+
+    connection = None
+    lock_file = None
+    dialect = ""
+    lock_name = f"{_MAINTENANCE_LOCK_PREFIX}:{job_name}"
+    lock_key = int.from_bytes(hashlib.sha256(lock_name.encode()).digest()[:8], "big", signed=True)
+    acquired = False
+    try:
+        with app.app_context():
+            engine = db.engine
+            dialect = engine.dialect.name
+            if dialect in {"mysql", "mariadb", "postgresql"}:
+                connection = engine.connect()
+
+        if dialect in {"mysql", "mariadb"}:
+            assert connection is not None
+            acquired = bool(connection.execute(text("SELECT GET_LOCK(:name, 0)"), {"name": lock_name}).scalar())
+        elif dialect == "postgresql":
+            assert connection is not None
+            acquired = bool(connection.execute(text("SELECT pg_try_advisory_lock(:key)"), {"key": lock_key}).scalar())
+        elif dialect == "sqlite":
+            lock_path = os.path.join(tempfile.gettempdir(), f"{lock_name}.lock")
+            lock_file = open(lock_path, "a+")
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except (BlockingIOError, OSError):
+                acquired = False
+        else:
+            logger.error("maintenance disabled for unsupported database dialect %s", dialect)
+
+        yield acquired
+    finally:
+        if acquired and connection is not None:
+            try:
+                if dialect in {"mysql", "mariadb"}:
+                    connection.execute(text("SELECT RELEASE_LOCK(:name)"), {"name": lock_name})
+                elif dialect == "postgresql":
+                    connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": lock_key})
+            except Exception:
+                logger.warning("failed to release maintenance lock %s", job_name, exc_info=True)
+        if connection is not None:
+            connection.close()
+        if lock_file is not None:
+            try:
+                if acquired:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_file.close()
+
+
+def _valid_reservation_identity(value: str | None) -> bool:
+    return bool(value and _RESERVATION_ID.fullmatch(value))
+
+
+def container_name(user_id: int | str, chal_id: int | str, ts: int, nonce: str | None = None) -> str:
+    suffix = nonce[:12] if nonce else str(ts)
+    return f"{NAME_PREFIX}u{user_id}-c{chal_id}-{suffix}"
 
 
 def _resource_kwargs(max_memory_mb: int | None, max_cpu: float | None) -> dict[str, _DockerRunVal]:
@@ -63,19 +133,6 @@ def _resource_kwargs(max_memory_mb: int | None, max_cpu: float | None) -> dict[s
 # admin-supplied cap_add is filtered against this set. anything else (SYS_ADMIN,
 # SYS_MODULE, etc) is dropped with a warning - granted caps survive no-new-privileges
 _ALLOWED_CAPS = frozenset({"NET_ADMIN", "NET_RAW", "SYS_PTRACE", "SYS_NICE"})
-
-_VOLUME_BLOCKED_PATHS = frozenset(
-    {
-        "/etc/shadow",
-        "/etc/passwd",
-        "/etc/sudoers",
-        "/proc",
-        "/sys",
-        "/dev",
-        "/var/run",
-        "/run",
-    }
-)
 
 
 def _filter_admin_caps(cap_add: str | None, chal_id: int | str | None = None) -> list[str]:
@@ -145,32 +202,14 @@ class ContainerManager:
             logger.info("scheduler skipped (CLI mode)")
             return
 
-        # leader election so kill_expired_containers + health_check fire once per
-        # interval, not WORKERS times. file lock is per-process, kernel-released on exit
-        from . import _claim_scheduler_leader
-
-        if not _claim_scheduler_leader():
-            logger.info("scheduler skipped (another worker holds the leader lock)")
-            return
-
-        expiration_check_interval = get_setting("expiration_check_interval", 5)
-
         self.expiration_scheduler = BackgroundScheduler()
-
         self.expiration_scheduler.add_job(
-            func=self.kill_expired_containers,
-            args=(self.app,),
+            func=self._maintenance_tick,
             trigger="interval",
-            seconds=expiration_check_interval,
+            seconds=1,
             misfire_grace_time=30,
             coalesce=True,
-        )
-        self.expiration_scheduler.add_job(
-            func=self.orchestrator.health_check,
-            trigger="interval",
-            seconds=30,
-            misfire_grace_time=30,
-            coalesce=True,
+            max_instances=1,
         )
         self.expiration_scheduler.start()
 
@@ -180,11 +219,44 @@ class ContainerManager:
 
         atexit.register(_shutdown_scheduler)
 
-    def reserve_slot(self, context_name: str) -> None:
-        self.orchestrator.reserve_slot(context_name)
+    def _run_maintenance_job(self, name: str, interval: int, operation: Callable[[], None]) -> bool:
+        """Run a due job once across every worker and application replica."""
 
-    def release_slot(self, context_name: str) -> None:
-        self.orchestrator.release_slot(context_name)
+        try:
+            with _maintenance_lock(self.app, name) as acquired:
+                if not acquired:
+                    return False
+                with self.app.app_context():
+                    now = time.time()
+                    state = ContainerMaintenanceModel.query.filter_by(name=name).first()
+                    if state is not None and state.last_started > now - interval:
+                        return False
+                    if state is None:
+                        db.session.add(ContainerMaintenanceModel(name=name, last_started=now))
+                    else:
+                        state.last_started = now
+                    db.session.commit()
+                operation()
+                return True
+        except Exception:
+            with self.app.app_context():
+                db.session.rollback()
+            logger.exception("maintenance job %s failed", name)
+            return False
+
+    def _maintenance_tick(self) -> None:
+        with self.app.app_context():
+            expiry_interval = int(get_setting("expiration_check_interval", 5) or 5)
+        self._run_maintenance_job("expiry", expiry_interval, lambda: self.kill_expired_containers(self.app))
+
+        def health_check() -> None:
+            with self.app.app_context():
+                try:
+                    self.orchestrator.health_check()
+                finally:
+                    db.session.remove()
+
+        self._run_maintenance_job("health", 30, health_check)
 
     def _dispatch_to_context(
         self,
@@ -197,7 +269,9 @@ class ContainerManager:
         """Route a host_manager call to a specific context or fan out across all contexts"""
         self._ensure_connected()
 
-        if context_name and context_name in self.host_manager._context_configs:
+        if context_name is not None:
+            if context_name not in self.host_manager._context_configs:
+                raise ContainerUnavailableException(f"docker context '{context_name}' is not configured")
             try:
                 return getattr(self.host_manager, method_name)(context_name, *args, **kwargs)
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
@@ -226,9 +300,6 @@ class ContainerManager:
             result.update(self.host_manager.get_running_container_ids(ctx))
         return result
 
-    def kill_container(self, container_id: str, context_name: str | None = None) -> None:
-        self._dispatch_to_context("kill_container", context_name, (container_id,), {}, default=None)
-
     def get_container_logs(self, container_id: str, context_name: str | None = None, tail: int = 200) -> str:
         result = self._dispatch_to_context(
             "get_container_logs", context_name, (container_id,), {"tail": tail}, default=""
@@ -243,31 +314,33 @@ class ContainerManager:
         image: str,
         port: int,
         command: str,
-        volumes: str,
-        max_memory_mb: int | None = None,
-        max_cpu: float | None = None,
-        context_name: str | None = None,
+        max_memory_mb: int,
+        max_cpu: float,
+        context_name: str,
+        instance_id: str,
+        provision_token: str,
+        *,
         extra_env: dict[str, str] | None = None,
         ctype: str | None = None,
         cap_add: str | None = None,
+        resolved_volumes: dict[str, dict[str, str]] | None = None,
     ) -> tuple[Container, str]:
         self._ensure_connected()
 
+        if not _valid_reservation_identity(instance_id) or not _valid_reservation_identity(provision_token):
+            raise ContainerException("managed reservations require valid instance and provision identities")
+        if context_name not in self.host_manager.get_connected_contexts():
+            raise ContainerException("reserved docker context is not reachable")
+
         kwargs: dict[str, _DockerRunVal] = _resource_kwargs(max_memory_mb, max_cpu)
 
-        if volumes:
-            try:
-                volumes_dict = json.loads(volumes)
-                for host_path in volumes_dict:
-                    normalized = os.path.normpath(host_path)
-                    if "docker.sock" in normalized:
-                        raise ContainerException("mounting the docker socket is not allowed")
-                    for blocked in _VOLUME_BLOCKED_PATHS:
-                        if normalized == blocked or normalized.startswith(blocked + "/"):
-                            raise ContainerException(f"mounting {blocked} is not allowed")
-                kwargs["volumes"] = volumes_dict
-            except json.decoder.JSONDecodeError:
-                raise ContainerException("volumes json string is invalid")
+        if resolved_volumes:
+            kwargs["volumes"] = resolved_volumes
+
+        kwargs["labels"] = {
+            "ctf.instance_id": instance_id,
+            "ctf.provision_token": provision_token,
+        }
 
         environment = {
             "CHALLENGE_ID": chal_id,
@@ -277,20 +350,15 @@ class ContainerManager:
         }
 
         ts = int(time.time())
-        name = container_name(user_id, chal_id, ts)
-        # sets shell prompt to image name instead of container hash
-        container_hostname = image.split(":")[0] if image else name
+        name = container_name(user_id, chal_id, ts, nonce=instance_id)
         kwargs["name"] = name
-        kwargs["hostname"] = container_hostname
+        kwargs["hostname"] = name
 
         caps = _build_caps(ctype, cap_add, chal_id)
         if caps:
             kwargs["cap_add"] = caps
 
-        if context_name:
-            return self._create_on_context(context_name, image, port, command, environment, kwargs)
-
-        return self._create_load_balanced(image, port, command, environment, kwargs)
+        return self._try_run_on_context(context_name, image, port, command, environment, kwargs)
 
     def _log_create_error(self, context_name: str, image: str, reason: str) -> None:
         event_logger.log_event(
@@ -311,72 +379,15 @@ class ContainerManager:
         environment: dict[str, str | int],
         kwargs: dict[str, _DockerRunVal],
     ) -> tuple[Container, str]:
-        self.host_manager.acquire_semaphore(ctx)
         try:
             container = self.host_manager.run_container(ctx, image, port, command, environment, **kwargs)
             return container, ctx
         except docker.errors.ImageNotFound:
-            self.orchestrator.release_slot(ctx)
             self._log_create_error(ctx, image, f"image {image} not found")
             raise ContainerException("docker image not found")
         except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
-            self.orchestrator.release_slot(ctx)
             self._log_create_error(ctx, image, str(e))
             raise
-        finally:
-            self.host_manager.release_semaphore(ctx)
-
-    def _create_on_context(
-        self,
-        context_name: str,
-        image: str,
-        port: int,
-        command: str,
-        environment: dict[str, str | int],
-        kwargs: dict[str, _DockerRunVal],
-    ) -> tuple[Container, str]:
-        if context_name not in self.host_manager._context_configs:
-            raise ContainerException(f"docker context '{context_name}' not available")
-
-        self.orchestrator.reserve_slot(context_name)
-        try:
-            return self._try_run_on_context(context_name, image, port, command, environment, kwargs)
-        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
-            raise ContainerException(f"failed to create container: {e}")
-
-    def _create_load_balanced(
-        self,
-        image: str,
-        port: int,
-        command: str,
-        environment: dict[str, str | int],
-        kwargs: dict[str, _DockerRunVal],
-    ) -> tuple[Container, str]:
-        tried: set[str] = set()
-        last_error = None
-
-        while len(tried) < len(self.host_manager._context_configs):
-            selected = self.orchestrator.select_and_reserve()
-            if selected is None:
-                break
-
-            if selected in tried:
-                self.orchestrator.release_slot(selected)
-                continue
-
-            tried.add(selected)
-
-            if selected not in self.host_manager._context_configs:
-                self.orchestrator.release_slot(selected)
-                continue
-
-            try:
-                return self._try_run_on_context(selected, image, port, command, environment, kwargs)
-            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
-                last_error = e
-                continue
-
-        raise ContainerException(f"failed to create container on any context: {last_error}")
 
     def create_stack(
         self,
@@ -386,37 +397,40 @@ class ContainerManager:
         image: str,
         port: int,
         command: str,
-        volumes: str,
         services_json: str | None,
         network_json: str | None,
-        max_memory_mb: int | None = None,
-        max_cpu: float | None = None,
-        context_name: str | None = None,
+        max_memory_mb: int,
+        max_cpu: float,
+        context_name: str,
+        instance_id: str,
+        provision_token: str,
+        *,
         extra_env: dict[str, str] | None = None,
         ctype: str | None = None,
         cap_add: str | None = None,
+        entry_volumes: dict[str, dict[str, str]] | None = None,
+        service_volumes: dict[str, dict[str, dict[str, str]]] | None = None,
     ) -> tuple[Container, int, list[tuple[str, Container]], str, str]:
-        import uuid
-
         self._ensure_connected()
+
+        if not _valid_reservation_identity(instance_id) or not _valid_reservation_identity(provision_token):
+            raise ContainerException("managed reservations require valid instance and provision identities")
+        if context_name not in self.host_manager.get_connected_contexts():
+            raise ContainerException("reserved docker context is not reachable")
 
         services: dict[str, dict[str, str | dict[str, str]]] = json.loads(services_json) if services_json else {}
         network_cfg: dict[str, str | dict[str, str]] = json.loads(network_json) if network_json else {}
 
         stack_id = uuid.uuid4().hex
         ts = int(time.time())
-        base_name = container_name(user_id, chal_id, ts)
+        base_name = container_name(user_id, chal_id, ts, nonce=instance_id)
         net_name = f"{base_name}-net"
 
-        if context_name:
-            if context_name not in self.host_manager._context_configs:
-                raise ContainerException(f"docker context '{context_name}' not available")
-            self.orchestrator.reserve_slot(context_name)
-        else:
-            context_name = self.orchestrator.select_and_reserve()
-            if context_name is None:
-                raise ContainerException("no healthy context available")
-        stack_labels = {"ctf.stack_id": stack_id}
+        stack_labels = {
+            "ctf.stack_id": stack_id,
+            "ctf.instance_id": instance_id,
+            "ctf.provision_token": provision_token,
+        }
 
         base_env = {
             "CHALLENGE_ID": str(chal_id),
@@ -434,12 +448,13 @@ class ContainerManager:
             self.host_manager.create_network(context_name, net_name, subnet=subnet, labels=stack_labels)
 
             entry_kwargs: dict[str, _DockerRunVal] = {"labels": stack_labels}
+            if entry_volumes:
+                entry_kwargs["volumes"] = entry_volumes
             entry_caps = _build_caps(ctype, cap_add, chal_id)
             if entry_caps:
                 entry_kwargs["cap_add"] = entry_caps
             entry_kwargs.update(_resource_kwargs(max_memory_mb, max_cpu))
 
-            entry_hostname = image.split(":")[0] if image else base_name
             entry_container, host_port = self.host_manager.run_container_on_network(
                 context_name,
                 image,
@@ -449,7 +464,7 @@ class ContainerManager:
                 base_env,
                 ip_address=ips.get("entry"),
                 publish_port=True,
-                hostname=entry_hostname,
+                hostname=base_name,
                 internal_port=port,
                 **entry_kwargs,
             )
@@ -469,6 +484,27 @@ class ContainerManager:
                 svc_kwargs: dict[str, _DockerRunVal] = {"labels": stack_labels}
                 if svc_caps:
                     svc_kwargs["cap_add"] = svc_caps
+                resolved_service_volumes = (service_volumes or {}).get(svc_name)
+                if svc_cfg.get("volumes") and resolved_service_volumes is None:
+                    raise ContainerException(f"service {svc_name} volumes must pass named-volume policy validation")
+                if resolved_service_volumes:
+                    svc_kwargs["volumes"] = resolved_service_volumes
+                service_memory = svc_cfg.get("max_memory_mb", max_memory_mb)
+                service_cpu = svc_cfg.get("max_cpu", max_cpu)
+                if isinstance(service_memory, bool) or (
+                    service_memory is not None and not isinstance(service_memory, int)
+                ):
+                    raise ContainerException(f"service {svc_name} has an invalid memory limit")
+                if isinstance(service_cpu, bool) or (
+                    service_cpu is not None and not isinstance(service_cpu, (int, float))
+                ):
+                    raise ContainerException(f"service {svc_name} has an invalid CPU limit")
+                svc_kwargs.update(
+                    _resource_kwargs(
+                        service_memory,
+                        float(service_cpu) if service_cpu is not None else None,
+                    )
+                )
 
                 svc_image = svc_cfg["image"]
                 svc_command_raw = svc_cfg.get("command")
@@ -497,7 +533,6 @@ class ContainerManager:
                 logger.warning(
                     "failed to clean up partial stack %s (may leak until reconcile)", stack_id, exc_info=True
                 )
-            self.orchestrator.release_slot(context_name)
             raise
 
     def get_images(self) -> list[str]:
@@ -555,10 +590,6 @@ class ContainerManager:
     def get_connected_contexts(self) -> list[str]:
         return self.host_manager.get_connected_contexts()
 
-    def reload_settings(self) -> None:
-        max_concurrent = int(get_setting("max_concurrent_creates", 2) or 2)
-        self.host_manager._init_semaphores(max_concurrent)
-
     def kill_expired_containers(self, app: Flask) -> None:
         # Flask-SQLAlchemy auto-teardown only fires on REQUEST contexts; manually-opened app
         # contexts leak the scoped session's connection. explicit remove() in finally.
@@ -569,7 +600,7 @@ class ContainerManager:
                 db.session.remove()
 
     def _kill_expired_containers_inner(self) -> None:
-        if True:  # preserved nesting so the existing body's indentation doesn't need to change
+        if True:  # noqa - structural block kept to make the lifecycle sweep auditable as one unit
             if not self.host_manager.has_contexts():
                 # reload from db only, don't call initialize_connection, it
                 # tears down the scheduler running this very job and raises
@@ -579,119 +610,152 @@ class ContainerManager:
                 except ContainerException:
                     return
 
-                if not self.host_manager.has_contexts():
-                    return
+            if not self.host_manager.has_contexts():
+                return
 
-            entries = ContainerInfoModel.query.filter(ContainerInfoModel.entry_or_standalone()).all()
-            killed_rows = []
-            released_stacks = set()
+        post_solve_expiry = int(get_setting("post_solve_expiry_seconds", 0) or 0)
+        if post_solve_expiry > 0:
+            try:
+                InstanceCoordinator.reconcile_solved_instances(post_solve_expiry)
+            except Exception:
+                logger.exception("maintenance could not reconcile durable solves")
 
-            for container in entries:
-                if container.expires >= int(time.time()):
-                    continue
+        now = int(time.time())
+        logical_instances = ContainerInstanceModel.query.filter(
+            db.or_(
+                db.and_(ContainerInstanceModel.state == "running", ContainerInstanceModel.expires < now),
+                db.and_(
+                    ContainerInstanceModel.state == "cleanup_pending",
+                    ContainerInstanceModel.updated_at < now - self.RECONCILE_SAFETY_AGE_SECONDS,
+                ),
+                db.and_(
+                    ContainerInstanceModel.state == "provisioning",
+                    ContainerInstanceModel.provision_deadline.isnot(None),
+                    ContainerInstanceModel.provision_deadline < now - self.RECONCILE_SAFETY_AGE_SECONDS,
+                ),
+            )
+        ).all()
 
-                try:
-                    if container.stack_id:
-                        self.host_manager.kill_stack(container.docker_context, container.stack_id)
-                    else:
-                        self.kill_container(container.container_id, container.docker_context)
-                except ContainerException:
-                    logger.warning("expiry job: docker is not initialized")
-                    continue
+        for instance in logical_instances:
+            operation_token = InstanceCoordinator.claim_operation(
+                instance.id,
+                ("running", "cleanup_pending", "provisioning"),
+                "cleanup_pending",
+            )
+            if operation_token is None:
+                continue
+            if instance.docker_context is None:
+                logger.error(
+                    "instance %s has no Docker context; retaining it for automatic reconciliation",
+                    instance.id,
+                )
+                InstanceCoordinator.release_operation(
+                    instance.id, operation_token, "configured Docker context is missing"
+                )
+                continue
+            context_name = instance.docker_context.context_name
+            entry = ContainerInfoModel.query.filter_by(instance_id=instance.id, is_entry=True).first()
+            entry_metadata = None
+            if entry is not None:
+                entry_metadata = {
+                    "container_id": entry.container_id,
+                    "challenge_id": entry.challenge_id,
+                    "challenge_name": entry.challenge.name if entry.challenge else None,
+                    "user_id": entry.user_id,
+                    "username": entry.user.name if entry.user else None,
+                    "team_id": entry.team_id,
+                    "team_name": entry.team.name if entry.team else None,
+                }
+            reason = "expired" if instance.expires < now else "reconciled"
+            try:
+                self.host_manager.force_remove_resources_by_label(context_name, f"ctf.instance_id={instance.id}")
+            except Exception as error:
+                logger.warning("maintenance could not prove cleanup for instance %s", instance.id, exc_info=True)
+                InstanceCoordinator.release_operation(instance.id, operation_token, str(error))
+                continue
 
-                self.release_slot(container.docker_context)
-
+            if not InstanceCoordinator.delete_after_confirmed_cleanup(
+                instance.id,
+                operation_token=operation_token,
+                reason=reason,
+                stopped_at=time.time(),
+            ):
+                continue
+            if entry_metadata is not None:
                 event_logger.log_event(
-                    "expired",
-                    f"container expired for {container.challenge.name if container.challenge else 'unknown'}",
-                    user_id=container.user_id,
-                    username=container.user.name if container.user else None,
+                    reason,
+                    f"container {reason} for {entry_metadata['challenge_name'] or 'unknown'}",
+                    user_id=entry_metadata["user_id"],
+                    username=entry_metadata["username"],
                     metadata={
-                        "container_id": container.container_id,
-                        "challenge_id": container.challenge_id,
-                        "challenge_name": container.challenge.name if container.challenge else None,
-                        "team_id": container.team_id,
-                        "team_name": container.team.name if container.team else None,
+                        "container_id": entry_metadata["container_id"],
+                        "challenge_id": entry_metadata["challenge_id"],
+                        "challenge_name": entry_metadata["challenge_name"],
+                        "team_id": entry_metadata["team_id"],
+                        "team_name": entry_metadata["team_name"],
                     },
                 )
 
-                if container.stack_id and container.stack_id not in released_stacks:
-                    siblings = ContainerInfoModel.query.filter_by(stack_id=container.stack_id).all()
-                    killed_rows.extend(siblings)
-                    released_stacks.add(container.stack_id)
-                else:
-                    killed_rows.append(container)
+        self._reconcile_orphans()
 
-            for row in killed_rows:
-                history = ContainerHistoryModel.query.filter_by(container_id=row.container_id).first()
-                if history:
-                    history.stopped_at = time.time()
-                    if not history.reason:
-                        history.reason = "expired"
-                db.session.delete(row)
-            if killed_rows:
-                db.session.commit()
-
-            self._reconcile_orphans()
-
-    # create_stack rolls back on failure but a docker/ssh outage mid-create can leave
-    # containers running with no DB row to expire them. this sweep diffs actual docker
-    # state against ContainerInfoModel and kills anything stale enough to be safe.
-    # matches stacks by the ctf.stack_id label and standalones by the chal- name prefix
-    RECONCILE_STACK_LABEL = "ctf.stack_id"
-    RECONCILE_NAME_PREFIX = "chal-"
+    # A Docker/SSH outage after object creation but before DB finalization can
+    # leave labelled resources without an active logical instance.
+    RECONCILE_INSTANCE_LABEL = "ctf.instance_id"
     RECONCILE_SAFETY_AGE_SECONDS = 300
 
     def _reconcile_orphans(self) -> None:
-        db_ids = {r.container_id for r in ContainerInfoModel.query.with_entities(ContainerInfoModel.container_id).all()}
+        active_instance_ids = {
+            row.id for row in ContainerInstanceModel.query.with_entities(ContainerInstanceModel.id).all()
+        }
         now = time.time()
 
         for ctx_name in self.host_manager.get_connected_contexts():
-            seen_ids: set[str] = set()
-            entries: list[ReconcileEntry] = []
-
             try:
-                entries.extend(self.host_manager.list_containers_by_label(ctx_name, self.RECONCILE_STACK_LABEL))
+                entries: list[ReconcileEntry] = self.host_manager.list_containers_by_label(
+                    ctx_name, self.RECONCILE_INSTANCE_LABEL
+                )
             except Exception as e:
                 logger.warning(f"reconcile: list by label failed on {ctx_name}: {e}")
+                continue
 
-            try:
-                entries.extend(self.host_manager.list_containers_by_prefix(ctx_name, self.RECONCILE_NAME_PREFIX))
-            except Exception as e:
-                logger.warning(f"reconcile: list by prefix failed on {ctx_name}: {e}")
-
+            oldest_by_instance: dict[str, tuple[float, str]] = {}
             for entry in entries:
-                cid = str(entry.get("id", ""))
+                instance_id = str(entry.get("instance_id", ""))
                 name = str(entry.get("name", ""))
-                if not cid or cid in seen_ids:
+                if not _valid_reservation_identity(instance_id) or instance_id in active_instance_ids:
                     continue
-                seen_ids.add(cid)
-
-                if cid in db_ids:
-                    continue
-
                 created_ts = float(entry.get("created_ts", 0) or 0)
-                # safety window guards against racing a brand-new container whose DB row
-                # hasn't committed yet. created_ts == 0 means parse failed, treat as too-young
+                current = oldest_by_instance.get(instance_id)
+                if current is None or (created_ts > 0 and created_ts < current[0]):
+                    oldest_by_instance[instance_id] = (created_ts, name)
+
+            for instance_id, (created_ts, name) in oldest_by_instance.items():
+                # Unknown timestamps are retained because age cannot be proved.
                 age = now - created_ts if created_ts > 0 else 0
                 if age < self.RECONCILE_SAFETY_AGE_SECONDS:
                     continue
 
-                logger.warning(f"reconcile: removing orphan {name} ({cid[:12]}) on {ctx_name} (age {int(age)}s)")
+                logger.warning(
+                    "reconcile: removing orphan instance %s (%s) on %s (age %ss)",
+                    instance_id,
+                    name,
+                    ctx_name,
+                    int(age),
+                )
                 try:
-                    # force_remove handles Created-state orphans where stop+auto_remove is a no-op,
-                    # which otherwise spams the log every cleanup tick forever
-                    self.host_manager.force_remove_container(ctx_name, cid)
+                    self.host_manager.force_remove_resources_by_label(
+                        ctx_name, f"{self.RECONCILE_INSTANCE_LABEL}={instance_id}"
+                    )
                     event_logger.log_event(
                         "orphan_reaped",
-                        f"reaped orphan container {name} on {ctx_name}",
+                        f"reaped orphan instance {instance_id} on {ctx_name}",
                         level="warning",
                         metadata={
                             "context": ctx_name,
                             "container_name": name,
-                            "container_id": cid,
+                            "instance_id": instance_id,
                             "age_seconds": int(age),
                         },
                     )
                 except Exception as e:
-                    logger.error(f"reconcile: failed to remove {name} on {ctx_name}: {e}")
+                    logger.error(f"reconcile: failed to remove instance {instance_id} on {ctx_name}: {e}")

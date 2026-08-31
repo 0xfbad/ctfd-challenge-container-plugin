@@ -1,23 +1,25 @@
 from __future__ import annotations
 
-import os
 import json
+import logging
+import os
 import random
 import threading
-import logging
+import time
 from collections.abc import Callable
 from typing import TypedDict, TypeVar, overload
 
 import docker
-from docker import DockerClient
-from docker.models.containers import Container
-from docker.models.networks import Network
 import gevent.monkey
 import gevent.threadpool
 import paramiko
+from docker import DockerClient
+from docker.models.containers import Container
+from docker.models.networks import Network
 
-from .models import DockerContextModel
 from .exceptions import ContainerUnavailableException
+from .models import DockerContextModel
+from .volume_policy import VolumeMetadata, docker_volume_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,21 @@ THREADPOOL_SIZE = 4
 _DockerRunVal = str | int | bool | list[str] | dict[str, str] | dict[str, dict[str, str]]
 
 _T = TypeVar("_T")
+
+
+def _confirm_removal_in_progress(container: Container, error: docker.errors.APIError) -> bool:
+    """Wait briefly for Docker's auto-remove operation to become observable."""
+    if getattr(error, "status_code", None) != 409 or "already in progress" not in str(
+        getattr(error, "explanation", error)
+    ):
+        return False
+    for _attempt in range(20):
+        try:
+            container.reload()
+        except docker.errors.NotFound:
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def _run_with_port_retry(attempt: Callable[[int], _T], *, exhausted_message: str) -> _T:
@@ -68,6 +85,7 @@ class DiscoveredContext(TypedDict):
 class ReconcileEntry(TypedDict):
     name: str
     id: str
+    instance_id: str
     created_ts: float
 
 
@@ -124,7 +142,7 @@ def _resolve_endpoint(context_name: str, hostname: str | None) -> str | None:
             return f"ssh://{hostname}"
         return f"ssh://root@{hostname}"
 
-    if os.path.exists(LOCAL_SOCKET_PATH):
+    if context_name == LOCAL_CONTEXT_NAME and os.path.exists(LOCAL_SOCKET_PATH):
         return f"unix://{LOCAL_SOCKET_PATH}"
 
     return None
@@ -165,7 +183,11 @@ def ping_endpoint(endpoint: str, timeout: int = 3) -> bool:
 
 class DockerHostManager:
     def __init__(self) -> None:
+        # Configuration and reachability are intentionally separate. A context
+        # that is down during load remains configured so health checks and
+        # cleanup can recover it without an admin reload.
         self._context_configs: dict[str, str] = {}
+        self._connected_contexts: set[str] = set()
         self._pub_hostnames: dict[str, str | None] = {}
         # keyed by (context_name, thread_ident) because paramiko Channels bind
         # gevent.Event to the Hub of the creating thread. reuse from another
@@ -176,7 +198,6 @@ class DockerHostManager:
         # reentrant so a wrapped op can re-enter lock-protected helpers without
         # tripping a deadlock if some future caller ever holds the lock across _call
         self._lock: threading.RLock = threading.RLock()
-        self._semaphores: dict[str, threading.BoundedSemaphore] = {}
         # per-context threadpool keeps paramiko blocking off the gevent hub,
         # so one hung host can't stop the worker from serving other requests
         self._threadpools: dict[str, gevent.threadpool.ThreadPool] = {}
@@ -192,7 +213,7 @@ class DockerHostManager:
     def _call(self, context_name: str, fn, *args, **kwargs):
         # gevent.threadpool.ThreadPool.apply needs the gevent hub, which only
         # exists when monkey-patching is active (gunicorn worker). during
-        # flask db upgrade or other cli paths the hub isn't initialized and
+        # Flask CLI paths do not initialize the gevent hub and
         # apply() hangs in futex, so run inline in those cases
         if not gevent.monkey.is_module_patched("threading"):
             return fn(*args, **kwargs)
@@ -241,6 +262,7 @@ class DockerHostManager:
         # cached entries instead of 1
         to_close: list[DockerClient] = []
         with self._lock:
+            self._connected_contexts.discard(context_name)
             keys = [k for k in self._clients if k[0] == context_name]
             for k in keys:
                 to_close.append(self._clients.pop(k))
@@ -258,7 +280,10 @@ class DockerHostManager:
         # method-specific exceptions (NotFound, KeyError, etc) MUST be handled
         # inside fn before they reach this layer
         try:
-            return fn()
+            result = fn()
+            with self._lock:
+                self._connected_contexts.add(context_name)
+            return result
         except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
             self._clear_client(context_name)
             raise
@@ -269,38 +294,20 @@ class DockerHostManager:
     def _call_with_client_op(self, context_name, fn):
         return self._call(context_name, lambda: self._invoke_client_op(context_name, fn))
 
-    def _init_semaphores(self, limit: int) -> None:
-        new_semaphores = {}
-        for ctx_name in self._context_configs:
-            new_semaphores[ctx_name] = threading.BoundedSemaphore(limit)
-        self._semaphores = new_semaphores
-
-    def acquire_semaphore(self, context_name: str, timeout: int = 10) -> bool:
-        sem = self._semaphores.get(context_name)
-        if sem is None:
-            return True
-        acquired = sem.acquire(blocking=True, timeout=timeout)
-        if not acquired:
-            raise Exception("server busy, please try again shortly")
-        return True
-
-    def release_semaphore(self, context_name: str) -> None:
-        sem = self._semaphores.get(context_name)
-        if sem is not None:
-            try:
-                sem.release()
-            except ValueError:
-                pass
-
-    def load_contexts(self, contexts: list[DockerContextModel], max_concurrent_creates: int = 2) -> None:
+    def load_contexts(self, contexts: list[DockerContextModel]) -> None:
         new_configs = {}
         new_pub_hostnames = {}
+        new_connected = set()
 
         for ctx in contexts:
             endpoint = _resolve_endpoint(ctx.context_name, ctx.hostname)
             if not endpoint:
                 logger.warning(f"no endpoint for context '{ctx.context_name}', skipping")
                 continue
+
+            # Retain the resolved endpoint regardless of this load-time ping.
+            new_configs[ctx.context_name] = endpoint
+            new_pub_hostnames[ctx.context_name] = ctx.pub_hostname
 
             def _check(endpoint=endpoint):
                 client = None
@@ -323,36 +330,43 @@ class DockerHostManager:
                 err = e
 
             if err is None:
-                new_configs[ctx.context_name] = endpoint
-                new_pub_hostnames[ctx.context_name] = ctx.pub_hostname
+                new_connected.add(ctx.context_name)
                 logger.info(f"connected to context '{ctx.context_name}' at {endpoint}")
             else:
                 logger.error(f"could not connect to context '{ctx.context_name}': {err}")
 
         with self._lock:
             self._context_configs = new_configs
+            self._connected_contexts = new_connected
             self._pub_hostnames = new_pub_hostnames
             self._config_generation += 1
-
-        self._init_semaphores(max_concurrent_creates)
 
     def get_pub_hostname(self, context_name: str) -> str | None:
         return self._pub_hostnames.get(context_name)
 
     def get_connected_contexts(self) -> list[str]:
-        return list(self._context_configs.keys())
+        with self._lock:
+            return sorted(self._connected_contexts)
+
+    def get_configured_contexts(self) -> list[str]:
+        with self._lock:
+            return sorted(self._context_configs)
 
     def has_contexts(self) -> bool:
-        return bool(self._context_configs)
+        with self._lock:
+            return bool(self._connected_contexts)
 
     def ping(self, context_name: str) -> bool:
         # use a fresh ephemeral client. cached clients share paramiko transports
         # that wedge on dead-but-unreaped TCP sockets after idle periods, blocking
         # the 30s health_check past its interval for the full kernel retransmit cycle
-        url = self._context_configs.get(context_name)
+        with self._lock:
+            url = self._context_configs.get(context_name)
         if not url:
             return False
         if ping_endpoint(url, timeout=3):
+            with self._lock:
+                self._connected_contexts.add(context_name)
             return True
         self._clear_client(context_name)
         return False
@@ -425,18 +439,6 @@ class DockerHostManager:
                 )
 
             return _run_with_port_retry(attempt, exhausted_message="failed to find available port after retries")
-
-        return self._call_with_client_op(context_name, _do)
-
-    def kill_container(self, context_name: str, container_id: str) -> bool:
-        def _do():
-            try:
-                client = self._get_client(context_name)
-                container = client.containers.get(container_id)
-                container.kill()
-                return True
-            except docker.errors.NotFound:
-                return False
 
         return self._call_with_client_op(context_name, _do)
 
@@ -526,20 +528,6 @@ class DockerHostManager:
 
         return self._call_with_client_op(context_name, _do)
 
-    def force_remove_container(self, context_name: str, name_or_id: str) -> None:
-        # stop() is a no-op against Created-state containers (never started so nothing to stop)
-        # and auto_remove doesn't fire from a no-op stop, so reconciler-style cleanup needs
-        # remove(force=True) to handle Created/Running/Exited in one call
-        def _do():
-            try:
-                client = self._get_client(context_name)
-                container = client.containers.get(name_or_id)
-                container.remove(force=True)
-            except docker.errors.NotFound:
-                logger.debug(f"container {name_or_id} already removed")
-
-        return self._call_with_client_op(context_name, _do)
-
     def _parse_container_created(self, created_raw: str) -> float:
         # docker emits 9-digit fractional seconds, fromisoformat only accepts 6
         if not created_raw:
@@ -561,7 +549,7 @@ class DockerHostManager:
             return 0.0
 
     def _list_containers(self, context_name: str, filters: dict[str, str]) -> list[ReconcileEntry]:
-        # returns [{"name", "id", "created_ts"}] for any matching container (any state).
+        # Return label identity and age for every matching container (any state).
         # swallows errors and returns [] so a flapping host can't break the sweep loop
         def _do() -> list[ReconcileEntry]:
             try:
@@ -570,10 +558,12 @@ class DockerHostManager:
                 results: list[ReconcileEntry] = []
                 for c in containers:
                     created_raw = c.attrs.get("Created", "") if c.attrs else ""
+                    labels = c.attrs.get("Config", {}).get("Labels", {}) if c.attrs else {}
                     results.append(
                         {
                             "name": c.name or "",
                             "id": c.id or "",
+                            "instance_id": str(labels.get("ctf.instance_id", "")),
                             "created_ts": self._parse_container_created(created_raw),
                         }
                     )
@@ -591,16 +581,12 @@ class DockerHostManager:
         # used by the reconcile sweep for any container carrying the given label (any value)
         return self._list_containers(context_name, {"label": label_key})
 
-    def list_containers_by_prefix(self, context_name: str, name_prefix: str) -> list[ReconcileEntry]:
-        # used by the reconcile sweep for standalone (non-stack) containers
-        return self._list_containers(context_name, {"name": name_prefix})
-
     def kill_stack(self, context_name: str, stack_id: str) -> int:
-        # background expiry runs against rows whose context may have failed to
-        # connect on the last reload; return 0 instead of raising for cleanup
+        # Missing/unreachable configuration is not evidence of Docker absence.
+        # Fail closed so callers retain DB rows/quota for later reconciliation.
         with self._lock:
             if context_name not in self._context_configs:
-                return 0
+                raise ContainerUnavailableException(f"docker context '{context_name}' is not configured")
 
         def _do():
             client = self._get_client(context_name)
@@ -622,6 +608,58 @@ class DockerHostManager:
 
         return self._call_with_client_op(context_name, _do)
 
+    def force_remove_resources_by_label(self, context_name: str, label: str) -> tuple[int, int]:
+        """Strictly remove containers and networks matching one exact label.
+
+        Docker/SSH failures are propagated, so an empty successful result is
+        usable as proof of absence by lifecycle reconciliation.
+        """
+
+        with self._lock:
+            if context_name not in self._context_configs:
+                raise ContainerUnavailableException(f"docker context '{context_name}' is not configured")
+
+        def _do() -> tuple[int, int]:
+            client = self._get_client(context_name)
+            removed_containers = 0
+            removed_networks = 0
+            containers = client.containers.list(filters={"label": label}, all=True)
+            for container in containers:
+                try:
+                    container.remove(force=True)
+                    removed_containers += 1
+                except docker.errors.NotFound:
+                    pass
+                except docker.errors.APIError as error:
+                    if not _confirm_removal_in_progress(container, error):
+                        raise
+                    removed_containers += 1
+            networks = client.networks.list(filters={"label": label})
+            for network in networks:
+                try:
+                    network.remove()
+                    removed_networks += 1
+                except docker.errors.NotFound:
+                    pass
+            return removed_containers, removed_networks
+
+        return self._call_with_client_op(context_name, _do)
+
+    def count_resources_by_label(self, context_name: str, label: str) -> tuple[int, int]:
+        """Count containers and networks for an exact label filter.
+
+        Transport failures propagate so callers never mistake an unreachable
+        daemon for proof that no resources remain.
+        """
+
+        def _do() -> tuple[int, int]:
+            client = self._get_client(context_name)
+            containers = client.containers.list(filters={"label": label}, all=True)
+            networks = client.networks.list(filters={"label": label})
+            return len(containers), len(networks)
+
+        return self._call_with_client_op(context_name, _do)
+
     def get_container_logs(self, context_name: str, container_id: str, tail: int = 200) -> str:
         def _do():
             try:
@@ -633,6 +671,15 @@ class DockerHostManager:
                 return output
             except docker.errors.NotFound:
                 return ""
+
+        return self._call_with_client_op(context_name, _do)
+
+    def get_volume_metadata(self, context_name: str, docker_name: str) -> VolumeMetadata | None:
+        """Inspect an exact pre-provisioned volume without creating it."""
+
+        def _do():
+            client = self._get_client(context_name)
+            return docker_volume_metadata(client, docker_name)
 
         return self._call_with_client_op(context_name, _do)
 

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import time
 import logging
-from collections.abc import Callable
-from threading import Lock
+import time
 from collections import deque
+from collections.abc import Callable
 from datetime import datetime
+from threading import Lock
 
 logger = logging.getLogger(__name__)
 

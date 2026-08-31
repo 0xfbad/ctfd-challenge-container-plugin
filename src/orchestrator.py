@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import logging
-from threading import Lock
+import time
 from collections import defaultdict
+from threading import Lock
 from typing import TypedDict
 
+from CTFd.models import db
+
+from .coordination import InstanceCoordinator
 from .docker_host_manager import DockerHostManager
-from .models import ContainerChallengeModel, DockerContextModel
-from .utils import get_setting
 from .event_logger import MetadataDict, event_logger
+from .models import ContainerChallengeModel, DockerContextModel
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +26,8 @@ class HostStatus(TypedDict):
 
 
 class Orchestrator:
+    """DB-derived host health and load reporting."""
+
     def __init__(self, host_manager: DockerHostManager) -> None:
         self.host_manager = host_manager
         self.container_counts: defaultdict[str, int] = defaultdict(int)
@@ -35,22 +40,38 @@ class Orchestrator:
         chal = ContainerChallengeModel.query.filter(ContainerChallengeModel.image.isnot(None)).first()
         return chal.image if chal else None
 
+    def _refresh_db_counts(self) -> None:
+        """Refresh conservative physical load from shared database state."""
+
+        contexts = DockerContextModel.query.all()
+        counts_by_id = InstanceCoordinator.placement_counts(db.session)
+        counts_by_name = {context.context_name: counts_by_id.get(context.id, 0) for context in contexts}
+
+        with self.lock:
+            self.container_counts = defaultdict(int, counts_by_name)
+            self.weights = {context.context_name: int(context.weight) for context in contexts}
+            self.health = {
+                context.context_name: context.health_state == "healthy"
+                for context in contexts
+                if context.state == "active"
+            }
+
     def load_from_db(self) -> None:
-        contexts = DockerContextModel.query.filter_by(enabled=True).all()
-
-        max_concurrent = int(get_setting("max_concurrent_creates", 2) or 2)
-        self.host_manager.load_contexts(contexts, max_concurrent)
+        # Preserve all configured endpoints. Draining/disabled/retired contexts
+        # may still be required for cleanup, and down hosts must remain retryable.
+        contexts = DockerContextModel.query.all()
+        self.host_manager.load_contexts(contexts)
         connected = set(self.host_manager.get_connected_contexts())
-
-        new_health = {}
-        new_weights = {}
+        now = time.time()
         events = []
 
-        for ctx in contexts:
-            name = ctx.context_name
+        for context in contexts:
+            name = context.context_name
             is_connected = name in connected
-            new_health[name] = is_connected
-            new_weights[name] = ctx.weight
+            previous_health = context.health_state
+            context.health_state = "healthy" if is_connected else "unhealthy"
+            context.health_checked_at = now
+            context.health_error = None if is_connected else "connection failed"
 
             if is_connected:
                 meta: MetadataDict = {"context_name": name}
@@ -61,8 +82,9 @@ class Orchestrator:
                         "size_mb": image_info["size_mb"],
                         "created": image_info["created"],
                     }
-                events.append(("host_healthy", f"context {name} is healthy", "info", meta))
-            else:
+                if previous_health != "healthy":
+                    events.append(("host_healthy", f"context {name} is healthy", "info", meta))
+            elif previous_health != "unhealthy":
                 events.append(
                     (
                         "host_unhealthy",
@@ -72,66 +94,26 @@ class Orchestrator:
                     )
                 )
 
-        known = {ctx.context_name for ctx in contexts}
-
-        with self.lock:
-            self.health = new_health
-            self.weights = new_weights
-            for name in list(self.container_counts.keys()):
-                if name not in known:
-                    del self.container_counts[name]
-            for name in known:
-                if name not in self.container_counts:
-                    self.container_counts[name] = 0
+        db.session.commit()
+        self._refresh_db_counts()
 
         for event_type, message, level, metadata in events:
             event_logger.log_event(event_type, message, level=level, metadata=metadata)
 
-        healthy_count = sum(1 for h in new_health.values() if h)
-        logger.info(f"loaded {len(contexts)} contexts, {healthy_count} healthy")
-
-    def _score_locked(self, name: str) -> float:
-        # load-balancer score; caller must hold self.lock. authoritative for placement
-        # in _pick_best_context and surfaced via get_status for observability
-        count = self.container_counts[name]
-        weight = self.weights.get(name, 1)
-        return weight / (count + 1)
-
-    def _pick_best_context(self) -> str | None:
-        # caller must hold self.lock
-        candidates = []
-        for name, healthy in self.health.items():
-            if not healthy:
-                continue
-            candidates.append((self._score_locked(name), name))
-
-        if not candidates:
-            return None
-
-        candidates.sort(key=lambda x: (-x[0], x[1]))
-        return candidates[0][1]
-
-    def select_and_reserve(self) -> str | None:
-        with self.lock:
-            name = self._pick_best_context()
-            if name is None:
-                return None
-            self.container_counts[name] += 1
-            return name
-
-    def reserve_slot(self, context_name: str) -> None:
-        with self.lock:
-            self.container_counts[context_name] += 1
-
-    def release_slot(self, context_name: str) -> None:
-        with self.lock:
-            if self.container_counts[context_name] > 0:
-                self.container_counts[context_name] -= 1
+        healthy_count = sum(1 for context in contexts if context.health_state == "healthy")
+        logger.info("loaded %d configured contexts, %d healthy", len(contexts), healthy_count)
 
     def mark_unhealthy(self, context_name: str, reason: str = "unreachable") -> None:
+        context = DockerContextModel.query.filter_by(context_name=context_name).first()
+        if context is not None:
+            context.health_state = "unhealthy"
+            context.health_checked_at = time.time()
+            context.health_error = str(reason)[:512]
+            db.session.commit()
         with self.lock:
-            self.health[context_name] = False
-        logger.warning(f"context {context_name} marked unhealthy: {reason}")
+            if context_name in self.health:
+                self.health[context_name] = False
+        logger.warning("context %s marked unhealthy: %s", context_name, reason)
         event_logger.log_event(
             "host_unhealthy",
             f"context {context_name} marked unhealthy: {reason}",
@@ -140,9 +122,16 @@ class Orchestrator:
         )
 
     def mark_healthy(self, context_name: str) -> None:
+        context = DockerContextModel.query.filter_by(context_name=context_name).first()
+        if context is not None:
+            context.health_state = "healthy"
+            context.health_checked_at = time.time()
+            context.health_error = None
+            db.session.commit()
         with self.lock:
-            self.health[context_name] = True
-        logger.info(f"context {context_name} marked healthy")
+            if context is not None and context.state == "active":
+                self.health[context_name] = True
+        logger.info("context %s marked healthy", context_name)
         event_logger.log_event(
             "host_healthy",
             f"context {context_name} marked healthy",
@@ -151,31 +140,64 @@ class Orchestrator:
         )
 
     def health_check(self) -> None:
-        with self.lock:
-            names = list(self.health.keys())
-
-        for name in names:
+        for name in self.host_manager.get_configured_contexts():
+            probe_started = time.time()
             reachable = self.host_manager.ping(name)
+            context = DockerContextModel.query.filter_by(context_name=name).first()
+            if context is None:
+                continue
+            previous_state = context.health_state
+            # A slower, older probe must not overwrite a newer result from a
+            # second maintenance process during failover or misconfiguration.
+            updated = DockerContextModel.query.filter(
+                DockerContextModel.id == context.id,
+                db.or_(
+                    DockerContextModel.health_checked_at.is_(None),
+                    DockerContextModel.health_checked_at < probe_started,
+                ),
+            ).update(
+                {
+                    DockerContextModel.health_state: "healthy" if reachable else "unhealthy",
+                    DockerContextModel.health_checked_at: probe_started,
+                    DockerContextModel.health_error: None if reachable else "connection failed",
+                },
+                synchronize_session=False,
+            )
+            db.session.commit()
+            if updated != 1:
+                continue
             with self.lock:
-                was_healthy = self.health.get(name)
-
-            if reachable and not was_healthy:
-                self.mark_healthy(name)
-            elif not reachable and was_healthy:
-                self.mark_unhealthy(name)
+                if context.state == "active":
+                    self.health[name] = reachable
+            if reachable and previous_state != "healthy":
+                logger.info("context %s marked healthy", name)
+                event_logger.log_event(
+                    "host_healthy",
+                    f"context {name} marked healthy",
+                    level="info",
+                    metadata={"context_name": name},
+                )
+            elif not reachable and previous_state != "unhealthy":
+                logger.warning("context %s marked unhealthy: connection failed", name)
+                event_logger.log_event(
+                    "host_unhealthy",
+                    f"context {name} marked unhealthy: connection failed",
+                    level="warning",
+                    metadata={"context_name": name, "reason": "connection failed"},
+                )
 
     def get_status(self) -> list[HostStatus]:
+        self._refresh_db_counts()
+        contexts = {context.context_name: context for context in DockerContextModel.query.all()}
         with self.lock:
-            status: list[HostStatus] = []
-            for name in self.health:
-                status.append(
-                    {
-                        "context_name": name,
-                        "pub_hostname": self.host_manager.get_pub_hostname(name),
-                        "active_containers": self.container_counts.get(name, 0),
-                        "healthy": self.health[name],
-                        "weight": self.weights.get(name, 1),
-                        "score": self._score_locked(name),
-                    }
-                )
-            return status
+            return [
+                {
+                    "context_name": name,
+                    "pub_hostname": self.host_manager.get_pub_hostname(name),
+                    "active_containers": self.container_counts.get(name, 0),
+                    "healthy": context.state == "active" and context.health_state == "healthy",
+                    "weight": int(context.weight or 1),
+                    "score": int(context.weight or 1) / (self.container_counts.get(name, 0) + 1),
+                }
+                for name, context in sorted(contexts.items())
+            ]

@@ -3,25 +3,36 @@ from __future__ import annotations
 import logging
 import os
 import secrets
-import time
 import threading
+import time
 
-from flask import Request
-from CTFd.plugins.challenges import BaseChallenge, calculate_value
-from CTFd.plugins.challenges.decay import DECAY_FUNCTIONS
+from flask import Request, abort
+from flask import request as flask_request
+from sqlalchemy.exc import IntegrityError
+
 from CTFd.exceptions.challenges import (
     ChallengeCreateException,
     ChallengeUpdateException,
 )
-from CTFd.models import db, Users, Teams, Solves
+from CTFd.models import Teams, Users, db
+from CTFd.plugins.challenges import BaseChallenge, calculate_value
+from CTFd.plugins.challenges.decay import DECAY_FUNCTIONS
 from CTFd.utils.user import get_current_user, get_ip
-from flask import request as flask_request
-from sqlalchemy.exc import IntegrityError
 
-from .models import ContainerChallengeModel, ContainerInfoModel, ContainerHistoryModel, ContainerFlagShareModel
-from .utils import get_setting, _TOKEN_LENGTH_KEY, is_team_mode, resolve_xid, owner_filter
-from .freshness import compute_token, render_flag, extract_token
+from .challenge_config import normalize_challenge_fields, normalize_services
+from .coordination import InstanceCoordinator
 from .event_logger import event_logger, flag_share_message, flag_share_metadata
+from .flag_type import flag_share_identity_fields
+from .freshness import compute_token, extract_token, render_flag
+from .models import (
+    ContainerChallengeModel,
+    ContainerFlagShareModel,
+    ContainerInfoModel,
+    ContainerInstanceModel,
+    DockerContextModel,
+)
+from .utils import _TOKEN_LENGTH_KEY, ValidationError, get_setting, is_team_mode, owner_filter, resolve_xid
+from .volume_policy import MountConfigError, VolumePolicyError
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +89,9 @@ def _shorten_after_solve(challenge_id: int, xid: int, team_mode: bool) -> int | 
         return None
     expiry_seconds = int(expiry_raw)
 
-    container = ContainerInfoModel.query.filter_by(challenge_id=challenge_id, **owner_filter(xid, team_mode)).first()
+    container = ContainerInfoModel.query.filter_by(
+        challenge_id=challenge_id, is_entry=True, **owner_filter(xid, team_mode)
+    ).first()
 
     if not container:
         return None
@@ -86,13 +99,10 @@ def _shorten_after_solve(challenge_id: int, xid: int, team_mode: bool) -> int | 
     now = int(time.time())
     solve_time = now - container.timestamp if container.timestamp else None
 
-    container.expires = now + expiry_seconds
-    db.session.commit()
-
-    history = ContainerHistoryModel.query.filter_by(container_id=container.container_id).first()
-    if history:
-        history.reason = "solved"
-        db.session.commit()
+    target_expires = now + expiry_seconds
+    update = InstanceCoordinator.shorten_after_solve(container.instance_id, target_expires, solved_at=now)
+    if update is None:
+        return None
 
     return solve_time
 
@@ -114,10 +124,6 @@ class ContainerChallenge(BaseChallenge):
 
     challenge_model = ContainerChallengeModel
 
-    @staticmethod
-    def sanitize_value(value: str | None) -> str | None:
-        return value if value and value != "" else None
-
     @classmethod
     def _handle_ssh_password(cls, data: dict[str, str | None], existing_password: str | None = None) -> None:
         mode = data.pop("ssh_password_mode", None)
@@ -128,18 +134,23 @@ class ContainerChallenge(BaseChallenge):
 
     @classmethod
     def create(cls, request: Request) -> ContainerChallengeModel:
-        data = request.form or request.get_json()
+        raw = request.form or request.get_json(silent=True) or {}
+        data = dict(raw)
 
         cls._handle_ssh_password(data)
+        try:
+            data = normalize_challenge_fields(data)
+        except (ValidationError, MountConfigError, VolumePolicyError) as exc:
+            raise ChallengeCreateException(str(exc)) from exc
 
-        for attr in ("docker_context", "max_memory_mb", "max_cpu", "expiration_seconds", "max_renewals"):
-            if attr in data:
-                data[attr] = cls.sanitize_value(data[attr])
+        context_name = data.get("docker_context")
+        if context_name and not DockerContextModel.query.filter_by(context_name=context_name).first():
+            raise ChallengeCreateException(f"Docker context '{context_name}' does not exist")
 
         for attr in ("initial", "minimum", "decay"):
             if attr in data:
                 try:
-                    data[attr] = float(data[attr])
+                    data[attr] = float(str(data[attr]))
                 except (ValueError, TypeError):
                     raise ChallengeCreateException(f"Invalid input for '{attr}'")
 
@@ -192,20 +203,58 @@ class ContainerChallenge(BaseChallenge):
         "decay",
     }
 
+    _RUNTIME_FIELDS = {
+        "image",
+        "port",
+        "command",
+        "volumes",
+        "ctype",
+        "ssh_username",
+        "ssh_password",
+        "docker_context",
+        "max_memory_mb",
+        "max_cpu",
+        "expiration_seconds",
+        "max_renewals",
+        "cap_add",
+        "services_json",
+        "network_json",
+    }
+
     @classmethod
     def update(cls, challenge: ContainerChallengeModel, request: Request) -> ContainerChallengeModel:
-        data = request.form or request.get_json()
+        raw = request.form or request.get_json(silent=True) or {}
+        data = dict(raw)
 
         cls._handle_ssh_password(data, existing_password=challenge.ssh_password)
+
+        existing_service_names: set[str] = set()
+        if challenge.services_json:
+            _, existing_services = normalize_services(challenge.services_json)
+            existing_service_names = set(existing_services)
+        try:
+            data = normalize_challenge_fields(data, existing_service_names=existing_service_names)
+        except (ValidationError, MountConfigError, VolumePolicyError) as exc:
+            db.session.rollback()
+            raise ChallengeUpdateException(str(exc)) from exc
+
+        changed_runtime_fields = {
+            field for field in cls._RUNTIME_FIELDS if field in data and data[field] != getattr(challenge, field)
+        }
+        if changed_runtime_fields and ContainerInstanceModel.query.filter_by(challenge_id=challenge.id).count():
+            fields = ", ".join(sorted(changed_runtime_fields))
+            raise ChallengeUpdateException(f"stop all active instances before changing runtime configuration: {fields}")
+
+        context_name = data.get("docker_context")
+        if context_name and not DockerContextModel.query.filter_by(context_name=context_name).first():
+            raise ChallengeUpdateException(f"Docker context '{context_name}' does not exist")
 
         for attr, value in data.items():
             if attr not in cls._UPDATABLE_FIELDS:
                 continue
-            if attr in ("docker_context", "max_memory_mb", "max_cpu", "expiration_seconds", "max_renewals"):
-                value = cls.sanitize_value(value)
-            elif attr in ("initial", "minimum", "decay"):
+            if attr in ("initial", "minimum", "decay"):
                 try:
-                    value = float(value)
+                    value = float(str(value))
                 except (ValueError, TypeError):
                     db.session.rollback()
                     raise ChallengeUpdateException(f"Invalid input for '{attr}'")
@@ -222,6 +271,12 @@ class ContainerChallenge(BaseChallenge):
             return calculate_value(challenge)
 
         return challenge
+
+    @classmethod
+    def delete(cls, challenge: ContainerChallengeModel) -> None:
+        if ContainerInstanceModel.query.filter_by(challenge_id=challenge.id).count():
+            abort(409, description="stop and clean all active instances before deleting this challenge")
+        super().delete(challenge)
 
     @classmethod
     def attempt(cls, challenge: ContainerChallengeModel, request: Request) -> tuple[bool, str]:
@@ -263,20 +318,6 @@ class ContainerChallenge(BaseChallenge):
                 match = expected == submission
 
             if match:
-                solve_time = _shorten_after_solve(challenge.id, xid, team_mode)
-                already_solved = Solves.query.filter_by(account_id=xid, challenge_id=challenge.id).first()
-                if not already_solved:
-                    event_logger.log_event(
-                        "solved",
-                        f"user '{user.name}' solved '{challenge.name}', timer shortened",
-                        user_id=user.id,
-                        username=user.name,
-                        metadata={
-                            "challenge_id": challenge.id,
-                            "challenge_name": challenge.name,
-                            "solve_time": solve_time,
-                        },
-                    )
                 return True, "correct"
 
             submitted_token = extract_token(template, submission)
@@ -312,7 +353,12 @@ class ContainerChallenge(BaseChallenge):
                     submitter_team_id=user.team.id if (team_mode and user.team) else None,
                     owner_user_id=None if team_mode else source_id,
                     owner_team_id=source_id if team_mode else None,
-                    submitted_token=submitted_token,
+                    **flag_share_identity_fields(
+                        user=user,
+                        challenge_id=challenge.id,
+                        submitted_token=submitted_token,
+                        secret=secret,
+                    ),
                     ip=get_ip(flask_request),
                     timestamp=time.time(),
                 )
@@ -327,6 +373,42 @@ class ContainerChallenge(BaseChallenge):
                 return False, "this flag belongs to another participant. this attempt has been logged."
 
         return False, "incorrect"
+
+    @classmethod
+    def solve(cls, user, team, challenge: ContainerChallengeModel, request: Request) -> None:
+        """Persist the CTFd solve before applying any container side effects."""
+
+        super().solve(user=user, team=team, challenge=challenge, request=request)
+        team_mode = bool(is_team_mode())
+        xid = team.id if team_mode and team is not None else user.id
+        try:
+            solve_time = _shorten_after_solve(challenge.id, xid, team_mode)
+        except Exception as error:
+            solve_time = None
+            logger.exception("solve persisted but container expiry shortening failed")
+            event_logger.log_event(
+                "solve_reconcile_pending",
+                f"solve persisted but timer shortening failed for '{challenge.name}'",
+                level="error",
+                user_id=user.id,
+                username=user.name,
+                metadata={
+                    "challenge_id": challenge.id,
+                    "challenge_name": challenge.name,
+                    "reason": str(error),
+                },
+            )
+        event_logger.log_event(
+            "solved",
+            f"user '{user.name}' solved '{challenge.name}', timer shortened",
+            user_id=user.id,
+            username=user.name,
+            metadata={
+                "challenge_id": challenge.id,
+                "challenge_name": challenge.name,
+                "solve_time": solve_time,
+            },
+        )
 
     @classmethod
     def read(cls, challenge: ContainerChallengeModel) -> dict[str, str | int | dict[str, str] | None]:

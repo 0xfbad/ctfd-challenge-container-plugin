@@ -1,5 +1,6 @@
-from flask import Blueprint
 import os
+
+from flask import Blueprint
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 templates_dir = os.path.join(current_dir, "..", "templates")
@@ -13,6 +14,6 @@ containers_bp = Blueprint(
     url_prefix="/containers",
 )
 
-from . import routes_user as routes_user  # noqa: E402
-from . import routes_admin as routes_admin  # noqa: E402
 from . import helpers as helpers  # noqa: E402
+from . import routes_admin as routes_admin  # noqa: E402
+from . import routes_user as routes_user  # noqa: E402

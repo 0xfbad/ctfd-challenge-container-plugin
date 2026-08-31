@@ -1,42 +1,45 @@
 from __future__ import annotations
 
-import time
 import logging
-import threading
+import time
 from functools import wraps
 
 from flask import current_app, g, request
-from CTFd.models import db
+
 from CTFd.utils.user import is_admin
 
-from ..models import ContainerInfoModel, ContainerChallengeModel, ContainerHistoryModel, DockerContextModel
-from ..exceptions import ContainerException, ContainerUnavailableException
+from ..challenge_config import normalize_services
 from ..container_manager import ContainerManager
+from ..coordination import (
+    CoordinationError,
+    CreateCapacityUnavailable,
+    FinalizedInstance,
+    InstanceCoordinator,
+    InstanceQuotaExceeded,
+    InstanceReservation,
+    PhysicalMember,
+)
 from ..docker_host_manager import LOCAL_CONTEXT_NAME
-from ..utils import get_setting, owner_filter, sanitize_container_error
-from ..freshness import compute_token
 from ..event_logger import event_logger
+from ..exceptions import ContainerException
+from ..freshness import compute_token
+from ..models import ContainerChallengeModel, ContainerInfoModel, ContainerInstanceModel, DockerContextModel
+from ..utils import ValidationError, get_setting, owner_filter, sanitize_container_error
+from ..volume_policy import (
+    MountConfigError,
+    MountRequest,
+    VolumeMetadata,
+    VolumePolicy,
+    evaluate_volume_readiness,
+    load_volume_policy,
+    parse_mount_config,
+    resolve_mounts_for_context,
+)
 
 logger = logging.getLogger(__name__)
 
 # JSON response dicts returned by helper functions
 JsonResponse = dict[str, str | int | bool | None]
-
-_create_locks_guard = threading.Lock()
-_create_locks: dict[tuple[int, str, int], threading.Lock] = {}
-_MAX_CREATE_LOCKS = 1000
-
-
-def _get_create_lock(chal_id: int, xid: int, is_team: bool) -> threading.Lock:
-    key = (chal_id, "team" if is_team else "user", xid)
-    with _create_locks_guard:
-        if key not in _create_locks:
-            if len(_create_locks) > _MAX_CREATE_LOCKS:
-                stale = [k for k, v in _create_locks.items() if not v.locked()]
-                for k in stale:
-                    del _create_locks[k]
-            _create_locks[key] = threading.Lock()
-        return _create_locks[key]
 
 
 def _resolve_challenge(chal_id: int) -> ContainerChallengeModel | None:
@@ -129,20 +132,14 @@ def resolve_max_renewals(challenge: ContainerChallengeModel) -> int:
     return int(max_renewals)
 
 
-def _delete_container_rows(container: ContainerInfoModel) -> None:
-    # stack rows share a stack_id; deleting the entry alone would leak companion rows
-    if container.stack_id:
-        for row in ContainerInfoModel.query.filter_by(stack_id=container.stack_id).all():
-            db.session.delete(row)
-    else:
-        db.session.delete(container)
-
-
 def build_connection_response(
     status: str,
     challenge: ContainerChallengeModel,
-    container: ContainerInfoModel,
+    container: ContainerInfoModel | FinalizedInstance,
     context_name: str | None,
+    *,
+    expires: int | None = None,
+    renewals_used: int | None = None,
 ) -> JsonResponse:
     return {
         "status": status,
@@ -151,8 +148,8 @@ def build_connection_response(
         "ssh_username": challenge.ssh_username,
         "ssh_password": challenge.ssh_password,
         "connect": challenge.ctype,
-        "expires": container.expires,
-        "renewals_used": container.renewals_used or 0,
+        "expires": container.expires if expires is None else expires,
+        "renewals_used": container.renewals_used if renewals_used is None else renewals_used,
         "max_renewals": resolve_max_renewals(challenge),
     }
 
@@ -182,34 +179,6 @@ def get_hostname_for_context(context_name: str | None) -> str:
     return _request_hostname()
 
 
-def record_history_stop(container_id: str, reason: str) -> None:
-    row = ContainerHistoryModel.query.filter_by(container_id=container_id).first()
-    if row:
-        row.stopped_at = time.time()
-        row.reason = reason
-
-
-def _add_history_row(
-    container_id: str,
-    challenge_id: int,
-    uid: int,
-    team_id: int | None,
-    context_name: str,
-    stack_id: str | None = None,
-) -> None:
-    db.session.add(
-        ContainerHistoryModel(
-            container_id=container_id,
-            challenge_id=challenge_id,
-            user_id=uid,
-            team_id=team_id,
-            docker_context=context_name,
-            stack_id=stack_id,
-            created_at=time.time(),
-        )
-    )
-
-
 def _log_request_failed(challenge: ContainerChallengeModel, uid: int, err: Exception) -> None:
     event_logger.log_event(
         "request_failed",
@@ -224,56 +193,69 @@ def _log_request_failed(challenge: ContainerChallengeModel, uid: int, err: Excep
     )
 
 
-def kill_container(container_id: str) -> JsonResponse:
+def cleanup_instance(instance_id: str, *, reason: str = "stopped") -> JsonResponse:
     container_manager = current_app.container_manager
-    container = ContainerInfoModel.query.filter_by(container_id=container_id).first()
+    instance = ContainerInstanceModel.query.filter_by(id=instance_id).first()
+    if instance is None:
+        return {"error": "container instance not found"}
+    if instance.docker_context is None:
+        return {"error": "container context is unavailable; cleanup will retry automatically"}
+    context_name = instance.docker_context.context_name
+    operation_token = InstanceCoordinator.claim_operation(
+        instance_id, ("running", "provisioning", "cleanup_pending"), "cleanup_pending"
+    )
+    if operation_token is None:
+        return {"error": "container cleanup is already in progress"}
+    try:
+        container_manager.host_manager.force_remove_resources_by_label(context_name, f"ctf.instance_id={instance_id}")
+    except Exception as error:
+        logger.warning("failed to clean instance %s; retaining cleanup state", instance_id, exc_info=True)
+        InstanceCoordinator.release_operation(instance_id, operation_token, str(error))
+        return {"error": "container host unavailable; cleanup will be retried"}
 
+    if not InstanceCoordinator.delete_after_confirmed_cleanup(
+        instance_id,
+        operation_token=operation_token,
+        reason=reason,
+        stopped_at=time.time(),
+    ):
+        return {"error": "container cleanup finalization is already in progress"}
+    return {"success": "container cleaned"}
+
+
+def kill_container(container_id: str) -> JsonResponse:
+    container = ContainerInfoModel.query.filter_by(container_id=container_id).first()
     if not container:
         return {"error": "container not found"}
 
     context_name = container.docker_context
-    stack_id = container.stack_id
-
-    try:
-        if stack_id:
-            container_manager.host_manager.kill_stack(context_name, stack_id)
-        else:
-            container_manager.kill_container(container_id, context_name)
-    except ContainerException:
-        return {"error": "docker is not initialized, please check your settings"}
-    except Exception as e:
-        logger.error(f"failed to kill container {container_id}: {e}")
-        return {"error": "failed to stop container, please try again"}
-
-    container_manager.release_slot(context_name)
-
     challenge_name = container.challenge.name if container.challenge else None
     user_name = container.user.name if container.user else None
     team_name = container.team.name if container.team else None
+    audit = {
+        "challenge_id": container.challenge_id,
+        "user_id": container.user_id,
+        "team_id": container.team_id,
+        "instance_id": container.instance_id,
+    }
+
+    instance_id = str(audit["instance_id"])
+    result = cleanup_instance(instance_id)
+    if "success" not in result:
+        return result
 
     log_container_event(
         event_type="killed",
         container_id=container_id,
-        challenge_id=container.challenge_id,
+        challenge_id=audit["challenge_id"],
         challenge_name=challenge_name,
-        user_id=container.user_id,
+        user_id=audit["user_id"],
         user_name=user_name,
-        team_id=container.team_id,
+        team_id=audit["team_id"],
         team_name=team_name,
         docker_context=context_name,
         message=f"container killed for {challenge_name}",
     )
-
-    if stack_id:
-        siblings = ContainerInfoModel.query.filter_by(stack_id=stack_id).all()
-        for s in siblings:
-            record_history_stop(s.container_id, "stopped")
-            db.session.delete(s)
-    else:
-        record_history_stop(container_id, "stopped")
-        db.session.delete(container)
-
-    db.session.commit()
     return {"success": "container killed"}
 
 
@@ -292,30 +274,37 @@ def renew_container(chal_id: int, xid: int, is_team: bool) -> JsonResponse | tup
     container_manager = current_app.container_manager
     try:
         if not container_manager.is_container_running(running_container.container_id, running_container.docker_context):
-            _delete_container_rows(running_container)
-            db.session.commit()
+            kill_container(running_container.container_id)
             return {"error": "container not found, try resetting the container"}
     except ContainerException:
         return {"error": "the container host is temporarily unreachable, please wait"}
 
     max_renewals = resolve_max_renewals(challenge)
-    renewals_used = running_container.renewals_used or 0
+    renewals_used = running_container.renewals_used
 
     if renewals_used >= max_renewals:
         return {"error": "no renewals remaining"}
 
     now = int(time.time())
-    time_remaining = max(0, (running_container.expires or 0) - now)
+    time_remaining = max(0, running_container.expires - now)
 
     expiration = resolve_expiration(challenge)
     new_expires = now + expiration
-    running_container.expires = new_expires
-    running_container.renewals_used = renewals_used + 1
-    if running_container.stack_id:
-        ContainerInfoModel.query.filter_by(stack_id=running_container.stack_id).update(
-            {"expires": new_expires, "renewals_used": renewals_used + 1}
-        )
-    db.session.commit()
+    update = InstanceCoordinator.renew(
+        running_container.instance_id,
+        now=now,
+        new_expires=new_expires,
+        max_renewals=max_renewals,
+    )
+    if update is None:
+        lifecycle = InstanceCoordinator.get_lifecycle(running_container.instance_id)
+        if lifecycle and lifecycle.solved_at is not None:
+            return {"error": "solved containers cannot be renewed"}
+        if lifecycle and lifecycle.expires <= now:
+            return {"error": "expired containers cannot be renewed"}
+        return {"error": "no renewals remaining"}
+    new_expires = update.expires
+    renewals_used = update.renewals_used - 1
 
     user_id = running_container.user_id
     user_name = running_container.user.name if running_container.user else None
@@ -338,21 +327,128 @@ def renew_container(chal_id: int, xid: int, is_team: bool) -> JsonResponse | tup
         },
     )
 
-    response = build_connection_response("success", challenge, running_container, running_container.docker_context)
+    response = build_connection_response(
+        "success",
+        challenge,
+        running_container,
+        running_container.docker_context,
+        expires=new_expires,
+        renewals_used=renewals_used + 1,
+    )
     response["success"] = "container renewed"
     return response
 
 
-def create_container(chal_id: int, xid: int, uid: int, is_team: bool) -> JsonResponse | tuple[JsonResponse, int]:
-    lock = _get_create_lock(chal_id, xid, is_team)
-    acquired = lock.acquire(timeout=30)
-    if not acquired:
-        return {"error": "another container request is in progress, please wait"}, 429
+def _runtime_volume_plan(
+    challenge: ContainerChallengeModel, container_manager: ContainerManager
+) -> tuple[VolumePolicy, dict[str, tuple[MountRequest, ...]], set[str] | None]:
+    """Validate mounts and return contexts satisfying every service's policy."""
 
     try:
-        return _create_container_inner(chal_id, xid, uid, is_team)
-    finally:
-        lock.release()
+        policy = load_volume_policy()
+        plan: dict[str, tuple[MountRequest, ...]] = {
+            "entry": parse_mount_config(challenge.volumes, expected_scope="entry")
+        }
+        _, services = normalize_services(challenge.services_json)
+        for service_name, service in services.items():
+            plan[service_name] = parse_mount_config(service.get("volumes"), expected_scope="service")
+    except (ValidationError, MountConfigError, ValueError) as exc:
+        raise ContainerException(str(exc)) from exc
+
+    if not any(plan.values()):
+        return policy, plan, None
+
+    configured = set(container_manager.host_manager.get_configured_contexts())
+    candidates = [
+        row.context_name
+        for row in DockerContextModel.query.filter(
+            DockerContextModel.state == "active",
+            DockerContextModel.health_state == "healthy",
+        ).all()
+        if row.context_name in configured
+    ]
+    eligible = set(candidates)
+    metadata_cache: dict[tuple[str, str], VolumeMetadata | None] = {}
+
+    def inspect_once(context_name: str, docker_name: str) -> VolumeMetadata | None:
+        key = (context_name, docker_name)
+        if key not in metadata_cache:
+            metadata_cache[key] = container_manager.host_manager.get_volume_metadata(context_name, docker_name)
+        return metadata_cache[key]
+
+    for mounts in plan.values():
+        if not mounts:
+            continue
+        report = evaluate_volume_readiness(
+            policy,
+            candidates,
+            mounts,
+            inspect_once,
+        )
+        eligible.intersection_update(report.eligible_contexts)
+    return policy, plan, eligible
+
+
+def _resolve_runtime_volumes(
+    policy: VolumePolicy,
+    plan: dict[str, tuple[MountRequest, ...]],
+    context_name: str,
+    container_manager: ContainerManager,
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, dict[str, str]]]]:
+    """Re-check the selected daemon immediately before Docker mutation."""
+
+    resolved: dict[str, dict[str, dict[str, str]]] = {}
+    for service_name, mounts in plan.items():
+        if not mounts:
+            resolved[service_name] = {}
+            continue
+        readiness = evaluate_volume_readiness(
+            policy,
+            [context_name],
+            mounts,
+            container_manager.host_manager.get_volume_metadata,
+        )
+        if not readiness.eligible_contexts:
+            codes = sorted({issue.code for context in readiness.contexts for issue in context.issues})
+            raise ContainerException(f"required volume is unavailable on the selected host ({', '.join(codes)})")
+        resolved[service_name] = resolve_mounts_for_context(policy, context_name, mounts)
+    return resolved.pop("entry", {}), resolved
+
+
+def _cleanup_failed_reservation(
+    container_manager: ContainerManager,
+    reservation: InstanceReservation,
+    error: Exception | str,
+    *,
+    ambiguous_external_io: bool = False,
+) -> bool:
+    """Release a reservation only after a successful daemon query proves absence."""
+
+    if ambiguous_external_io:
+        # A timed-out Docker/SSH request can resume after returning to us. An
+        # immediate empty label query is therefore not proof that no resource
+        # will appear. Retain the global create slot through the reconciliation
+        # grace period.
+        InstanceCoordinator.mark_cleanup_pending(reservation.instance_id, reservation.provision_token, str(error))
+        return False
+    if not reservation.context_name:
+        InstanceCoordinator.mark_cleanup_pending(reservation.instance_id, reservation.provision_token, str(error))
+        return False
+    try:
+        container_manager.host_manager.force_remove_resources_by_label(
+            reservation.context_name, f"ctf.instance_id={reservation.instance_id}"
+        )
+        return InstanceCoordinator.delete_after_confirmed_cleanup(
+            reservation.instance_id, provision_token=reservation.provision_token
+        )
+    except Exception:
+        logger.warning("could not prove cleanup for instance %s", reservation.instance_id, exc_info=True)
+        InstanceCoordinator.mark_cleanup_pending(reservation.instance_id, reservation.provision_token, str(error))
+        return False
+
+
+def create_container(chal_id: int, xid: int, uid: int, is_team: bool) -> JsonResponse | tuple[JsonResponse, int]:
+    return _create_container_inner(chal_id, xid, uid, is_team)
 
 
 def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> JsonResponse | tuple[JsonResponse, int]:
@@ -360,34 +456,6 @@ def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> 
     challenge = _resolve_challenge(chal_id)
     if challenge is None:
         return {"error": "challenge not found"}, 400
-
-    max_containers_allowed = get_setting("max_containers_per_user")
-    user_containers = ContainerInfoModel.query.filter_by(**owner_filter(xid, is_team))
-
-    if user_containers.count() >= max_containers_allowed:
-        return {
-            "error": f"you can only spawn {max_containers_allowed} containers at a time, please stop other containers to continue"
-        }, 409
-
-    running_container = ContainerInfoModel.query.filter_by(
-        challenge_id=challenge.id, **owner_filter(xid, is_team)
-    ).first()
-
-    if running_container:
-        try:
-            if container_manager.is_container_running(running_container.container_id, running_container.docker_context):
-                response = build_connection_response(
-                    "already_running", challenge, running_container, running_container.docker_context
-                )
-                return response
-            else:
-                _delete_container_rows(running_container)
-                db.session.commit()
-        except ContainerUnavailableException:
-            return {"error": "container service temporarily unavailable"}, 503
-        except ContainerException as err:
-            logger.error(f"container status check failed: {err}")
-            return {"error": "a server error occurred, please try again"}, 500
 
     extra_env: dict[str, str] = {}
     freshness_secret_raw = get_setting("freshness_secret")
@@ -403,9 +471,69 @@ def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> 
 
     extra_env_or_none: dict[str, str] | None = extra_env or None
 
+    try:
+        _, services = normalize_services(challenge.services_json)
+        policy, volume_plan, eligible_contexts = _runtime_volume_plan(challenge, container_manager)
+    except ContainerException as err:
+        _log_request_failed(challenge, uid, err)
+        return {"error": sanitize_container_error(err)}, 400
+
+    # Do policy/host inspection first so slow control-plane probes do not eat
+    # into the participant's configured runtime.
     expiration = resolve_expiration(challenge)
     expires = int(time.time() + expiration)
-    now = int(time.time())
+    effective_memory_mb = (
+        int(challenge.max_memory_mb)
+        if challenge.max_memory_mb is not None
+        else int(get_setting("default_max_memory_mb", 512) or 512)
+    )
+    effective_cpu = (
+        float(challenge.max_cpu)
+        if challenge.max_cpu is not None
+        else int(get_setting("default_max_cpu_millicores", 1_000) or 1_000) / 1_000
+    )
+
+    coordinator = InstanceCoordinator()
+    try:
+        reservation = coordinator.reserve_instance(
+            challenge_id=challenge.id,
+            xid=xid,
+            is_team=is_team,
+            submitter_user_id=uid,
+            max_instances=int(get_setting("max_containers_per_user", 4) or 4),
+            max_concurrent_creates=int(get_setting("max_concurrent_creates", 2) or 2),
+            placement_units=1 + len(services),
+            expires=expires,
+            preferred_context_name=challenge.docker_context,
+            eligible_context_names=eligible_contexts,
+        )
+    except InstanceQuotaExceeded:
+        maximum = int(get_setting("max_containers_per_user", 4) or 4)
+        return {"error": f"you can only spawn {maximum} containers at a time, please stop other containers"}, 409
+    except CreateCapacityUnavailable:
+        return {"error": "all container hosts are busy, please try again shortly"}, 429
+    except CoordinationError as err:
+        return {"error": sanitize_container_error(ContainerException(str(err)))}, 503
+
+    if not reservation.created:
+        existing = ContainerInfoModel.query.filter_by(instance_id=reservation.instance_id, is_entry=True).first()
+        if reservation.state == "running" and existing is not None:
+            return build_connection_response("already_running", challenge, existing, reservation.context_name)
+        if reservation.state == "provisioning":
+            return {"error": "another container request is in progress, please wait"}, 429
+        return {"error": "the previous container is being cleaned up automatically; please retry shortly"}, 503
+
+    if not reservation.context_name:
+        _cleanup_failed_reservation(container_manager, reservation, "reservation has no docker context")
+        return {"error": "container placement failed"}, 503
+
+    try:
+        entry_volumes, service_volumes = _resolve_runtime_volumes(
+            policy, volume_plan, reservation.context_name, container_manager
+        )
+    except ContainerException as err:
+        _cleanup_failed_reservation(container_manager, reservation, err)
+        return {"error": sanitize_container_error(err)}, 503
 
     host_status = container_manager.orchestrator.get_status()
     event_logger.log_event(
@@ -428,8 +556,6 @@ def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> 
         },
     )
 
-    team_id = xid if is_team else None
-
     if challenge.services_json:
         try:
             entry_container, host_port, companions, stack_id, context_name = container_manager.create_stack(
@@ -439,68 +565,32 @@ def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> 
                 challenge.image,
                 challenge.port,
                 challenge.command,
-                challenge.volumes,
                 challenge.services_json,
                 challenge.network_json,
-                challenge.max_memory_mb,
-                challenge.max_cpu,
-                challenge.docker_context,
+                effective_memory_mb,
+                effective_cpu,
+                reservation.context_name,
+                reservation.instance_id,
+                reservation.provision_token,
                 extra_env=extra_env_or_none,
                 ctype=challenge.ctype,
                 cap_add=challenge.cap_add,
+                entry_volumes=entry_volumes,
+                service_volumes=service_volumes,
             )
-        except ContainerException as err:
+        except Exception as err:
             _log_request_failed(challenge, uid, err)
-            return {"error": sanitize_container_error(err)}
+            _cleanup_failed_reservation(container_manager, reservation, err, ambiguous_external_io=True)
+            return {"error": sanitize_container_error(err)}, 503
 
         if host_port is None:
-            return {"status": "error", "error": "could not get port"}
+            error = ContainerException("could not determine the entry container port")
+            _cleanup_failed_reservation(container_manager, reservation, error)
+            return {"error": "could not determine container port"}, 500
 
-        entry_row = ContainerInfoModel(
-            container_id=entry_container.id,
-            challenge_id=challenge.id,
-            team_id=team_id,
-            user_id=uid,
-            port=host_port,
-            timestamp=now,
-            expires=expires,
-            docker_context=context_name,
-            stack_id=stack_id,
-            is_entry=True,
+        members = (PhysicalMember(entry_container.id, int(host_port), True, "entry"),) + tuple(
+            PhysicalMember(svc_container.id, 0, False, svc_name) for svc_name, svc_container in companions
         )
-        db.session.add(entry_row)
-        _add_history_row(entry_container.id, challenge.id, uid, team_id, context_name, stack_id)
-
-        for svc_name, svc_container in companions:
-            db.session.add(
-                ContainerInfoModel(
-                    container_id=svc_container.id,
-                    challenge_id=challenge.id,
-                    team_id=team_id,
-                    user_id=uid,
-                    port=0,
-                    timestamp=now,
-                    expires=expires,
-                    docker_context=context_name,
-                    stack_id=stack_id,
-                    is_entry=False,
-                )
-            )
-            _add_history_row(svc_container.id, challenge.id, uid, team_id, context_name, stack_id)
-
-        try:
-            db.session.commit()
-        except Exception:
-            db.session.rollback()
-            try:
-                container_manager.host_manager.kill_stack(context_name, stack_id)
-            except Exception:
-                logger.warning(
-                    "failed to clean up stack %s after db error (may leak until reconcile)", stack_id, exc_info=True
-                )
-            return {"error": "database error, stack has been cleaned up"}, 500
-
-        new_container = entry_row
         created_container = entry_container
 
     else:
@@ -512,63 +602,57 @@ def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> 
                 challenge.image,
                 challenge.port,
                 challenge.command,
-                challenge.volumes,
-                challenge.max_memory_mb,
-                challenge.max_cpu,
-                challenge.docker_context,
+                effective_memory_mb,
+                effective_cpu,
+                reservation.context_name,
+                reservation.instance_id,
+                reservation.provision_token,
                 extra_env=extra_env_or_none,
                 ctype=challenge.ctype,
                 cap_add=challenge.cap_add,
+                resolved_volumes=entry_volumes,
             )
-        except ContainerException as err:
+        except Exception as err:
             _log_request_failed(challenge, uid, err)
-            return {"error": sanitize_container_error(err)}
+            _cleanup_failed_reservation(container_manager, reservation, err, ambiguous_external_io=True)
+            return {"error": sanitize_container_error(err)}, 503
 
         port = container_manager.get_container_port(created_container.id, context_name)
         if port is None:
-            return {"status": "error", "error": "could not get port"}
+            error = ContainerException("could not determine the container port")
+            _cleanup_failed_reservation(container_manager, reservation, error)
+            return {"error": "could not determine container port"}, 500
+        stack_id = None
+        members = (PhysicalMember(created_container.id, int(port), True, "entry"),)
 
-        new_container = ContainerInfoModel(
-            container_id=created_container.id,
-            challenge_id=challenge.id,
-            team_id=team_id,
-            user_id=uid,
-            port=port,
-            timestamp=now,
-            expires=expires,
-            docker_context=context_name,
+    try:
+        finalized = coordinator.mark_running(
+            reservation.instance_id,
+            reservation.provision_token,
+            created_container.id,
+            stack_id=stack_id,
+            physical_members=members,
         )
-        db.session.add(new_container)
-        _add_history_row(created_container.id, challenge.id, uid, team_id, context_name)
-        try:
-            db.session.commit()
-        except Exception:
-            db.session.rollback()
-            try:
-                container_manager.kill_container(created_container.id, context_name)
-            except Exception:
-                logger.warning("failed to clean up container after db error (may leak until reconcile)", exc_info=True)
-            return {"error": "database error, container has been cleaned up"}, 500
-
-    user_id = new_container.user_id
-    user_name = new_container.user.name if new_container.user else None
-    team_id = new_container.team_id
-    team_name = new_container.team.name if new_container.team else None
+        if not finalized:
+            raise ContainerException("the provisioning reservation changed before finalization")
+    except Exception as err:
+        _cleanup_failed_reservation(container_manager, reservation, err)
+        return {"error": "database finalization failed; container cleanup has been scheduled"}, 500
 
     log_container_event(
         event_type="created",
         container_id=created_container.id,
         challenge_id=challenge.id,
         challenge_name=challenge.name,
-        user_id=user_id,
-        user_name=user_name,
-        team_id=team_id,
-        team_name=team_name,
+        user_id=finalized.user_id,
+        user_name=None,
+        team_id=finalized.team_id,
+        team_name=None,
         docker_context=context_name,
         message=f"container created for {challenge.name}",
     )
 
-    response = build_connection_response("created", challenge, new_container, context_name)
+    response = build_connection_response("created", challenge, finalized, context_name)
     return response
 
 
@@ -583,6 +667,11 @@ def view_container_info(chal_id: int, xid: int, is_team: bool) -> JsonResponse |
     ).first()
 
     if running_container:
+        if running_container.instance.state == "cleanup_pending":
+            return {
+                "status": "cleanup_pending",
+                "message": "The previous instance is awaiting confirmed cleanup.",
+            }, 503
         try:
             if container_manager.is_container_running(running_container.container_id, running_container.docker_context):
                 response = build_connection_response(
@@ -590,8 +679,9 @@ def view_container_info(chal_id: int, xid: int, is_team: bool) -> JsonResponse |
                 )
                 return response
             else:
-                _delete_container_rows(running_container)
-                db.session.commit()
+                cleanup = kill_container(running_container.container_id)
+                if "success" not in cleanup:
+                    return {"error": cleanup.get("error", "container cleanup is pending")}, 503
                 return {"status": "instance not started"}
         except ContainerException:
             # host is down but the container record is still valid

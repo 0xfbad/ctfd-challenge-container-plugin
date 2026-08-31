@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from flask import request
+
 from CTFd.models import Users
 from CTFd.utils.decorators import (
     authed_only,
@@ -9,24 +10,24 @@ from CTFd.utils.decorators import (
 )
 from CTFd.utils.user import get_current_user
 
+from ..models import ContainerInfoModel
+from ..utils import DEFAULTS, handle_container_errors, is_team_mode, owner_filter, ratelimit_per_user
 from . import containers_bp
 from .helpers import (
     connect_type,
-    view_container_info,
     create_container,
-    renew_container,
     kill_container,
+    renew_container,
     requires_visible_challenge,
+    view_container_info,
 )
-from ..utils import is_team_mode, DEFAULTS, ratelimit_per_user, handle_container_errors, owner_filter
-from ..models import ContainerInfoModel
 
-# rate limit values are evaluated at import time (before app context),
-# so we use hardcoded defaults here, changes require a restart
+# Policies are resolved from storage inside each request. String keys avoid
+# evaluating settings while decorators are installed before an app context.
 _RL_VIEW = DEFAULTS["rate_limit_requests"]
 _RL_VIEW_INTERVAL = DEFAULTS["rate_limit_interval"]
-_RL_MUTATE = 10
-_RL_MUTATE_INTERVAL = 60
+_RL_MUTATE = "mutation_rate_limit_requests"
+_RL_MUTATE_INTERVAL = "mutation_rate_limit_interval"
 
 
 def validate_request(
