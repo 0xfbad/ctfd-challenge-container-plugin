@@ -1,5 +1,6 @@
-docker
-markupsafe
-paramiko
-apscheduler
-tzdata
+APScheduler>=3.10,<4
+docker>=7.1,<8
+gevent>=25.5,<26
+MarkupSafe>=2.1,<4
+paramiko>=4,<6
+tzdata>=2025.2

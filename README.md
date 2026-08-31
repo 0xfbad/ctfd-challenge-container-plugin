@@ -10,7 +10,10 @@ For multi-host setups the plugin load-balances across Docker contexts using weig
 
 ## Setup
 
-1. Clone into `CTFd/CTFd/plugins/`, restart CTFd
+1. Clone into `CTFd/CTFd/plugins/` on a fresh CTFd 3.8.7 installation and restart CTFd.
+
+This build supports new installations only. Start it with an empty database that has no challenge-container tables.
+
 2. Mount Docker access in your `docker-compose.yml`:
 
 ```yaml
@@ -19,7 +22,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ctfd-ssh:/home/ctfd/.ssh:ro
-      - ~/.docker:/home/ctfd/.docker:ro
+      - ./docker-contexts:/home/ctfd/.docker:ro
     depends_on:
       permissions:
         condition: service_completed_successfully
@@ -28,7 +31,7 @@ services:
     image: alpine:3.23
     user: root
     volumes:
-      - ~/.ssh:/mnt/host-ssh:ro
+      - ./docker-contexts/ssh:/mnt/host-ssh:ro
       - ctfd-ssh:/mnt/ctfd-ssh
     command: >
       sh -c '
@@ -40,17 +43,26 @@ volumes:
   ctfd-ssh:
 ```
 
-The socket talks to the local daemon, the SSH keys tunnel to remote hosts, and the docker config has context metadata. The permissions init container copies host SSH keys into a named volume with the correct ownership (uid 1001 matches the ctfd user inside the container), avoiding permission mismatches from bind-mounting directly. For remote contexts you'll also want `network_mode: host` so SSH connections can reach your Docker hosts
+The socket talks to the local daemon, while the dedicated SSH material and Docker context metadata connect to remote
+hosts. Docker daemon access is root-equivalent on that host, so only the CTFd service should receive these mounts. Put
+only the private key, SSH config, and pinned `known_hosts` entries used for Docker contexts under
+`docker-contexts/ssh/`. The permissions init container copies them into a named volume with the correct ownership (uid
+1001 matches the `ctfd` user inside the container). The CTFd network must be able to route to each configured SSH
+endpoint, and challenge clients must be able to reach the published TCP port range `40000-59999` on every public host.
 
 3. Create Docker contexts for remote hosts:
 
 ```bash
-docker context create server1 --docker "host=ssh://user@server1.example.com"
+DOCKER_CONFIG="$PWD/docker-contexts" docker context create server1 \
+  --docker "host=ssh://user@server1.example.com"
 ```
 
 4. Import contexts from `/admin/config` under the Challenge Containers section. The import UI shows reachability and lets you set a public hostname before importing
 
 5. Images need to be on the Docker host before a challenge can use them. The config page has an Image Availability section showing which images exist on which contexts, with pull buttons for anything missing
+
+MariaDB/MySQL is the tested production database. SQLite is supported for single-process development. Periodic
+maintenance starts with the application and coordinates across workers and replicas through database advisory locks.
 
 ## Challenge settings
 
@@ -63,7 +75,7 @@ Select "Container" challenge type when creating a challenge. The typical web cha
 - SSH Credentials: username/password, or `auto` to generate a random password
 - Expiration: container lifetime (default 30 minutes)
 - Max Renewals: timer resets allowed (default 2, 0 disables)
-- Command, Volumes, Max Memory, Max CPU under Advanced options
+- Command, logical read-only volumes, Max Memory, Max CPU under Advanced options
 
 ## Dynamic scoring
 
@@ -92,17 +104,57 @@ Managed through `/admin/config`, no config files
 | expiration_check_interval | 5 | seconds between expiry sweeps |
 | rate_limit_requests | 45 | max requests per rate limit interval |
 | rate_limit_interval | 60 | rate limit window in seconds |
+| mutation_rate_limit_requests | 10 | max start, stop, and renew requests per mutation interval |
+| mutation_rate_limit_interval | 60 | mutation rate limit window in seconds |
 | default_expiration_seconds | 1800 | default container lifetime for new challenges |
 | default_max_renewals | 2 | default renewal limit for new challenges |
-| freshness_secret | (auto-generated) | HMAC key for freshness tokens, clear to disable |
+| default_max_memory_mb | 512 | memory limit used when a challenge does not declare one |
+| default_max_cpu_millicores | 1000 | CPU limit used when a challenge does not declare one |
+| freshness_secret | (auto-generated) | HMAC key managed by the Enable / Regenerate and Disable controls |
 | freshness_token_length | 6 | character length of per-user freshness tokens (4-16), changing invalidates running flags |
 | post_solve_expiry_seconds | 90 | seconds until container expires after a correct solve, 0 to disable |
 
-Rate limit changes require a CTFd restart
+The settings API validates an entire update before committing it. Settings apply live; disruptive freshness changes
+are confirmed in the admin UI.
 
 ## Container security
 
-Every container gets `cap_drop=ALL`, `no-new-privileges`, a pids limit of 256, and `auto_remove=True`. SSH challenges automatically get the capabilities sshd needs (SETUID, SETGID, CHOWN, etc). Additional capabilities can be added per-challenge via the `cap_add` field. Volume mounts are validated against a blocklist covering `/proc`, `/sys`, `/dev`, `/var/run`, `/run`, and sensitive files like `/etc/shadow`
+Every container gets `cap_drop=ALL`, `no-new-privileges`, a pids limit of 256, and `auto_remove=True`. SSH challenges automatically get the capabilities sshd needs (SETUID, SETGID, CHOWN, etc). Additional capabilities are restricted to `NET_ADMIN`, `NET_RAW`, `SYS_PTRACE`, and `SYS_NICE`; `SYS_ADMIN`, privileged mode, and arbitrary service fields are rejected.
+
+Challenge mounts are allowlisted rather than blocklisted. The host configuration supplies
+`CHALLENGE_CONTAINERS_VOLUME_POLICY_JSON`, mapping logical names to exact pre-created Docker named volumes on each
+context. The plugin inspects the selected daemon immediately before creation and requires the local driver, no
+driver options, exact policy/revision/logical-name labels, an allowed target, and read-only mode. Host bind paths,
+writable mounts, and unversioned mount mappings are rejected.
+
+Example volume allowlist:
+
+```json
+{
+  "schema_version": 1,
+  "policy_id": "event-2026",
+  "revision": 3,
+  "contexts": {
+    "local": {
+      "volumes": {
+        "assets": {
+          "docker_name": "challenge-assets-v3",
+          "targets": ["/opt/challenge/assets"]
+        }
+      }
+    }
+  }
+}
+```
+
+Provision `challenge-assets-v3` before starting CTFd with labels
+`org.ctfd.challenge-containers.volume-policy=event-2026`,
+`org.ctfd.challenge-containers.volume-policy-revision=3`, and
+`org.ctfd.challenge-containers.logical-volume=assets`. A challenge then requests:
+
+```json
+{"schema_version":1,"scope":"entry","mounts":[{"type":"volume","name":"assets","target":"/opt/challenge/assets","read_only":true}]}
+```
 
 ## Freshness tokens
 
@@ -169,6 +221,7 @@ The analytics section has charts for top users by container time, containers per
 - `GET /containers/dashboard` admin dashboard
 - `GET /containers/api/running_containers` running containers as JSON
 - `POST /containers/api/kill` kill a container
+- `POST /containers/api/cleanup` retry cleanup for a lifecycle record
 - `POST /containers/api/purge` kill all containers
 - `POST /containers/api/admin_extend` renew a container (admin)
 - `POST /containers/api/clear_history` delete all history records
@@ -217,6 +270,7 @@ All analytics endpoints accept `?range=24h|7d|30d|all` (default `7d`)
 
 - `GET /containers/api/settings` all settings
 - `PUT /containers/api/settings` bulk upsert
+- `POST /containers/api/settings/freshness-secret` enable/regenerate or disable the server-managed secret
 
 ## Development
 
@@ -228,14 +282,12 @@ vulture .
 pytest tests/ -v
 ```
 
-## Troubleshooting
+Run the isolated fresh-install integration test with Docker Compose. It starts CTFd, MariaDB, Redis, and a dedicated
+Docker-in-Docker daemon; exercises complete container lifecycles; restarts CTFd; and removes its project and volumes:
 
-**Containers not starting**: check that the image is pulled on the relevant host and the context is reachable (use the Test button in admin)
+```sh
+tests/e2e/run.sh
+```
 
-**Images not found**: images must exist on the assigned context before users can start instances, use Image Availability on the config page to see what's where
-
-**Containers not expiring**: check CTFd logs for expiry job messages, all containers have a mandatory expiration
-
-**Host went down**: health checks run every 30 seconds, unhealthy contexts drop out of the pool and come back automatically when reachable again
-
-**Too many open files**: raise the fd limit with `ulimits: { nofile: { soft: 65536, hard: 65536 } }` in docker-compose.yml
+Compose builds the test server from the official `ctfd/ctfd:3.8.7` image and pulls its service images as needed. The
+test daemon is isolated from the host Docker daemon.

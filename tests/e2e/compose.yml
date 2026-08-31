@@ -1,0 +1,119 @@
+services:
+  plugin-prep:
+    image: ${CC_E2E_CTFD_IMAGE}
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile.ctfd
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        cp /opt/CTFd/CTFd/plugins/__init__.py /clean-plugins/
+        cp /opt/CTFd/CTFd/plugins/migrations.py /clean-plugins/
+        cp -a /opt/CTFd/CTFd/plugins/challenges /clean-plugins/
+        cp -a /opt/CTFd/CTFd/plugins/flags /clean-plugins/
+        cp -a /opt/challenge-containers-source /clean-plugins/challenge-containers
+    volumes:
+      - type: volume
+        source: clean-plugins
+        target: /clean-plugins
+        volume:
+          nocopy: true
+
+  docker-engine:
+    image: docker:29-dind
+    privileged: true
+    command: ["--group=1001", "--tls=false"]
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    volumes:
+      - docker-run:/var/run
+      - docker-data:/var/lib/docker
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  db:
+    image: mariadb:10.11
+    environment:
+      MARIADB_ROOT_PASSWORD: root
+      MARIADB_USER: ctfd
+      MARIADB_PASSWORD: ctfd
+      MARIADB_DATABASE: ctfd
+    command:
+      - mysqld
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --wait_timeout=28800
+    volumes:
+      - database:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  cache:
+    image: redis:4
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  ctfd:
+    image: ${CC_E2E_CTFD_IMAGE}
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile.ctfd
+    network_mode: service:docker-engine
+    environment:
+      SECRET_KEY: cc-e2e-only
+      DATABASE_URL: mysql+pymysql://ctfd:ctfd@db/ctfd
+      REDIS_URL: redis://cache:6379
+      WORKERS: 2
+      WORKER_CLASS: gevent
+      LOG_FOLDER: /var/log/CTFd
+      UPLOAD_FOLDER: /var/uploads
+      ACCESS_LOG: '-'
+      ERROR_LOG: '-'
+      REVERSE_PROXY: "false"
+      CHALLENGE_CONTAINERS_VOLUME_POLICY_JSON: '{"schema_version":1,"policy_id":"cc-e2e","revision":1,"contexts":{"local":{"volumes":{"assets":{"docker_name":"cc-e2e-assets","targets":["/opt/challenge/assets"]}}}}}'
+    volumes:
+      - type: volume
+        source: clean-plugins
+        target: /opt/CTFd/CTFd/plugins
+        volume:
+          nocopy: true
+      - docker-run:/var/run
+      - uploads:/var/uploads
+      - logs:/var/log/CTFd
+    depends_on:
+      plugin-prep:
+        condition: service_completed_successfully
+      docker-engine:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/setup', timeout=2)"
+      interval: 3s
+      timeout: 3s
+      retries: 60
+
+volumes:
+  docker-run:
+  docker-data:
+  database:
+  uploads:
+  logs:
+  clean-plugins:

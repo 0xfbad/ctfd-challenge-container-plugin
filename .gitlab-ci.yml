@@ -1,8 +1,35 @@
-check-python:
+.python-checks:
   image: python:3.13-slim
   before_script:
-    - pip install ruff mypy pytest
+    - python -m pip install --disable-pip-version-check pytest==9.1.1 ruff==0.16.5 mypy==2.3.1 vulture==2.16 SQLAlchemy==1.4.54
+
+unit-tests:
+  extends: .python-checks
+  script:
+    - python -m pytest --junitxml=pytest.xml
+  artifacts:
+    when: always
+    reports:
+      junit: pytest.xml
+
+static-analysis:
+  extends: .python-checks
   script:
     - ruff format --check .
     - ruff check .
     - mypy .
+    - vulture
+
+end-to-end:
+  image: docker:29-cli
+  services:
+    - name: docker:29-dind
+      command: ["--tls=false"]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  before_script:
+    - docker info
+    - docker pull python:3.12-alpine
+  script:
+    - tests/e2e/run.sh
