@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
 import queue
+import re
 import socket as _socket
 import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, tzinfo
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from statistics import median
 
 import docker
@@ -20,10 +21,8 @@ from CTFd.models import db
 from CTFd.utils.decorators import admins_only
 from CTFd.utils.user import get_current_user
 
-from . import containers_bp
-from .helpers import get_hostname_for_context, kill_container, resolve_expiration
 from ..container_manager import ContainerManager, container_name
-from ..exceptions import ContainerException
+from ..coordination import InstanceCoordinator
 from ..docker_host_manager import (
     LOCAL_CONTEXT_NAME,
     LOCAL_SOCKET_PATH,
@@ -41,14 +40,31 @@ from ..event_logger import (
     sparse_user_flags,
     user_flag_values,
 )
+from ..exceptions import ContainerException
+from ..freshness import generate_secret
 from ..models import (
+    CONTEXT_STATES,
     ContainerChallengeModel,
     ContainerFlagShareModel,
     ContainerHistoryModel,
     ContainerInfoModel,
+    ContainerInstanceModel,
+    ContainerSettingsModel,
     DockerContextModel,
 )
-from ..utils import DEFAULTS, get_setting, is_team_mode, set_setting
+from ..utils import (
+    DEFAULTS,
+    SETTING_SPECS,
+    ValidationError,
+    get_setting,
+    is_team_mode,
+    parse_strict_int,
+    parse_timezone,
+    set_setting,
+    validate_settings_patch,
+)
+from . import containers_bp
+from .helpers import cleanup_instance, get_hostname_for_context, kill_container, resolve_expiration
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +72,15 @@ _MAX_ANALYTICS_ROWS = 50000
 _MAX_SSE_CONNECTIONS = 10
 _sse_connection_count = 0
 _sse_connection_lock = threading.Lock()
+
+_CONTEXT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_DNS_NAME_RE = re.compile(
+    r"^(?=.{1,253}\.?$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?$"
+)
+_SSH_TARGET_RE = re.compile(
+    r"^(?:[A-Za-z0-9._-]+@)?(?:\[[0-9A-Fa-f:]+\]|[A-Za-z0-9][A-Za-z0-9.-]*)(?::[1-9][0-9]{0,4})?$"
+)
 
 
 def _log_admin_action(message: str, *, level: str = "info", **metadata: MetadataValue) -> None:
@@ -159,23 +184,31 @@ def route_get_running_containers():
     team_mode = is_team_mode()
 
     running_containers_data = []
+    physical_instance_ids = set()
     for container in running_containers:
+        physical_instance_ids.add(container.instance_id)
         container.is_running = container.container_id in running_ids
 
         hostname = get_hostname_for_context(container.docker_context)
 
-        cname = container_name(container.user_id, container.challenge_id, container.timestamp)
+        cname = container_name(
+            container.user_id or "deleted",
+            container.challenge_id,
+            container.timestamp,
+            nonce=container.instance_id,
+        )
 
         user_obj = container.user
         container_data = {
             "container_id": container.container_id,
+            "instance_id": container.instance_id,
             "container_name": cname,
             "image": container.challenge.image,
             "challenge": container.challenge.name,
             "challenge_id": container.challenge_id,
-            "user": user_obj.name,
+            "user": user_obj.name if user_obj else "deleted user",
             "user_id": container.user_id,
-            **dense_user_flags(user_flag_values(user_obj)),
+            **(dense_user_flags(user_flag_values(user_obj)) if user_obj else {}),
             "port": container.port,
             "created": container.timestamp,
             "expires": container.expires,
@@ -189,11 +222,56 @@ def route_get_running_containers():
             "companion_count": ContainerInfoModel.query.filter_by(stack_id=container.stack_id, is_entry=False).count()
             if container.stack_id
             else 0,
+            "state": container.instance.state,
+            "last_error": container.instance.last_error,
+            "cleanup_only": False,
         }
         if team_mode:
-            container_data["team"] = container.team.name
+            container_data["team"] = container.team.name if container.team else "deleted team"
             container_data["team_id"] = container.team_id
         running_containers_data.append(container_data)
+
+    logical_only = ContainerInstanceModel.query.filter(~ContainerInstanceModel.id.in_(physical_instance_ids)).all()
+    for instance in logical_only:
+        challenge = instance.challenge
+        user_obj = instance.user
+        context_name = instance.docker_context.context_name if instance.docker_context else None
+        container_data = {
+            "container_id": "",
+            "instance_id": instance.id,
+            "container_name": container_name(
+                instance.user_id or "deleted",
+                instance.challenge_id,
+                int(instance.created_at),
+                nonce=instance.id,
+            ),
+            "image": challenge.image if challenge else None,
+            "challenge": challenge.name if challenge else "deleted challenge",
+            "challenge_id": instance.challenge_id,
+            "user": user_obj.name if user_obj else "deleted user",
+            "user_id": instance.user_id,
+            **(dense_user_flags(user_flag_values(user_obj)) if user_obj else {}),
+            "port": None,
+            "created": int(instance.created_at),
+            "expires": int(instance.expires),
+            "is_running": False,
+            "hostname": get_hostname_for_context(context_name),
+            "connect_type": challenge.ctype if challenge else "tcp",
+            "ssh_username": None,
+            "ssh_password": None,
+            "docker_context": context_name or "unavailable",
+            "stack_id": instance.stack_id,
+            "companion_count": 0,
+            "state": instance.state,
+            "last_error": instance.last_error,
+            "cleanup_only": True,
+        }
+        if team_mode:
+            container_data["team"] = instance.team.name if instance.team else "deleted team"
+            container_data["team_id"] = instance.team_id
+        running_containers_data.append(container_data)
+
+    running_containers_data.sort(key=lambda row: row["created"], reverse=True)
 
     response_data = {
         "containers": running_containers_data,
@@ -226,19 +304,9 @@ def route_stats_summary():
 
     total_history = ContainerHistoryModel.query.filter(
         ContainerHistoryModel.stopped_at.isnot(None),
+        ContainerHistoryModel.is_entry.is_(True),
     ).all()
-
-    seen_stacks = set()
-    entry_rows = []
-    for r in total_history:
-        if r.user_id in excluded:
-            continue
-        if r.stack_id:
-            if r.stack_id not in seen_stacks:
-                seen_stacks.add(r.stack_id)
-                entry_rows.append(r)
-        else:
-            entry_rows.append(r)
+    entry_rows = [row for row in total_history if row.user_id not in excluded]
 
     total = len(entry_rows) + active
     durations = [r.stopped_at - r.created_at for r in entry_rows if r.stopped_at and r.created_at]
@@ -413,10 +481,9 @@ def route_admin_extend():
     expiration = resolve_expiration(challenge)
     new_expires = int(time.time() + expiration)
 
-    container.expires = new_expires
-    if container.stack_id:
-        ContainerInfoModel.query.filter_by(stack_id=container.stack_id).update({"expires": new_expires})
-    db.session.commit()
+    update = InstanceCoordinator.extend_by_admin(container.instance_id, new_expires=new_expires)
+    if update is None:
+        return jsonify(error="container is not running or already expires later"), 409
 
     _log_admin_action(
         f"admin extended container for {container.user.name if container.user else 'unknown'}",
@@ -433,16 +500,50 @@ def route_admin_extend():
 @containers_bp.route("/api/purge", methods=["POST"])
 @admins_only
 def route_purge_containers():
-    container_ids = [c.container_id for c in ContainerInfoModel.query.all()]
-    for cid in container_ids:
-        kill_container(cid)
+    instances = ContainerInstanceModel.query.all()
+    failures = []
+    purged = 0
+    for instance in instances:
+        result = cleanup_instance(instance.id, reason="purged")
+        if "success" in result:
+            purged += 1
+        else:
+            failures.append(
+                {
+                    "instance_id": instance.id,
+                    "error": result.get("error", "cleanup failed"),
+                }
+            )
     _log_admin_action(
-        f"purged {len(container_ids)} containers",
+        f"purged {purged} instances; {len(failures)} remain",
         level="warning",
         action="purge",
-        count=len(container_ids),
+        purged=purged,
+        failed=len(failures),
     )
-    return jsonify(success="purged all containers"), 200
+    if failures:
+        return jsonify(error="some instances remain pending cleanup", purged=purged, failures=failures), 503
+    return jsonify(success="purged all instances", purged=purged), 200
+
+
+@containers_bp.route("/api/cleanup", methods=["POST"])
+@admins_only
+def route_cleanup_instance():
+    if not request.is_json:
+        return jsonify(error="invalid request"), 400
+    instance_id = request.json.get("instance_id")
+    if not isinstance(instance_id, str) or not re.fullmatch(r"[0-9a-f]{32}", instance_id):
+        return jsonify(error="invalid instance_id"), 400
+    result = cleanup_instance(instance_id, reason="admin_cleanup")
+    if "success" in result:
+        _log_admin_action(
+            f"admin cleaned instance {instance_id}",
+            level="warning",
+            action="cleanup",
+            instance_id=instance_id,
+        )
+        return jsonify(result), 200
+    return jsonify(result), 409
 
 
 @containers_bp.route("/api/clear_history", methods=["POST"])
@@ -493,6 +594,78 @@ def route_get_contexts():
     return jsonify(contexts=contexts)
 
 
+def _context_payload(*, creating: bool) -> dict[str, object]:
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        raise ValidationError("context payload must be a JSON object")
+
+    allowed = {"hostname", "pub_hostname", "weight", "state"}
+    if creating:
+        allowed.add("context_name")
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise ValidationError(f"unknown context field: {unknown[0]}")
+    return payload
+
+
+def _required_context_name(value: object) -> str:
+    if not isinstance(value, str) or not _CONTEXT_NAME_RE.fullmatch(value):
+        raise ValidationError("context_name must contain only letters, numbers, dot, underscore, or hyphen")
+    return value
+
+
+def _optional_ssh_target(value: object) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or len(value) > 512 or not _SSH_TARGET_RE.fullmatch(value):
+        raise ValidationError("hostname must be a valid SSH host, user@host, or user@host:port")
+    if value.rsplit(":", 1)[-1].isdigit() and ":" in value and not value.endswith("]"):
+        port = int(value.rsplit(":", 1)[-1])
+        if port > 65_535:
+            raise ValidationError("hostname port must be at most 65535")
+    return value
+
+
+def _required_public_hostname(value: object) -> str:
+    if not isinstance(value, str) or not value or len(value) > 253:
+        raise ValidationError("pub_hostname must be a valid hostname or IP address")
+    candidate = value.strip()
+    if candidate != value or any(char in candidate for char in ("/", "@", " ", "\t", "\n")):
+        raise ValidationError("pub_hostname must be a valid hostname or IP address")
+    try:
+        address = ipaddress.ip_address(candidate.strip("[]"))
+        return f"[{address.compressed}]" if address.version == 6 else address.compressed
+    except ValueError:
+        if not _DNS_NAME_RE.fullmatch(candidate):
+            raise ValidationError("pub_hostname must be a valid hostname or IP address") from None
+    return candidate
+
+
+def _context_state(value: object, *, allow_retired: bool = False) -> str:
+    allowed = set(CONTEXT_STATES if allow_retired else ("active", "draining", "disabled"))
+    if not isinstance(value, str) or value not in allowed:
+        raise ValidationError(f"state must be one of: {', '.join(sorted(allowed))}")
+    return value
+
+
+def _context_reference_counts(context: DockerContextModel) -> tuple[int, int]:
+    physical = ContainerInfoModel.query.filter_by(docker_context=context.context_name).count()
+    logical = ContainerInstanceModel.query.filter_by(docker_context_id=context.id).count()
+    return physical, logical
+
+
+def _context_is_reachable(context: DockerContextModel) -> bool:
+    endpoint = _resolve_endpoint(context.context_name, context.hostname)
+    return bool(endpoint and ping_endpoint(endpoint))
+
+
+def _context_docker_resource_counts(context: DockerContextModel) -> tuple[int, int]:
+    return current_app.container_manager.host_manager.count_resources_by_label(
+        context.context_name,
+        "ctf.instance_id",
+    )
+
+
 @containers_bp.route("/api/contexts/list", methods=["GET"])
 @admins_only
 def route_api_list_contexts():
@@ -513,7 +686,10 @@ def route_api_list_contexts():
                 "hostname": ctx.hostname,
                 "pub_hostname": ctx.pub_hostname,
                 "weight": ctx.weight,
-                "enabled": ctx.enabled,
+                "state": ctx.state,
+                "health_state": ctx.health_state,
+                "health_checked_at": ctx.health_checked_at,
+                "health_error": ctx.health_error,
                 "connected": ctx.context_name in connected,
                 "healthy": info.get("healthy", False),
                 "active_containers": info.get("active_containers", 0),
@@ -530,34 +706,34 @@ def route_api_add_context():
     if not request.is_json:
         return jsonify(error="invalid request"), 400
 
-    context_name = request.json.get("context_name")
-    hostname = request.json.get("hostname")
-    pub_hostname = request.json.get("pub_hostname")
-    weight = request.json.get("weight", 1)
-    enabled = request.json.get("enabled", True)
-
-    if not context_name:
-        return jsonify(error="context_name is required"), 400
-
-    if not pub_hostname:
-        return jsonify(error="pub_hostname is required"), 400
+    try:
+        payload = _context_payload(creating=True)
+        context_name = _required_context_name(payload.get("context_name"))
+        hostname = _optional_ssh_target(payload.get("hostname"))
+        pub_hostname = _required_public_hostname(payload.get("pub_hostname"))
+        weight = parse_strict_int(payload.get("weight", 1), "weight", minimum=1, maximum=1_000)
+        requested_state = _context_state(payload.get("state", "active"))
+    except ValidationError as exc:
+        return jsonify(error=str(exc)), 400
 
     existing = DockerContextModel.query.filter_by(context_name=context_name).first()
     if existing:
         return jsonify(error="context already exists"), 400
 
     try:
-        weight = int(weight)
-        if weight < 1:
-            return jsonify(error="weight must be at least 1"), 400
-    except ValueError:
-        return jsonify(error="weight must be an integer"), 400
-
-    new_context = DockerContextModel(
-        context_name=context_name, hostname=hostname or None, pub_hostname=pub_hostname, weight=weight, enabled=enabled
-    )
-    db.session.add(new_context)
-    db.session.commit()
+        new_context = DockerContextModel(
+            context_name=context_name,
+            hostname=hostname,
+            pub_hostname=pub_hostname,
+            weight=weight,
+            state=requested_state,
+        )
+        db.session.add(new_context)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        logger.exception("failed to add docker context")
+        return jsonify(error="failed to add context"), 500
 
     container_manager = current_app.container_manager
     container_manager.load_docker_contexts()
@@ -581,27 +757,56 @@ def route_api_update_context(context_id):
     if not context:
         return jsonify(error="context not found"), 404
 
-    if "hostname" in request.json:
-        context.hostname = request.json["hostname"] or None
+    try:
+        payload = _context_payload(creating=False)
+        updates: dict[str, object] = {}
+        if "hostname" in payload:
+            requested_hostname = _optional_ssh_target(payload["hostname"])
+            if requested_hostname != context.hostname:
+                physical_refs, logical_refs = _context_reference_counts(context)
+                if physical_refs or logical_refs:
+                    return (
+                        jsonify(error="stop and clean all instances before changing a context endpoint"),
+                        409,
+                    )
+                try:
+                    docker_containers, docker_networks = _context_docker_resource_counts(context)
+                except Exception:
+                    logger.warning("could not verify Docker resource absence before endpoint update", exc_info=True)
+                    return jsonify(error="could not verify that the context has no Docker resources"), 503
+                if docker_containers or docker_networks:
+                    return (
+                        jsonify(
+                            error="Docker resources remain on this context; automatic cleanup must finish first",
+                            docker_containers=docker_containers,
+                            docker_networks=docker_networks,
+                        ),
+                        409,
+                    )
+            updates["hostname"] = requested_hostname
+        if "pub_hostname" in payload:
+            updates["pub_hostname"] = _required_public_hostname(payload["pub_hostname"])
+        if "weight" in payload:
+            updates["weight"] = parse_strict_int(payload["weight"], "weight", minimum=1, maximum=1_000)
 
-    if "pub_hostname" in request.json:
-        if not request.json["pub_hostname"]:
-            return jsonify(error="pub_hostname cannot be empty"), 400
-        context.pub_hostname = request.json["pub_hostname"]
+        requested_state = context.state
+        if "state" in payload:
+            requested_state = _context_state(payload["state"])
+        if context.state == "retired_orphaned" and requested_state != "retired_orphaned":
+            raise ValidationError("retired contexts cannot be reactivated")
 
-    if "weight" in request.json:
-        try:
-            weight = int(request.json["weight"])
-            if weight < 1:
-                return jsonify(error="weight must be at least 1"), 400
-            context.weight = weight
-        except ValueError:
-            return jsonify(error="weight must be an integer"), 400
+        updates["state"] = requested_state
+    except ValidationError as exc:
+        return jsonify(error=str(exc)), 400
 
-    if "enabled" in request.json:
-        context.enabled = bool(request.json["enabled"])
-
-    db.session.commit()
+    try:
+        for field, value in updates.items():
+            setattr(context, field, value)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        logger.exception("failed to update docker context")
+        return jsonify(error="failed to update context"), 500
 
     container_manager = current_app.container_manager
     container_manager.load_docker_contexts()
@@ -622,20 +827,69 @@ def route_api_delete_context(context_id):
     if not context:
         return jsonify(error="context not found"), 404
 
+    force_raw = request.args.get("force", "false")
+    if force_raw not in ("true", "false"):
+        return jsonify(error="force must be true or false"), 400
+    force = force_raw == "true"
+
+    physical_refs, logical_refs = _context_reference_counts(context)
+    pinned_challenges = ContainerChallengeModel.query.filter_by(docker_context=context.context_name).count()
+    reachable = _context_is_reachable(context)
     name = context.context_name
-    db.session.delete(context)
-    db.session.commit()
+    docker_containers = 0
+    docker_networks = 0
+    if reachable:
+        try:
+            docker_containers, docker_networks = _context_docker_resource_counts(context)
+        except Exception:
+            logger.warning("could not verify Docker resource absence before context deletion", exc_info=True)
+            return jsonify(error="could not verify that the context has no Docker resources"), 503
+
+    try:
+        if physical_refs or logical_refs or pinned_challenges or docker_containers or docker_networks or not reachable:
+            if not force:
+                reason = (
+                    "context is referenced by resources or challenges"
+                    if physical_refs or logical_refs or pinned_challenges or docker_containers or docker_networks
+                    else "context is unreachable"
+                )
+                return (
+                    jsonify(
+                        error=f"{reason}; retry with force=true to retire it without deleting its record",
+                        physical_references=physical_refs,
+                        logical_references=logical_refs,
+                        pinned_challenges=pinned_challenges,
+                        docker_containers=docker_containers,
+                        docker_networks=docker_networks,
+                        retirement_available=True,
+                    ),
+                    409,
+                )
+
+            context.state = "retired_orphaned"
+            db.session.commit()
+            action = "retired"
+            success = "context retired; record retained for cleanup"
+        else:
+            db.session.delete(context)
+            db.session.commit()
+            action = "deleted"
+            success = "context deleted"
+    except Exception:
+        db.session.rollback()
+        logger.exception("failed to delete or retire docker context")
+        return jsonify(error="failed to delete or retire context"), 500
 
     container_manager = current_app.container_manager
     container_manager.load_docker_contexts()
 
     event_logger.log_event(
         "context_changed",
-        f"context {name} deleted",
+        f"context {name} {action}",
         level="warning",
-        metadata={"action": "deleted", "context_name": name},
+        metadata={"action": action, "context_name": name},
     )
-    return jsonify(success="context deleted")
+    return jsonify(success=success, state="retired_orphaned" if action == "retired" else "deleted")
 
 
 @containers_bp.route("/api/contexts/test/<int:context_id>", methods=["GET"])
@@ -654,15 +908,15 @@ def route_api_test_context(context_id):
         client = docker.DockerClient(base_url=endpoint)
         client.ping()
         return jsonify(success="context is reachable")
-    except Exception as e:
-        logger.error(f"context test failed: {e}")
+    except Exception as exc:  # noqa: BLE001 -- Docker transports expose backend-specific failures.
+        logger.warning("context test failed: %s", exc)
         return jsonify(error="context unreachable"), 500
     finally:
         if client:
             try:
                 client.close()
             except Exception:
-                pass
+                logger.debug("failed to close context test client", exc_info=True)
 
 
 @containers_bp.route("/api/contexts/discover", methods=["GET"])
@@ -706,8 +960,8 @@ def route_api_discover_contexts():
                 list(pool.map(_ping, available))
 
         return jsonify(contexts=available)
-    except Exception as e:
-        logger.error(f"error discovering contexts: {e}")
+    except Exception:
+        logger.exception("error discovering contexts")
         return jsonify(error="failed to discover contexts"), 500
 
 
@@ -740,6 +994,7 @@ def route_api_images_matrix():
                 ctx_name, tags = future.result()
                 context_images[ctx_name] = tags
             except Exception:
+                logger.warning("failed to list images for context %s", futures[future], exc_info=True)
                 context_images[futures[future]] = set()
 
     matrix: dict[str, dict[str, dict[str, bool | ImageInfo | None]]] = {}
@@ -766,7 +1021,7 @@ def route_api_images_matrix():
                 _, _, info = info_future.result(timeout=15)
                 matrix[display][ctx]["info"] = info
             except Exception:
-                pass
+                logger.warning("failed to inspect image %s on context %s", display, ctx, exc_info=True)
 
     display_images = sorted(matrix.keys())
 
@@ -822,8 +1077,8 @@ def route_api_reload_contexts():
     try:
         container_manager.load_docker_contexts()
         return jsonify(success="contexts reloaded")
-    except Exception as e:
-        logger.error(f"error reloading contexts: {e}")
+    except Exception:
+        logger.exception("error reloading contexts")
         return jsonify(error="failed to reload contexts"), 500
 
 
@@ -853,9 +1108,16 @@ def route_pull_image():
 def route_get_settings():
     current_settings = {}
     for key, default in DEFAULTS.items():
+        spec = SETTING_SPECS[key]
         current_settings[key] = {
-            "value": get_setting(key),
+            "value": "" if spec.sensitive else get_setting(key),
             "default": default,
+            "type": spec.kind,
+            "minimum": spec.minimum,
+            "maximum": spec.maximum,
+            "apply_mode": spec.apply_mode,
+            "sensitive": spec.sensitive,
+            "configured": bool(get_setting(key)) if spec.sensitive else None,
         }
     return jsonify(settings=current_settings)
 
@@ -866,16 +1128,61 @@ def route_update_settings():
     if not request.is_json:
         return jsonify(error="invalid request"), 400
 
-    changed = request.json
-    for key, value in changed.items():
-        if key not in DEFAULTS:
-            continue
-        set_setting(key, value)
+    try:
+        changed = validate_settings_patch(request.get_json(silent=True))
+    except ValidationError as exc:
+        return jsonify(error=str(exc)), 400
+    if "freshness_secret" in changed:
+        return jsonify(error="use the freshness secret controls to change this setting"), 400
 
-    container_manager = current_app.container_manager
-    container_manager.reload_settings()
+    try:
+        for key, value in changed.items():
+            row = ContainerSettingsModel.query.filter_by(key=key).first()
+            if row is None:
+                db.session.add(ContainerSettingsModel(key=key, value=str(value)))
+            else:
+                row.value = str(value)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        logger.exception("failed to update container settings")
+        return jsonify(error="failed to update settings"), 500
 
-    return jsonify(success="settings updated")
+    disruptive = sorted(key for key in changed if SETTING_SPECS[key].apply_mode == "live_disruptive")
+    return jsonify(
+        success="settings updated",
+        disruptive=disruptive,
+    )
+
+
+@containers_bp.route("/api/settings/freshness-secret", methods=["POST"])
+@admins_only
+def route_update_freshness_secret():
+    if not request.is_json:
+        return jsonify(error="invalid request"), 400
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or payload.get("action") not in {"regenerate", "disable"}:
+        return jsonify(error="action must be regenerate or disable"), 400
+
+    action = payload["action"]
+    value = generate_secret() if action == "regenerate" else ""
+    try:
+        row = ContainerSettingsModel.query.filter_by(key="freshness_secret").first()
+        if row is None:
+            db.session.add(ContainerSettingsModel(key="freshness_secret", value=value))
+        else:
+            row.value = value
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        logger.exception("failed to update freshness secret")
+        return jsonify(error="failed to update freshness secret"), 500
+
+    _log_admin_action(
+        f"freshness tokens {action}d" if action == "regenerate" else "freshness tokens disabled",
+        action=f"freshness_{action}",
+    )
+    return jsonify(success="freshness secret updated", configured=bool(value))
 
 
 @containers_bp.route("/api/logs/<container_id>", methods=["GET"])
@@ -915,14 +1222,17 @@ def _request_tz() -> tzinfo:
     name = request.args.get("tz", "")
     if name:
         try:
-            return ZoneInfo(name)
-        except (ZoneInfoNotFoundError, ValueError):
+            return parse_timezone(name, "tz")
+        except ValidationError:
             pass
     return UTC
 
 
 def _history_rows_since(cutoff: float) -> list[ContainerHistoryModel]:
-    query = ContainerHistoryModel.query
+    # Apply canonical logical-instance selection before the safety limit. A
+    # large companion-heavy stack must not crowd real player launches out of
+    # the analytics window.
+    query = ContainerHistoryModel.query.filter(ContainerHistoryModel.is_entry.is_(True))
     if cutoff > 0:
         query = query.filter(ContainerHistoryModel.created_at >= cutoff)
     return query.order_by(ContainerHistoryModel.created_at.desc()).limit(_MAX_ANALYTICS_ROWS).all()
@@ -931,7 +1241,7 @@ def _history_rows_since(cutoff: float) -> list[ContainerHistoryModel]:
 def _excluded_user_ids() -> set[int]:
     from CTFd.models import Users
 
-    rows = Users.query.filter(db.or_(Users.type == "admin", Users.hidden == True)).all()  # noqa: E712
+    rows = Users.query.filter(db.or_(Users.type == "admin", Users.hidden.is_(True))).all()
     return {u.id for u in rows}
 
 

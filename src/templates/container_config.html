@@ -10,6 +10,14 @@
                 <label>Concurrent creates <span class="cfg-help" data-tip="Limits how many containers can be created at the same time on a single server. Prevents overload when many players start challenges at once.">?</span></label>
                 <input type="number" class="form-control no-spin cc-setting-input" data-key="max_concurrent_creates" min="1" max="32">
             </div>
+            <div class="form-group">
+                <label>Default memory (MB) <span class="cfg-help" data-tip="Memory limit applied when a challenge does not declare one. Companion services inherit this limit unless they declare a stricter or larger explicit limit.">?</span></label>
+                <input type="number" class="form-control no-spin cc-setting-input" data-key="default_max_memory_mb" min="6">
+            </div>
+            <div class="form-group">
+                <label>Default CPU (millicores) <span class="cfg-help" data-tip="CPU limit applied when a challenge does not declare one. 1000 millicores equals one CPU core.">?</span></label>
+                <input type="number" class="form-control no-spin cc-setting-input" data-key="default_max_cpu_millicores" min="10">
+            </div>
         </div>
         <div class="col-md-4">
             <h5>Timers</h5>
@@ -41,7 +49,7 @@
             </div>
         </div>
         <div class="col-md-4">
-            <h5>Rate Limiting <span class="badge badge-warning">restart required</span></h5>
+            <h5>Rate Limiting</h5>
             <div class="form-group">
                 <label>Requests per interval <span class="cfg-help" data-tip="How many times a user can check container status within the rate limit window. Start, stop, and renew have their own stricter limit.">?</span></label>
                 <input type="number" class="form-control no-spin cc-setting-input" data-key="rate_limit_requests" min="1">
@@ -51,8 +59,24 @@
                 <input type="number" class="form-control no-spin cc-setting-input" data-key="rate_limit_interval" min="1">
             </div>
             <div class="form-group">
+                <label>Mutations per interval <span class="cfg-help" data-tip="Start, stop, and renew requests allowed per participant in the mutation window.">?</span></label>
+                <input type="number" class="form-control no-spin cc-setting-input" data-key="mutation_rate_limit_requests" min="1">
+            </div>
+            <div class="form-group">
+                <label>Mutation interval (seconds) <span class="cfg-help" data-tip="Window used for start, stop, and renew throttling.">?</span></label>
+                <input type="number" class="form-control no-spin cc-setting-input" data-key="mutation_rate_limit_interval" min="1">
+            </div>
+            <div class="form-group">
                 <label>Freshness token length <span class="cfg-help" data-tip="Character length of the per-user token embedded in freshness flags. Longer tokens are harder to brute-force. Changing this invalidates existing flags in running containers.">?</span></label>
                 <input type="number" class="form-control no-spin cc-setting-input" data-key="freshness_token_length" min="4" max="16">
+            </div>
+            <div class="form-group">
+                <label>Freshness flags</label>
+                <div><span class="badge badge-secondary" id="cc-freshness-status">Loading</span></div>
+                <div class="mt-2">
+                    <button type="button" class="btn btn-sm btn-outline-primary" id="cc-freshness-regenerate">Enable / Regenerate</button>
+                    <button type="button" class="btn btn-sm btn-outline-danger" id="cc-freshness-disable">Disable</button>
+                </div>
             </div>
         </div>
     </div>
@@ -79,8 +103,8 @@
                 <th><b>Context Name</b></th>
                 <th><b>Public Hostname</b></th>
                 <th><b>Weight</b></th>
-                <th><b>Enabled</b></th>
-                <th><b>Status</b></th>
+                <th><b>State</b></th>
+                <th><b>Health</b></th>
                 <th><b>Containers</b></th>
                 <th><b>Actions</b></th>
             </tr>
@@ -139,9 +163,14 @@
                     <input type="number" class="form-control no-spin" id="cc-edit-weight" min="1">
                     <small class="form-text text-muted">Higher weight means more containers are scheduled to this context</small>
                 </div>
-                <div class="form-check">
-                    <input type="checkbox" class="form-check-input" id="cc-edit-enabled">
-                    <label class="form-check-label" for="cc-edit-enabled">Enabled</label>
+                <div class="form-group">
+                    <label for="cc-edit-state">State</label>
+                    <select class="form-control" id="cc-edit-state">
+                        <option value="active">Active</option>
+                        <option value="draining">Draining</option>
+                        <option value="disabled">Disabled</option>
+                    </select>
+                    <small class="form-text text-muted">Draining stops new placement while existing instances finish. Disabled also stops new placement.</small>
                 </div>
             </div>
             <div class="modal-footer">
@@ -160,14 +189,14 @@
                 <button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
             </div>
             <div class="modal-body">
-                <p class="text-muted small mb-3">Docker contexts detected from <code>~/.docker/contexts</code> on this host. Set the public hostname for each context you want to use, this is the address users connect to for challenge containers. You can adjust weight and other settings after importing.</p>
+                <p class="text-muted small mb-3">Docker contexts detected from the mounted Docker config directory on this host. Set the public hostname for each context you want to use, this is the address users connect to for challenge containers. You can adjust weight and other settings after importing.</p>
                 <div id="cc-discover-loading" class="text-center py-3">
                     <i class="fas fa-spinner fa-spin"></i> Scanning for contexts...
                 </div>
                 <div id="cc-discover-list" style="display:none;"></div>
                 <div id="cc-discover-empty" style="display:none;" class="text-center text-muted py-3">
                     No new Docker contexts found on this host
-                    <br><small>Make sure <code>~/.docker</code> is mounted and contexts are created with <code>docker context create</code></small>
+                    <br><small>Make sure the intended Docker config directory is mounted and contains the contexts created for this deployment</small>
                 </div>
             </div>
             <div class="modal-footer">
@@ -255,6 +284,11 @@
                     document.getElementById(df.m).value = hm.m;
                 }
             });
+            var freshness = s.freshness_secret;
+            var freshnessStatus = document.getElementById('cc-freshness-status');
+            freshnessStatus.textContent = freshness && freshness.configured ? 'Enabled' : 'Disabled';
+            freshnessStatus.className = freshness && freshness.configured
+                ? 'badge badge-success' : 'badge badge-secondary';
         });
     }
 
@@ -278,9 +312,39 @@
         });
         ccFetch('/api/settings', { method: 'PUT', body: JSON.stringify(payload) })
             .then(function(res) {
-                if (res.success) CTFd.ui.ezq.ezAlert({ title: 'Success', body: 'Settings saved', button: 'OK' });
+                if (res.success) {
+                    var body = res.disruptive && res.disruptive.length
+                        ? 'Settings saved. Existing running freshness flags were invalidated.'
+                        : 'Settings saved and applied.';
+                    CTFd.ui.ezq.ezAlert({ title: 'Success', body: body, button: 'OK' });
+                }
                 else CTFd.ui.ezq.ezAlert({ title: 'Error', body: res.error || 'Save failed', button: 'OK' });
             });
+    });
+
+    function updateFreshnessSecret(action) {
+        var warning = action === 'disable'
+            ? 'Disable freshness flags? Existing freshness challenges will reject submissions.'
+            : 'Generate a new freshness secret? Existing running freshness flags will be invalidated.';
+        if (!confirm(warning)) return;
+        ccFetch('/api/settings/freshness-secret', {
+            method: 'POST',
+            body: JSON.stringify({ action: action })
+        }).then(function(res) {
+            if (res.success) {
+                loadSettings();
+                CTFd.ui.ezq.ezAlert({ title: 'Success', body: 'Freshness settings applied.', button: 'OK' });
+            } else {
+                CTFd.ui.ezq.ezAlert({ title: 'Error', body: res.error || 'Update failed', button: 'OK' });
+            }
+        });
+    }
+
+    document.getElementById('cc-freshness-regenerate').addEventListener('click', function() {
+        updateFreshnessSecret('regenerate');
+    });
+    document.getElementById('cc-freshness-disable').addEventListener('click', function() {
+        updateFreshnessSecret('disable');
     });
 
 
@@ -312,21 +376,22 @@
 
         tbody.innerHTML = contexts.map(function(ctx) {
             var statusClass, statusText;
-            if (!ctx.enabled) { statusClass = 'text-muted'; statusText = 'DISABLED'; }
-            else if (ctx.healthy) { statusClass = 'text-success font-weight-bold'; statusText = 'UP'; }
+            if (ctx.healthy) { statusClass = 'text-success font-weight-bold'; statusText = 'UP'; }
             else if (ctx.connected) { statusClass = 'text-warning font-weight-bold'; statusText = 'DEGRADED'; }
             else { statusClass = 'text-danger font-weight-bold'; statusText = 'DOWN'; }
+            var editButton = ctx.state === 'retired_orphaned' ? '' :
+                '<button class="btn btn-sm" data-action="edit" data-id="' + ctx.id + '" data-name="' + esc(ctx.context_name) + '" data-hostname="' + esc(ctx.hostname || '') + '" data-pub="' + esc(ctx.pub_hostname) + '" data-weight="' + ctx.weight + '" data-state="' + esc(ctx.state) + '" title="Edit"><i class="fas fa-edit" style="color:#6c757d;"></i></button>';
 
             return '<tr>' +
                 '<td><strong>' + esc(ctx.context_name) + '</strong></td>' +
                 '<td>' + esc(ctx.pub_hostname) + '</td>' +
                 '<td>' + ctx.weight + '</td>' +
-                '<td>' + (ctx.enabled ? 'Yes' : 'No') + '</td>' +
+                '<td>' + esc(ctx.state) + '</td>' +
                 '<td><span class="' + statusClass + '">' + statusText + '</span></td>' +
                 '<td>' + (ctx.active_containers || 0) + '</td>' +
                 '<td class="cc-ctx-actions">' +
                     '<button class="btn btn-sm" data-action="test" data-id="' + ctx.id + '" data-name="' + esc(ctx.context_name) + '" title="Test"><i class="fas fa-heartbeat" style="color:#28a745;"></i></button>' +
-                    '<button class="btn btn-sm" data-action="edit" data-id="' + ctx.id + '" data-name="' + esc(ctx.context_name) + '" data-hostname="' + esc(ctx.hostname || '') + '" data-pub="' + esc(ctx.pub_hostname) + '" data-weight="' + ctx.weight + '" data-enabled="' + ctx.enabled + '" title="Edit"><i class="fas fa-edit" style="color:#6c757d;"></i></button>' +
+                    editButton +
                     '<button class="btn btn-sm" data-action="delete" data-id="' + ctx.id + '" data-name="' + esc(ctx.context_name) + '" title="Delete"><i class="fas fa-trash" style="color:#dc3545;"></i></button>' +
                 '</td></tr>';
         }).join('');
@@ -365,17 +430,31 @@
         document.getElementById('cc-edit-hostname').value = btn.dataset.hostname;
         document.getElementById('cc-edit-pub').value = btn.dataset.pub;
         document.getElementById('cc-edit-weight').value = btn.dataset.weight;
-        document.getElementById('cc-edit-enabled').checked = btn.dataset.enabled === 'true';
+        document.getElementById('cc-edit-state').value = btn.dataset.state;
         document.getElementById('cc-edit-hostname-group').style.display = btn.dataset.hostname ? '' : 'none';
         $('#ccEditCtxModal').modal('show');
     }
 
-    function deleteContext(id, name) {
-        if (!confirm('Delete context "' + name + '"?')) return;
-        ccFetch('/api/contexts/delete/' + id, { method: 'DELETE' })
+    function deleteContext(id, name, force) {
+        if (!force && !confirm('Delete context "' + name + '"?')) return;
+        ccFetch('/api/contexts/delete/' + id + (force ? '?force=true' : ''), { method: 'DELETE' })
             .then(function(data) {
                 if (data.success) loadContexts();
-                else CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Delete failed', button: 'OK' });
+                else if (!force && data.retirement_available && (
+                    data.physical_references || data.logical_references || data.pinned_challenges ||
+                    data.docker_containers || data.docker_networks || data.error
+                )) {
+                    var detail = [
+                        data.logical_references ? data.logical_references + ' lifecycle row(s)' : '',
+                        data.docker_containers ? data.docker_containers + ' Docker container(s)' : '',
+                        data.docker_networks ? data.docker_networks + ' Docker network(s)' : '',
+                        data.pinned_challenges ? data.pinned_challenges + ' pinned challenge(s)' : ''
+                    ].filter(Boolean).join(', ');
+                    var reason = detail || 'an unreachable Docker endpoint';
+                    if (confirm('This context still has ' + reason + '. Retire it from new use while automatic cleanup continues?')) {
+                        deleteContext(id, name, true);
+                    }
+                } else CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Delete failed', button: 'OK' });
             });
     }
 
@@ -389,7 +468,7 @@
                 hostname: document.getElementById('cc-edit-hostname').value.trim() || null,
                 pub_hostname: pub,
                 weight: parseInt(document.getElementById('cc-edit-weight').value) || 1,
-                enabled: document.getElementById('cc-edit-enabled').checked
+                state: document.getElementById('cc-edit-state').value
             })
         }).then(function(data) {
             if (data.success) { $('#ccEditCtxModal').modal('hide'); loadContexts(); }
@@ -464,7 +543,7 @@
 
         ccFetch('/api/contexts/add', {
             method: 'POST',
-            body: JSON.stringify({ context_name: name, pub_hostname: pubHostname, weight: 1, enabled: true })
+            body: JSON.stringify({ context_name: name, pub_hostname: pubHostname, weight: 1, state: 'active' })
         }).then(function(data) {
             if (data.success) {
                 var row = btn.closest('.cc-disc-row');
