@@ -17,7 +17,7 @@ from statistics import median
 import docker
 from flask import Response, current_app, jsonify, render_template, request, stream_with_context
 
-from CTFd.models import db
+from CTFd.models import Teams, Users, db
 from CTFd.utils.decorators import admins_only
 from CTFd.utils.user import get_current_user
 
@@ -145,6 +145,63 @@ def _get_connection_status(container_manager: ContainerManager) -> tuple[bool, s
     return connected, running_ids
 
 
+def _running_container_row(
+    instance: ContainerInstanceModel,
+    *,
+    container_id: str,
+    name: str,
+    image: str | None,
+    challenge: str,
+    challenge_id: int,
+    user_obj: Users | None,
+    user_id: int | None,
+    port: int | None,
+    created: int,
+    expires: int,
+    is_running: bool,
+    hostname: str,
+    connect_type: str | None,
+    ssh_username: str | None,
+    ssh_password: str | None,
+    docker_context: str,
+    stack_id: str | None,
+    companion_count: int,
+    cleanup_only: bool,
+    team_mode: bool,
+    team_obj: Teams | None,
+    team_id: int | None,
+) -> dict:
+    row = {
+        "container_id": container_id,
+        "instance_id": instance.id,
+        "container_name": name,
+        "image": image,
+        "challenge": challenge,
+        "challenge_id": challenge_id,
+        "user": user_obj.name if user_obj else "deleted user",
+        "user_id": user_id,
+        **(dense_user_flags(user_flag_values(user_obj)) if user_obj else {}),
+        "port": port,
+        "created": created,
+        "expires": expires,
+        "is_running": is_running,
+        "hostname": hostname,
+        "connect_type": connect_type,
+        "ssh_username": ssh_username,
+        "ssh_password": ssh_password,
+        "docker_context": docker_context,
+        "stack_id": stack_id,
+        "companion_count": companion_count,
+        "state": instance.state,
+        "last_error": instance.last_error,
+        "cleanup_only": cleanup_only,
+    }
+    if team_mode:
+        row["team"] = team_obj.name if team_obj else "deleted team"
+        row["team_id"] = team_id
+    return row
+
+
 @containers_bp.route("/dashboard", methods=["GET"])
 @admins_only
 def route_containers_dashboard():
@@ -198,78 +255,72 @@ def route_get_running_containers():
             nonce=container.instance_id,
         )
 
-        user_obj = container.user
-        container_data = {
-            "container_id": container.container_id,
-            "instance_id": container.instance_id,
-            "container_name": cname,
-            "image": container.challenge.image,
-            "challenge": container.challenge.name,
-            "challenge_id": container.challenge_id,
-            "user": user_obj.name if user_obj else "deleted user",
-            "user_id": container.user_id,
-            **(dense_user_flags(user_flag_values(user_obj)) if user_obj else {}),
-            "port": container.port,
-            "created": container.timestamp,
-            "expires": container.expires,
-            "is_running": container.is_running,
-            "hostname": hostname,
-            "connect_type": container.challenge.ctype,
-            "ssh_username": container.challenge.ssh_username,
-            "ssh_password": container.challenge.ssh_password,
-            "docker_context": container.docker_context or "local",
-            "stack_id": container.stack_id,
-            "companion_count": ContainerInfoModel.query.filter_by(stack_id=container.stack_id, is_entry=False).count()
-            if container.stack_id
-            else 0,
-            "state": container.instance.state,
-            "last_error": container.instance.last_error,
-            "cleanup_only": False,
-        }
-        if team_mode:
-            container_data["team"] = container.team.name if container.team else "deleted team"
-            container_data["team_id"] = container.team_id
-        running_containers_data.append(container_data)
+        running_containers_data.append(
+            _running_container_row(
+                container.instance,
+                container_id=container.container_id,
+                name=cname,
+                image=container.challenge.image,
+                challenge=container.challenge.name,
+                challenge_id=container.challenge_id,
+                user_obj=container.user,
+                user_id=container.user_id,
+                port=container.port,
+                created=container.timestamp,
+                expires=container.expires,
+                is_running=container.is_running,
+                hostname=hostname,
+                connect_type=container.challenge.ctype,
+                ssh_username=container.challenge.ssh_username,
+                ssh_password=container.challenge.ssh_password,
+                docker_context=container.docker_context or "local",
+                stack_id=container.stack_id,
+                companion_count=ContainerInfoModel.query.filter_by(stack_id=container.stack_id, is_entry=False).count()
+                if container.stack_id
+                else 0,
+                cleanup_only=False,
+                team_mode=team_mode,
+                team_obj=container.team,
+                team_id=container.team_id,
+            )
+        )
 
     logical_only = ContainerInstanceModel.query.filter(~ContainerInstanceModel.id.in_(physical_instance_ids)).all()
     for instance in logical_only:
         challenge = instance.challenge
-        user_obj = instance.user
         context_name = instance.docker_context.context_name if instance.docker_context else None
-        container_data = {
-            "container_id": "",
-            "instance_id": instance.id,
-            "container_name": container_name(
-                instance.user_id or "deleted",
-                instance.challenge_id,
-                int(instance.created_at),
-                nonce=instance.id,
-            ),
-            "image": challenge.image if challenge else None,
-            "challenge": challenge.name if challenge else "deleted challenge",
-            "challenge_id": instance.challenge_id,
-            "user": user_obj.name if user_obj else "deleted user",
-            "user_id": instance.user_id,
-            **(dense_user_flags(user_flag_values(user_obj)) if user_obj else {}),
-            "port": None,
-            "created": int(instance.created_at),
-            "expires": int(instance.expires),
-            "is_running": False,
-            "hostname": get_hostname_for_context(context_name),
-            "connect_type": challenge.ctype if challenge else "tcp",
-            "ssh_username": None,
-            "ssh_password": None,
-            "docker_context": context_name or "unavailable",
-            "stack_id": instance.stack_id,
-            "companion_count": 0,
-            "state": instance.state,
-            "last_error": instance.last_error,
-            "cleanup_only": True,
-        }
-        if team_mode:
-            container_data["team"] = instance.team.name if instance.team else "deleted team"
-            container_data["team_id"] = instance.team_id
-        running_containers_data.append(container_data)
+        running_containers_data.append(
+            _running_container_row(
+                instance,
+                container_id="",
+                name=container_name(
+                    instance.user_id or "deleted",
+                    instance.challenge_id,
+                    int(instance.created_at),
+                    nonce=instance.id,
+                ),
+                image=challenge.image if challenge else None,
+                challenge=challenge.name if challenge else "deleted challenge",
+                challenge_id=instance.challenge_id,
+                user_obj=instance.user,
+                user_id=instance.user_id,
+                port=None,
+                created=int(instance.created_at),
+                expires=int(instance.expires),
+                is_running=False,
+                hostname=get_hostname_for_context(context_name),
+                connect_type=challenge.ctype if challenge else "tcp",
+                ssh_username=None,
+                ssh_password=None,
+                docker_context=context_name or "unavailable",
+                stack_id=instance.stack_id,
+                companion_count=0,
+                cleanup_only=True,
+                team_mode=team_mode,
+                team_obj=instance.team,
+                team_id=instance.team_id,
+            )
+        )
 
     running_containers_data.sort(key=lambda row: row["created"], reverse=True)
 

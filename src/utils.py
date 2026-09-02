@@ -295,6 +295,33 @@ def owner_filter(xid: int, is_team: bool) -> dict[str, int]:
     return {"team_id" if is_team else "user_id": xid}
 
 
+ErrorKind = Literal["user", "transient", "permanent"]
+
+# mirror of the fallback substring lists in src/assets/view.js, change both together
+_PERMANENT_ERROR_PATTERNS: tuple[str, ...] = ("image not found", "challenge not found")
+_USER_ERROR_PATTERNS: tuple[str, ...] = (
+    "you can only spawn",
+    "rate limit",
+    "too many",
+    "not a member of a team",
+    "invalid",
+    "no container found",
+)
+
+
+def classify_error_kind(message: str) -> ErrorKind:
+    lower = message.lower()
+    if any(p in lower for p in _PERMANENT_ERROR_PATTERNS):
+        return "permanent"
+    if any(p in lower for p in _USER_ERROR_PATTERNS):
+        return "user"
+    return "transient"
+
+
+def error_body(message: str, kind: ErrorKind | None = None) -> dict[str, Any]:
+    return {"error": message, "error_kind": kind or classify_error_kind(message)}
+
+
 _USER_SAFE_PATTERNS = (
     "no renewals remaining",
     "container not found",
@@ -322,9 +349,9 @@ def handle_container_errors(f):
         try:
             return f(*args, **kwargs)
         except ContainerUnavailableException as err:
-            return {"error": sanitize_container_error(err)}, 503
+            return error_body(sanitize_container_error(err)), 503
         except ContainerException as err:
-            return {"error": sanitize_container_error(err)}, 500
+            return error_body(sanitize_container_error(err)), 500
 
     return wrapper
 
@@ -427,6 +454,7 @@ def ratelimit_per_user(
                         "message": (
                             f"Too many requests. Limit is {effective_limit} requests in {effective_interval} seconds"
                         ),
+                        "error_kind": "user",
                     }
                 )
                 resp.status_code = 429

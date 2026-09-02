@@ -200,7 +200,7 @@ function view_container_info(challengeId) {
             info.append(warn);
         } else if (data.message || data.error) {
             var errMsg = data.message || data.error;
-            if (_isPermanentError(errMsg)) {
+            if (_errorKind(data, errMsg) === "permanent") {
                 _showServerError(info);
             } else {
                 info.textContent = errMsg;
@@ -214,6 +214,7 @@ function view_container_info(challengeId) {
 
 var _requestInFlight = false;
 
+// mirror of _PERMANENT_ERROR_PATTERNS and _USER_ERROR_PATTERNS in src/utils.py, change both together
 function _isPermanentError(msg) {
     if (!msg) return false;
     var permanent = ["image not found", "challenge not found"];
@@ -232,6 +233,14 @@ function _isUserError(msg) {
     ];
     var lower = msg.toLowerCase();
     return userErrs.some(function(p) { return lower.indexOf(p) !== -1; });
+}
+
+function _errorKind(data, msg) {
+    var kind = data && data.error_kind;
+    if (kind === "user" || kind === "transient" || kind === "permanent") return kind;
+    if (_isPermanentError(msg)) return "permanent";
+    if (_isUserError(msg)) return "user";
+    return "transient";
 }
 
 function _showServerError(container) {
@@ -269,13 +278,14 @@ function _doContainerRequest(challengeId, isRetry) {
     .then(function(data) {
         if (data.error || data.message) {
             var errMsg = data.error || data.message;
-            if (!isRetry && !_isPermanentError(errMsg) && !_isUserError(errMsg)) {
+            var kind = _errorKind(data, errMsg);
+            if (!isRetry && kind === "transient") {
                 btn.innerHTML = '<span class="loading-spinner"></span> Retrying...';
                 _requestInFlight = false;
                 setTimeout(function() { _doContainerRequest(challengeId, true); }, 2000);
                 return;
             }
-            if (_isPermanentError(errMsg)) {
+            if (kind === "permanent") {
                 _showServerError(info);
             } else {
                 info.textContent = errMsg;

@@ -11,7 +11,7 @@ from CTFd.utils.decorators import (
 from CTFd.utils.user import get_current_user
 
 from ..models import ContainerInfoModel
-from ..utils import DEFAULTS, handle_container_errors, is_team_mode, owner_filter, ratelimit_per_user
+from ..utils import DEFAULTS, error_body, handle_container_errors, is_team_mode, owner_filter, ratelimit_per_user
 from . import containers_bp
 from .helpers import (
     connect_type,
@@ -36,23 +36,23 @@ def validate_request(
 
     # a list or scalar json body would make the get calls below raise AttributeError
     if not isinstance(request.json, dict):
-        return {"error": "invalid request"}, 400, None
+        return error_body("invalid request", "user"), 400, None
 
     for field in required_fields:
         if not request.json.get(field):
-            return {"error": f"no {field} specified"}, 400, None
+            return error_body(f"no {field} specified", "transient"), 400, None
 
     if "chal_id" in required_fields:
         try:
             int(request.json["chal_id"])
         except (TypeError, ValueError):
-            return {"error": "invalid challenge id"}, 400, None
+            return error_body("invalid challenge id", "user"), 400, None
 
     if not user:
-        return {"error": "user not found"}, 400, None
+        return error_body("user not found", "transient"), 400, None
 
     if is_team_mode() and not user.team:
-        return {"error": "user not a member of a team"}, 400, None
+        return error_body("user not a member of a team", "user"), 400, None
 
     return None, None, user
 
@@ -164,6 +164,6 @@ def route_stop_container():
     running_container = ContainerInfoModel.query.filter_by(challenge_id=chal_id, **owner_filter(xid, is_team)).first()
 
     if running_container is None:
-        return {"error": "no container found"}, 400
+        return error_body("no container found", "user"), 400
 
     return kill_container(running_container.container_id)

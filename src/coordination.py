@@ -112,6 +112,24 @@ def _reservation(row: ContainerInstanceModel, *, created: bool) -> InstanceReser
     )
 
 
+@dataclass(frozen=True)
+class _ReserveRequest:
+    identity: str
+    challenge_id: int
+    xid: int
+    is_team: bool
+    submitter_user_id: int
+    max_instances: int
+    max_concurrent_creates: int
+    placement_units: int
+    expires: int
+    provision_timeout_seconds: int
+    preferred_context_name: str | None
+    eligible_context_names: set[str] | None
+    instance_id: str
+    provision_token: str
+
+
 class InstanceCoordinator:
     SQLITE_BUSY_RETRIES = 5
 
@@ -171,6 +189,104 @@ class InstanceCoordinator:
         an existing reservation for the same owner and challenge is returned with created=False rather than raising
         """
 
+        self._validate_reserve_args(
+            challenge_id=challenge_id,
+            submitter_user_id=submitter_user_id,
+            max_instances=max_instances,
+            max_concurrent_creates=max_concurrent_creates,
+            placement_units=placement_units,
+            provision_timeout_seconds=provision_timeout_seconds,
+            preferred_context_name=preferred_context_name,
+            eligible_context_names=eligible_context_names,
+        )
+
+        request = _ReserveRequest(
+            identity=owner_key(xid, is_team),
+            challenge_id=challenge_id,
+            xid=xid,
+            is_team=is_team,
+            submitter_user_id=submitter_user_id,
+            max_instances=max_instances,
+            max_concurrent_creates=max_concurrent_creates,
+            placement_units=placement_units,
+            expires=expires,
+            provision_timeout_seconds=provision_timeout_seconds,
+            preferred_context_name=preferred_context_name,
+            eligible_context_names=eligible_context_names,
+            instance_id=uuid.uuid4().hex,
+            provision_token=uuid.uuid4().hex,
+        )
+        busy_attempt = 0
+
+        # bound covers simultaneous quota and create slot races, each collision retries from a fresh snapshot
+        max_attempts = max_instances * max_concurrent_creates * 8 + 8
+        for _ in range(max_attempts):
+            session = _new_session()
+            try:
+                reservation = self._attempt_reserve(session, request)
+                if reservation is not None:
+                    return reservation
+            except IntegrityError:
+                session.rollback()
+                # a competing owner, quota, or create slot insert won, the next pass distinguishes dedupe from quota
+            except OperationalError as error:
+                session.rollback()
+                # sqlite returns SQLITE_BUSY instead of queueing writers, other operational errors must not be masked
+                if "locked" not in str(error).lower() or busy_attempt >= self.SQLITE_BUSY_RETRIES:
+                    raise
+                busy_attempt += 1
+                time.sleep(random.uniform(0.005, 0.025) * busy_attempt)
+            finally:
+                session.close()
+
+        # a final re read turns a late owner and challenge race into idempotent success
+        session = _new_session()
+        try:
+            existing = self._existing_reservation(session, request.identity, request.challenge_id)
+            if existing is not None:
+                return existing
+        finally:
+            session.close()
+
+        raise CreateCapacityUnavailable("could not reserve an instance after concurrent updates")
+
+    def _attempt_reserve(self, session, request: _ReserveRequest) -> InstanceReservation | None:
+        """returns None when the placement version cas loses, the caller retries from a fresh snapshot"""
+
+        existing = self._existing_reservation(session, request.identity, request.challenge_id)
+        if existing is not None:
+            return existing
+
+        quota_slot = self._pick_quota_slot(session, request.identity, request.max_instances)
+        contexts = self._ranked_contexts(session, request.preferred_context_name, request.eligible_context_names)
+        context, create_slot = self._pick_create_slot(session, contexts, request.max_concurrent_creates)
+
+        # the version bump and the insert commit together, linearizing placement against an admin drain
+        if not self._bump_placement_version(session, context):
+            session.rollback()
+            return None
+
+        instance = self._provisioning_row(
+            request, context_id=context.id, quota_slot=quota_slot, create_slot=create_slot
+        )
+        session.add(instance)
+        session.commit()
+
+        # reading the row after commit is safe only because the session sets expire_on_commit=False
+        return _reservation(instance, created=True)
+
+    @staticmethod
+    def _validate_reserve_args(
+        *,
+        challenge_id: int,
+        submitter_user_id: int,
+        max_instances: int,
+        max_concurrent_creates: int,
+        placement_units: int,
+        provision_timeout_seconds: int,
+        preferred_context_name: str | None,
+        eligible_context_names: set[str] | None,
+    ) -> None:
         if challenge_id <= 0:
             raise ValueError("challenge id must be positive")
         if submitter_user_id <= 0:
@@ -192,149 +308,119 @@ class InstanceCoordinator:
         ):
             raise ContextUnavailable(f"docker context '{preferred_context_name}' does not satisfy prerequisites")
 
-        identity = owner_key(xid, is_team)
-        instance_id = uuid.uuid4().hex
-        provision_token = uuid.uuid4().hex
-        busy_attempt = 0
+    @staticmethod
+    def _existing_reservation(session, identity: str, challenge_id: int) -> InstanceReservation | None:
+        existing = (
+            session.query(ContainerInstanceModel).filter_by(owner_key=identity, challenge_id=challenge_id).first()
+        )
+        if existing is None:
+            return None
 
-        # bound covers simultaneous quota and create slot races, each collision retries from a fresh snapshot
-        max_attempts = max_instances * max_concurrent_creates * 8 + 8
-        for _ in range(max_attempts):
-            session = _new_session()
-            try:
-                existing = (
-                    session.query(ContainerInstanceModel)
-                    .filter_by(owner_key=identity, challenge_id=challenge_id)
-                    .first()
-                )
-                if existing is not None:
-                    return _reservation(existing, created=False)
+        return _reservation(existing, created=False)
 
-                used_quota = {
-                    int(slot)
-                    for (slot,) in session.query(ContainerInstanceModel.quota_slot).filter_by(owner_key=identity).all()
-                }
-                quota_slot = next((slot for slot in range(max_instances) if slot not in used_quota), None)
-                if quota_slot is None:
-                    raise InstanceQuotaExceeded("owner instance quota is full")
+    @staticmethod
+    def _pick_quota_slot(session, identity: str, max_instances: int) -> int:
+        used_quota = {
+            int(slot)
+            for (slot,) in session.query(ContainerInstanceModel.quota_slot).filter_by(owner_key=identity).all()
+        }
+        quota_slot = next((slot for slot in range(max_instances) if slot not in used_quota), None)
+        if quota_slot is None:
+            raise InstanceQuotaExceeded("owner instance quota is full")
 
-                contexts_query = session.query(DockerContextModel).filter(
-                    DockerContextModel.state == "active",
-                    DockerContextModel.health_state == "healthy",
-                )
-                if preferred_context_name:
-                    contexts_query = contexts_query.filter(DockerContextModel.context_name == preferred_context_name)
-                if eligible_context_names is not None:
-                    contexts_query = contexts_query.filter(
-                        DockerContextModel.context_name.in_(sorted(eligible_context_names))
-                    )
-                contexts = contexts_query.all()
-                if not contexts:
-                    if preferred_context_name:
-                        raise ContextUnavailable(f"docker context '{preferred_context_name}' is not available")
-                    raise ContextUnavailable("no healthy active docker context is available")
+        return quota_slot
 
-                counts = self.placement_counts(session)
-                contexts.sort(
-                    key=lambda context: (
-                        -(int(context.weight) / (counts.get(context.id, 0) + 1)),
-                        context.context_name,
-                    )
-                )
+    def _ranked_contexts(
+        self, session, preferred_context_name: str | None, eligible_context_names: set[str] | None
+    ) -> list[DockerContextModel]:
+        contexts_query = session.query(DockerContextModel).filter(
+            DockerContextModel.state == "active",
+            DockerContextModel.health_state == "healthy",
+        )
+        if preferred_context_name:
+            contexts_query = contexts_query.filter(DockerContextModel.context_name == preferred_context_name)
+        if eligible_context_names is not None:
+            contexts_query = contexts_query.filter(DockerContextModel.context_name.in_(sorted(eligible_context_names)))
+        contexts = contexts_query.all()
+        if not contexts:
+            if preferred_context_name:
+                raise ContextUnavailable(f"docker context '{preferred_context_name}' is not available")
+            raise ContextUnavailable("no healthy active docker context is available")
 
-                choice: tuple[DockerContextModel, int] | None = None
-                for context in contexts:
-                    used_create_slots = {
-                        int(slot)
-                        for (slot,) in session.query(ContainerInstanceModel.create_slot)
-                        .filter(
-                            ContainerInstanceModel.docker_context_id == context.id,
-                            ContainerInstanceModel.create_slot.isnot(None),
-                        )
-                        .all()
-                    }
-                    create_slot = next(
-                        (slot for slot in range(max_concurrent_creates) if slot not in used_create_slots),
-                        None,
-                    )
-                    if create_slot is not None:
-                        choice = context, create_slot
-                        break
-
-                if choice is None:
-                    raise CreateCapacityUnavailable("all docker context create slots are busy")
-
-                context, create_slot = choice
-                observed_placement_version = int(context.placement_version)
-                # the version bump and the insert commit together, linearizing placement against an admin drain
-                updated = (
-                    session.query(DockerContextModel)
-                    .filter(
-                        DockerContextModel.id == context.id,
-                        DockerContextModel.placement_version == observed_placement_version,
-                        DockerContextModel.state == "active",
-                        DockerContextModel.health_state == "healthy",
-                    )
-                    .update(
-                        {DockerContextModel.placement_version: DockerContextModel.placement_version + 1},
-                        synchronize_session=False,
-                    )
-                )
-                if updated != 1:
-                    session.rollback()
-                    continue
-
-                now = time.time()
-                instance = ContainerInstanceModel(
-                    id=instance_id,
-                    owner_key=identity,
-                    user_id=submitter_user_id,
-                    team_id=xid if is_team else None,
-                    challenge_id=challenge_id,
-                    quota_slot=quota_slot,
-                    state="provisioning",
-                    state_version=0,
-                    docker_context_id=context.id,
-                    create_slot=create_slot,
-                    placement_units=placement_units,
-                    provision_token=provision_token,
-                    provision_deadline=now + provision_timeout_seconds,
-                    created_at=now,
-                    updated_at=now,
-                    expires=expires,
-                    renewals_used=0,
-                )
-                session.add(instance)
-                session.commit()
-
-                # reading the row after commit is safe only because the session sets expire_on_commit=False
-                return _reservation(instance, created=True)
-            except IntegrityError:
-                session.rollback()
-                # a competing owner, quota, or create slot insert won, the next pass distinguishes dedupe from quota
-                continue
-            except OperationalError as error:
-                session.rollback()
-                # sqlite returns SQLITE_BUSY instead of queueing writers, other operational errors must not be masked
-                if "locked" not in str(error).lower() or busy_attempt >= self.SQLITE_BUSY_RETRIES:
-                    raise
-                busy_attempt += 1
-                time.sleep(random.uniform(0.005, 0.025) * busy_attempt)
-            finally:
-                session.close()
-
-        # a final re read turns a late owner and challenge race into idempotent success
-        session = _new_session()
-        try:
-            existing = (
-                session.query(ContainerInstanceModel).filter_by(owner_key=identity, challenge_id=challenge_id).first()
+        counts = self.placement_counts(session)
+        contexts.sort(
+            key=lambda context: (
+                -(int(context.weight) / (counts.get(context.id, 0) + 1)),
+                context.context_name,
             )
-            if existing is not None:
-                return _reservation(existing, created=False)
-        finally:
-            session.close()
+        )
+        return contexts
 
-        raise CreateCapacityUnavailable("could not reserve an instance after concurrent updates")
+    @staticmethod
+    def _pick_create_slot(
+        session, contexts: list[DockerContextModel], max_concurrent_creates: int
+    ) -> tuple[DockerContextModel, int]:
+        for context in contexts:
+            used_create_slots = {
+                int(slot)
+                for (slot,) in session.query(ContainerInstanceModel.create_slot)
+                .filter(
+                    ContainerInstanceModel.docker_context_id == context.id,
+                    ContainerInstanceModel.create_slot.isnot(None),
+                )
+                .all()
+            }
+            create_slot = next(
+                (slot for slot in range(max_concurrent_creates) if slot not in used_create_slots),
+                None,
+            )
+            if create_slot is not None:
+                return context, create_slot
+
+        raise CreateCapacityUnavailable("all docker context create slots are busy")
+
+    @staticmethod
+    def _bump_placement_version(session, context: DockerContextModel) -> bool:
+        observed_placement_version = int(context.placement_version)
+        updated = (
+            session.query(DockerContextModel)
+            .filter(
+                DockerContextModel.id == context.id,
+                DockerContextModel.placement_version == observed_placement_version,
+                DockerContextModel.state == "active",
+                DockerContextModel.health_state == "healthy",
+            )
+            .update(
+                {DockerContextModel.placement_version: DockerContextModel.placement_version + 1},
+                synchronize_session=False,
+            )
+        )
+        return updated == 1
+
+    @staticmethod
+    def _provisioning_row(
+        request: _ReserveRequest, *, context_id: int, quota_slot: int, create_slot: int
+    ) -> ContainerInstanceModel:
+        now = time.time()
+        return ContainerInstanceModel(
+            id=request.instance_id,
+            owner_key=request.identity,
+            user_id=request.submitter_user_id,
+            team_id=request.xid if request.is_team else None,
+            challenge_id=request.challenge_id,
+            quota_slot=quota_slot,
+            state="provisioning",
+            state_version=0,
+            docker_context_id=context_id,
+            create_slot=create_slot,
+            placement_units=request.placement_units,
+            provision_token=request.provision_token,
+            provision_deadline=now + request.provision_timeout_seconds,
+            created_at=now,
+            updated_at=now,
+            expires=request.expires,
+            renewals_used=0,
+        )
 
     @staticmethod
     def mark_running(

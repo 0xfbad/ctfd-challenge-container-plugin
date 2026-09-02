@@ -495,7 +495,7 @@ class DockerHostManager:
                 container = client.containers.run(
                     image,
                     name=container_name,
-                    hostname=container_name,
+                    hostname=hostname or container_name,
                     command=command or None,
                     detach=True,
                     auto_remove=True,
