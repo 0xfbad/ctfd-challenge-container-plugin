@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 CHANNEL = "challenge_containers:events"
 
-# unique per-process token, used by subscribers to skip messages they themselves published
+# unique per process token, subscribers use it to skip messages they published themselves
 WORKER_ID = f"{os.getpid()}-{secrets.token_hex(4)}"
 
 _app = None
@@ -48,7 +48,7 @@ def _get_publish_client():
         try:
             import redis
 
-            # short socket_timeout so a hung redis can't park the request greenlet
+            # short socket_timeout so a hung redis does not park the request greenlet
             client = redis.from_url(url, decode_responses=True, socket_timeout=2, socket_connect_timeout=2)
             client.ping()
             _pub_client = client
@@ -65,7 +65,7 @@ def _new_subscribe_client():
     try:
         import redis
 
-        # no socket_timeout: pubsub.listen() must block forever waiting for messages
+        # no socket_timeout because pubsub listen must block forever waiting for messages
         client = redis.from_url(url, decode_responses=True, socket_connect_timeout=2, socket_keepalive=True)
         client.ping()
         return client
@@ -106,6 +106,27 @@ def start_subscriber(on_message: Callable[[dict], None]) -> None:
             logger.exception("event bus: failed to spawn subscriber greenlet")
 
 
+def _dispatch_message(msg: dict | None, on_message: Callable[[dict], None]) -> None:
+    if not msg or msg.get("type") != "message":
+        return
+
+    try:
+        event = json.loads(msg["data"])
+    except Exception:
+        logger.warning("event bus: malformed message, dropping")
+        return
+
+    if event.get("_origin") == WORKER_ID:
+        return
+
+    event.pop("_origin", None)
+
+    try:
+        on_message(event)
+    except Exception:
+        logger.exception("event bus: subscriber callback failed")
+
+
 def _subscriber_loop(on_message: Callable[[dict], None]) -> None:
     backoff = 1.0
     while True:
@@ -123,20 +144,7 @@ def _subscriber_loop(on_message: Callable[[dict], None]) -> None:
             assert _app is not None  # start_subscriber guarantees this
             with _app.app_context():
                 for msg in pubsub.listen():
-                    if not msg or msg.get("type") != "message":
-                        continue
-                    try:
-                        event = json.loads(msg["data"])
-                    except Exception:
-                        logger.warning("event bus: malformed message, dropping")
-                        continue
-                    if event.get("_origin") == WORKER_ID:
-                        continue
-                    event.pop("_origin", None)
-                    try:
-                        on_message(event)
-                    except Exception:
-                        logger.exception("event bus: subscriber callback failed")
+                    _dispatch_message(msg, on_message)
         except Exception:
             logger.warning("event bus: subscriber loop crashed, reconnecting", exc_info=True)
             time.sleep(backoff)

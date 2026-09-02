@@ -38,27 +38,20 @@ from ..volume_policy import (
 
 logger = logging.getLogger(__name__)
 
-# JSON response dicts returned by helper functions
 JsonResponse = dict[str, str | int | bool | None]
 
 
 def _resolve_challenge(chal_id: int) -> ContainerChallengeModel | None:
-    """Return the challenge stashed by `requires_visible_challenge` if it matches,
-    else fall back to a direct query (helpers may be called outside the decorator,
-    e.g. from tests or admin paths)."""
+    """prefer the challenge stashed on g, admin paths and tests call helpers outside requires_visible_challenge"""
     stashed = getattr(g, "challenge", None)
     if stashed is not None and getattr(stashed, "id", None) == chal_id:
         return stashed
+
     return ContainerChallengeModel.query.filter_by(id=chal_id).first()
 
 
 def requires_visible_challenge(f):
-    """Gate user routes on challenge visibility/state.
-
-    Resolves chal_id from kwargs or json body, loads the challenge once,
-    stashes it on flask.g, and aborts hidden/locked for non-admins. Mirrors
-    CTFd core's pattern (see CTFd/api/v1/challenges.py:705-709,1027,1198).
-    """
+    """hidden and locked states return the same 404 and 403 as CTFd/api/v1/challenges.py"""
 
     @wraps(f)
     def wrapper(*args, **kwargs):
@@ -83,6 +76,7 @@ def requires_visible_challenge(f):
         admin = is_admin()
         if challenge.state == "hidden" and not admin:
             return {"error": "challenge not found"}, 404
+
         if challenge.state == "locked" and not admin:
             return {"error": "challenge locked"}, 403
 
@@ -125,10 +119,10 @@ def resolve_expiration(challenge: ContainerChallengeModel) -> int:
 
 
 def resolve_max_renewals(challenge: ContainerChallengeModel) -> int:
-    # `is None` (not `or`) so a challenge with max_renewals=0 keeps renewals disabled
     max_renewals = challenge.max_renewals
-    if max_renewals is None:
+    if max_renewals is None:  # max_renewals of 0 disables renewals so a falsy test would wrongly fall back
         max_renewals = get_setting("default_max_renewals", 2)
+
     return int(max_renewals)
 
 
@@ -167,16 +161,16 @@ def get_hostname_for_context(context_name: str | None) -> str:
         return _request_hostname()
 
     context = DockerContextModel.query.filter_by(context_name=context_name).first()
-    if context:
-        if context.pub_hostname:
-            return context.pub_hostname
-        if context.hostname:
-            hostname = context.hostname
-            if "@" in hostname:
-                hostname = hostname.split("@")[1]
-            return hostname
+    if context is None:
+        return _request_hostname()
 
-    return _request_hostname()
+    if context.pub_hostname:
+        return context.pub_hostname
+
+    if not context.hostname:
+        return _request_hostname()
+
+    return context.hostname.split("@")[-1]  # ssh contexts store hostname as user@host
 
 
 def _log_request_failed(challenge: ContainerChallengeModel, uid: int, err: Exception) -> None:
@@ -198,14 +192,17 @@ def cleanup_instance(instance_id: str, *, reason: str = "stopped") -> JsonRespon
     instance = ContainerInstanceModel.query.filter_by(id=instance_id).first()
     if instance is None:
         return {"error": "container instance not found"}
+
     if instance.docker_context is None:
         return {"error": "container context is unavailable; cleanup will retry automatically"}
+
     context_name = instance.docker_context.context_name
     operation_token = InstanceCoordinator.claim_operation(
         instance_id, ("running", "provisioning", "cleanup_pending"), "cleanup_pending"
     )
     if operation_token is None:
         return {"error": "container cleanup is already in progress"}
+
     try:
         container_manager.host_manager.force_remove_resources_by_label(context_name, f"ctf.instance_id={instance_id}")
     except Exception as error:
@@ -220,6 +217,7 @@ def cleanup_instance(instance_id: str, *, reason: str = "stopped") -> JsonRespon
         stopped_at=time.time(),
     ):
         return {"error": "container cleanup finalization is already in progress"}
+
     return {"success": "container cleaned"}
 
 
@@ -302,7 +300,9 @@ def renew_container(chal_id: int, xid: int, is_team: bool) -> JsonResponse | tup
             return {"error": "solved containers cannot be renewed"}
         if lifecycle and lifecycle.expires <= now:
             return {"error": "expired containers cannot be renewed"}
+
         return {"error": "no renewals remaining"}
+
     new_expires = update.expires
     renewals_used = update.renewals_used - 1
 
@@ -342,7 +342,7 @@ def renew_container(chal_id: int, xid: int, is_team: bool) -> JsonResponse | tup
 def _runtime_volume_plan(
     challenge: ContainerChallengeModel, container_manager: ContainerManager
 ) -> tuple[VolumePolicy, dict[str, tuple[MountRequest, ...]], set[str] | None]:
-    """Validate mounts and return contexts satisfying every service's policy."""
+    """eligible contexts is None when no mounts are configured, meaning every context qualifies"""
 
     try:
         policy = load_volume_policy()
@@ -395,7 +395,7 @@ def _resolve_runtime_volumes(
     context_name: str,
     container_manager: ContainerManager,
 ) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, dict[str, str]]]]:
-    """Re-check the selected daemon immediately before Docker mutation."""
+    """recheck the selected daemon immediately before mutating it, the earlier plan can be stale"""
 
     resolved: dict[str, dict[str, dict[str, str]]] = {}
     for service_name, mounts in plan.items():
@@ -422,18 +422,17 @@ def _cleanup_failed_reservation(
     *,
     ambiguous_external_io: bool = False,
 ) -> bool:
-    """Release a reservation only after a successful daemon query proves absence."""
+    """release the reservation only after a daemon query proves no resource exists"""
 
     if ambiguous_external_io:
-        # A timed-out Docker/SSH request can resume after returning to us. An
-        # immediate empty label query is therefore not proof that no resource
-        # will appear. Retain the global create slot through the reconciliation
-        # grace period.
+        # a timed out docker or ssh call can still land later so an empty label query proves nothing
         InstanceCoordinator.mark_cleanup_pending(reservation.instance_id, reservation.provision_token, str(error))
         return False
+
     if not reservation.context_name:
         InstanceCoordinator.mark_cleanup_pending(reservation.instance_id, reservation.provision_token, str(error))
         return False
+
     try:
         container_manager.host_manager.force_remove_resources_by_label(
             reservation.context_name, f"ctf.instance_id={reservation.instance_id}"
@@ -448,10 +447,6 @@ def _cleanup_failed_reservation(
 
 
 def create_container(chal_id: int, xid: int, uid: int, is_team: bool) -> JsonResponse | tuple[JsonResponse, int]:
-    return _create_container_inner(chal_id, xid, uid, is_team)
-
-
-def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> JsonResponse | tuple[JsonResponse, int]:
     container_manager = current_app.container_manager
     challenge = _resolve_challenge(chal_id)
     if challenge is None:
@@ -478,8 +473,7 @@ def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> 
         _log_request_failed(challenge, uid, err)
         return {"error": sanitize_container_error(err)}, 400
 
-    # Do policy/host inspection first so slow control-plane probes do not eat
-    # into the participant's configured runtime.
+    # the expiry clock starts after host inspection so slow probes do not eat into the runtime
     expiration = resolve_expiration(challenge)
     expires = int(time.time() + expiration)
     effective_memory_mb = (
@@ -652,8 +646,7 @@ def _create_container_inner(chal_id: int, xid: int, uid: int, is_team: bool) -> 
         message=f"container created for {challenge.name}",
     )
 
-    response = build_connection_response("created", challenge, finalized, context_name)
-    return response
+    return build_connection_response("created", challenge, finalized, context_name)
 
 
 def view_container_info(chal_id: int, xid: int, is_team: bool) -> JsonResponse | tuple[JsonResponse, int]:
@@ -666,34 +659,38 @@ def view_container_info(chal_id: int, xid: int, is_team: bool) -> JsonResponse |
         challenge_id=challenge.id, is_entry=True, **owner_filter(xid, is_team)
     ).first()
 
-    if running_container:
-        if running_container.instance.state == "cleanup_pending":
-            return {
-                "status": "cleanup_pending",
-                "message": "The previous instance is awaiting confirmed cleanup.",
-            }, 503
-        try:
-            if container_manager.is_container_running(running_container.container_id, running_container.docker_context):
-                response = build_connection_response(
-                    "already_running", challenge, running_container, running_container.docker_context
-                )
-                return response
-            else:
-                cleanup = kill_container(running_container.container_id)
-                if "success" not in cleanup:
-                    return {"error": cleanup.get("error", "container cleanup is pending")}, 503
-                return {"status": "instance not started"}
-        except ContainerException:
-            # host is down but the container record is still valid
-            response = build_connection_response(
-                "host_unavailable", challenge, running_container, running_container.docker_context
-            )
-            response["message"] = "the container host is temporarily unreachable, please wait"
-            return response
+    if running_container is None:
+        misconfigured = _check_misconfigured(challenge, container_manager)
+        if misconfigured:
+            return misconfigured
 
-    misconfigured = _check_misconfigured(challenge, container_manager)
-    if misconfigured:
-        return misconfigured
+        return {"status": "instance not started"}
+
+    if running_container.instance.state == "cleanup_pending":
+        return {
+            "status": "cleanup_pending",
+            "message": "The previous instance is awaiting confirmed cleanup.",
+        }, 503
+
+    try:
+        is_running = container_manager.is_container_running(
+            running_container.container_id, running_container.docker_context
+        )
+    except ContainerException:
+        response = build_connection_response(
+            "host_unavailable", challenge, running_container, running_container.docker_context
+        )
+        response["message"] = "the container host is temporarily unreachable, please wait"
+        return response
+
+    if is_running:
+        return build_connection_response(
+            "already_running", challenge, running_container, running_container.docker_context
+        )
+
+    cleanup = kill_container(running_container.container_id)
+    if "success" not in cleanup:
+        return {"error": cleanup.get("error", "container cleanup is pending")}, 503
 
     return {"status": "instance not started"}
 

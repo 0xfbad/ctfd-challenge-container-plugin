@@ -15,13 +15,7 @@ _FLAG_SHARE_DIGEST_DOMAIN = b"ctfd-challenge-containers:flag-share-token:v1\x00"
 
 
 def submitter_user_xid(user: object) -> str:
-    """Return the immutable, non-null external identity used for deduplication.
-
-    This deliberately identifies the submitting user even in team mode. Two
-    teammates are distinct submitters, and nullable team IDs cannot weaken the
-    database uniqueness invariant.
-    """
-
+    """identifies the submitting user even in team mode, teammates are distinct submitters and team ids are nullable"""
     user_id = getattr(user, "id", None)
     if type(user_id) is not int or user_id <= 0:
         raise ValueError("a persisted submitting user is required")
@@ -29,21 +23,13 @@ def submitter_user_xid(user: object) -> str:
 
 
 def challenge_xid(challenge_id: int) -> str:
-    """Return the immutable, non-null challenge identity used for deduplication."""
-
     if type(challenge_id) is not int or challenge_id <= 0:
         raise ValueError("a persisted challenge is required")
     return f"challenge:{challenge_id}"
 
 
 def submitted_token_digest(secret: str, submitted_token: str, *, challenge_id: int) -> str:
-    """Create a domain-separated keyed digest for storage and uniqueness.
-
-    Freshness tokens are intentionally short, so an unkeyed SHA-256 value is
-    vulnerable to cheap enumeration if the database is exposed. The keyed
-    digest avoids retaining the submitted token in the database.
-    """
-
+    """keyed so a leaked database cannot be enumerated, freshness tokens are short enough to brute force unkeyed"""
     if not isinstance(secret, str) or not secret:
         raise ValueError("freshness secret is required")
     if not isinstance(submitted_token, str) or not submitted_token or len(submitted_token) > 191:
@@ -57,8 +43,6 @@ def submitted_token_digest(secret: str, submitted_token: str, *, challenge_id: i
 
 
 def flag_share_identity_fields(*, user: object, challenge_id: int, submitted_token: str, secret: str) -> dict[str, str]:
-    """Return immutable identities and a keyed digest for incident deduplication."""
-
     return {
         "submitter_user_xid": submitter_user_xid(user),
         "challenge_xid": challenge_xid(challenge_id),

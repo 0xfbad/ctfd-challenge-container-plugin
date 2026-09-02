@@ -26,8 +26,6 @@ class HostStatus(TypedDict):
 
 
 class Orchestrator:
-    """DB-derived host health and load reporting."""
-
     def __init__(self, host_manager: DockerHostManager) -> None:
         self.host_manager = host_manager
         self.container_counts: defaultdict[str, int] = defaultdict(int)
@@ -41,8 +39,6 @@ class Orchestrator:
         return chal.image if chal else None
 
     def _refresh_db_counts(self) -> None:
-        """Refresh conservative physical load from shared database state."""
-
         contexts = DockerContextModel.query.all()
         counts_by_id = InstanceCoordinator.placement_counts(db.session)
         counts_by_name = {context.context_name: counts_by_id.get(context.id, 0) for context in contexts}
@@ -57,8 +53,7 @@ class Orchestrator:
             }
 
     def load_from_db(self) -> None:
-        # Preserve all configured endpoints. Draining/disabled/retired contexts
-        # may still be required for cleanup, and down hosts must remain retryable.
+        # no state filter, draining and retired contexts still need cleanup and down hosts stay retryable
         contexts = DockerContextModel.query.all()
         self.host_manager.load_contexts(contexts)
         connected = set(self.host_manager.get_connected_contexts())
@@ -147,8 +142,7 @@ class Orchestrator:
             if context is None:
                 continue
             previous_state = context.health_state
-            # A slower, older probe must not overwrite a newer result from a
-            # second maintenance process during failover or misconfiguration.
+            # stale probe must not overwrite a newer result written by a second maintenance process
             updated = DockerContextModel.query.filter(
                 DockerContextModel.id == context.id,
                 db.or_(

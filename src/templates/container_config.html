@@ -220,7 +220,8 @@
     function esc(s) {
         var d = document.createElement('div');
         d.textContent = s || '';
-        return d.innerHTML;
+        // textContent escaping leaves quotes alone and this output also lands in attribute values
+        return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
     function ccFetch(path, opts) {
@@ -350,12 +351,12 @@
 
     function loadContexts() {
         ccFetch('/api/contexts/list').then(function(data) {
-            renderDockerAlert(data.docker_socket, data.contexts || []);
+            renderDockerAlert(data.docker_socket);
             renderContexts(data.contexts || []);
         });
     }
 
-    function renderDockerAlert(socketOk, contexts) {
+    function renderDockerAlert(socketOk) {
         var el = document.getElementById('cc-docker-alert');
         el.style.display = '';
         if (!socketOk) {
@@ -439,22 +440,31 @@
         if (!force && !confirm('Delete context "' + name + '"?')) return;
         ccFetch('/api/contexts/delete/' + id + (force ? '?force=true' : ''), { method: 'DELETE' })
             .then(function(data) {
-                if (data.success) loadContexts();
-                else if (!force && data.retirement_available && (
+                if (data.success) {
+                    loadContexts();
+                    return;
+                }
+
+                var canRetire = !force && data.retirement_available && (
                     data.physical_references || data.logical_references || data.pinned_challenges ||
                     data.docker_containers || data.docker_networks || data.error
-                )) {
-                    var detail = [
-                        data.logical_references ? data.logical_references + ' lifecycle row(s)' : '',
-                        data.docker_containers ? data.docker_containers + ' Docker container(s)' : '',
-                        data.docker_networks ? data.docker_networks + ' Docker network(s)' : '',
-                        data.pinned_challenges ? data.pinned_challenges + ' pinned challenge(s)' : ''
-                    ].filter(Boolean).join(', ');
-                    var reason = detail || 'an unreachable Docker endpoint';
-                    if (confirm('This context still has ' + reason + '. Retire it from new use while automatic cleanup continues?')) {
-                        deleteContext(id, name, true);
-                    }
-                } else CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Delete failed', button: 'OK' });
+                );
+                if (!canRetire) {
+                    CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Delete failed', button: 'OK' });
+                    return;
+                }
+
+                var detail = [
+                    data.logical_references ? data.logical_references + ' lifecycle row(s)' : '',
+                    data.docker_containers ? data.docker_containers + ' Docker container(s)' : '',
+                    data.docker_networks ? data.docker_networks + ' Docker network(s)' : '',
+                    data.pinned_challenges ? data.pinned_challenges + ' pinned challenge(s)' : ''
+                ].filter(Boolean).join(', ');
+                var reason = detail || 'an unreachable Docker endpoint';
+
+                if (confirm('This context still has ' + reason + '. Retire it from new use while automatic cleanup continues?')) {
+                    deleteContext(id, name, true);
+                }
             });
     }
 
@@ -644,7 +654,7 @@
                         '<i class="fas fa-check-circle text-success" title="Available"></i></td>';
                 }
 
-                // compare by size instead of hash, locally built images have unique IDs per host
+                // compare by size instead of hash, locally built images have unique ids per host
                 var isRef = ref && info.created === ref.created && info.size_mb === ref.size_mb;
                 var sizeDiff = ref ? Math.abs(info.size_mb - ref.size_mb) : 0;
                 var threshold = ref ? Math.max(ref.size_mb * 0.05, 1) : 0;

@@ -9,22 +9,16 @@ from threading import Lock
 
 logger = logging.getLogger(__name__)
 
-# scalar types allowed in metadata values
 MetadataVal = str | int | float | bool | None
-
-# metadata can contain nested dicts (e.g. ImageInfo, host scores)
 MetadataValue = MetadataVal | dict[str, MetadataVal | dict[str, MetadataVal]]
 MetadataDict = dict[str, MetadataValue]
 
-# shape of event dicts produced by EventLogger.log_event
 EventDict = dict[str, str | int | float | bool | None | MetadataDict]
 
-# is_admin is always a real bool; hidden/banned are raw column values that may be None
 UserFlagValues = tuple[bool, bool | None, bool | None]
 
 
 def user_flag_values(user: object) -> UserFlagValues:
-    # mirrors how callers derive the three flags off a Users row (or None)
     is_admin = user.type == "admin" if user else False  # type: ignore[attr-defined]
     return is_admin, getattr(user, "hidden", False), getattr(user, "banned", False)
 
@@ -38,7 +32,6 @@ def flag_share_metadata(
     team_id: int | None = None,
     team_name: str | None = None,
 ) -> dict:
-    # shared shape for flag_sharing events, both live at submit time and replayed for the admin feed
     meta: dict = {
         "challenge_id": challenge_id,
         "challenge_name": challenge_name,
@@ -58,13 +51,11 @@ def flag_share_message(submitter_name: str | None, source_entity: str | None, ch
 
 
 def dense_user_flags(values: UserFlagValues) -> dict[str, bool | None]:
-    # always emits all three keys (preserves raw hidden/banned, which may be None)
     is_admin, is_hidden, is_banned = values
     return {"is_admin": is_admin, "is_hidden": is_hidden, "is_banned": is_banned}
 
 
 def sparse_user_flags(values: UserFlagValues, out: dict | None = None) -> dict:
-    # only emits keys whose value is truthy, always as literal True
     is_admin, is_hidden, is_banned = values
     if out is None:
         out = {}
@@ -125,8 +116,6 @@ class EventLogger:
         self._deliver_local(event)
 
         try:
-            from . import event_bus
-
             event_bus.publish(event)
         except Exception:
             logger.warning("event bus publish failed", exc_info=True)

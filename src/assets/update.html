@@ -16,7 +16,6 @@
 {% block value %}
 <script>
     var container_context_selected = {{ (challenge.docker_context or '') | tojson }};
-    var container_image_selected = {{ (challenge.image or '') | tojson }};
     var container_advanced_values = {
         command: {{ (challenge.command or '') | tojson }},
         volumes: {{ (challenge.volumes or '') | tojson }},
@@ -138,33 +137,6 @@
     <input type="number" class="form-control no-spin" name="max_renewals" id="cc-max-renewals" min="0" value="{{ challenge.max_renewals if challenge.max_renewals is not none else 2 }}">
 </div>
 
-<script>
-(function() {
-    var h = document.getElementById('cc-expiry-h');
-    var m = document.getElementById('cc-expiry-m');
-    var v = document.getElementById('cc-expiry-val');
-    function sync() { v.value = (parseInt(h.value) || 0) * 3600 + (parseInt(m.value) || 0) * 60; }
-    h.addEventListener('input', sync);
-    m.addEventListener('input', sync);
-
-    fetch('/containers/api/settings', {
-        headers: { 'X-Requested-With': 'XMLHttpRequest', 'CSRF-Token': init.csrfNonce },
-        credentials: 'same-origin'
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-        var s = data.settings || {};
-        if (s.default_expiration_seconds) {
-            var secs = parseInt(s.default_expiration_seconds.value) || 1800;
-            h.placeholder = Math.floor(secs / 3600) + ' (default)';
-            m.placeholder = Math.floor((secs % 3600) / 60) + ' (default)';
-        }
-        if (s.default_max_renewals) {
-            document.getElementById('cc-max-renewals').placeholder = s.default_max_renewals.value + ' (default)';
-        }
-    });
-})();
-</script>
 
 <style>
     #advanced-toggle .fa-chevron-right { transition: transform 0.2s; }

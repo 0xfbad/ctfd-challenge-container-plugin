@@ -26,7 +26,7 @@ ApplyMode = Literal["live", "live_disruptive"]
 
 
 class ValidationError(ValueError):
-    """Raised when an API value fails server-side validation."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -95,13 +95,12 @@ def get_setting(key: str, default: float | str | bool | None = None) -> int | fl
     if default is None:
         default = DEFAULTS.get(key)
 
-    # flask raises RuntimeError when current_app is accessed outside an app context
     try:
         from flask import current_app
 
         if not current_app:
             return default
-    except RuntimeError:
+    except RuntimeError:  # current_app raises outside an app context
         return default
 
     row = ContainerSettingsModel.query.filter_by(key=key).first()
@@ -283,12 +282,13 @@ def is_team_mode() -> bool | None:
 
 
 def resolve_xid(user) -> int | None:
-    # team id in team mode (None when team mode but the user has no team), user id otherwise
-    if is_team_mode():
-        if not user.team:
-            return None
-        return user.team.id
-    return user.id
+    if not is_team_mode():
+        return user.id
+
+    if not user.team:
+        return None
+
+    return user.team.id
 
 
 def owner_filter(xid: int, is_team: bool) -> dict[str, int]:
@@ -317,7 +317,6 @@ def sanitize_container_error(err: ContainerException | Exception) -> str:
 
 
 def handle_container_errors(f):
-    # centralize ContainerException dispatch so routes stay focused on happy paths
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
         try:
@@ -356,8 +355,7 @@ def _increment_rate_limit(key: str, interval: int) -> int:
         client = _rate_limit_redis_client(redis_url)
         return int(client.eval(_RATE_LIMIT_LUA, 1, f"challenge-containers:{key}", interval))
 
-    # Non-Redis development backends do not provide a portable atomic
-    # increment. Preserve the fixed-window behavior within that backend.
+    # no portable atomic increment outside redis, this fallback can undercount under concurrent requests
     from CTFd.cache import cache
 
     try:
@@ -394,8 +392,7 @@ def ratelimit_per_user(
     interval: RatePolicyValue = 300,
     key_prefix: str = "rl_user",
 ):
-    # ctfd's @ratelimit keys on ip, which falsely throttles students sharing
-    # an egress ip (campus wifi, nat, vpn)
+    # the ctfd ratelimit decorator keys on ip which throttles every user behind one egress ip
     def decorator(f):
         @functools.wraps(f)
         def wrapper(*args, **kwargs):
@@ -412,9 +409,7 @@ def ratelimit_per_user(
 
             effective_limit_source: RatePolicyValue = limit
             effective_interval_source: RatePolicyValue = interval
-            # Existing status-route decorators pass the defaults as literals because
-            # decoration happens before an app context exists. Resolve those values
-            # from storage inside the request so admin changes take effect immediately.
+            # routes decorate before an app context exists, so literal defaults reread storage per request
             if limit == DEFAULTS["rate_limit_requests"] and interval == DEFAULTS["rate_limit_interval"]:
                 effective_limit_source = "rate_limit_requests"
                 effective_interval_source = "rate_limit_interval"

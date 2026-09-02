@@ -1,11 +1,12 @@
 CTFd.plugin.run(async (_CTFd) => {
-	const { loadContexts, initSSHToggle, initAdvancedSection, checkImageStatus } = ContainerFormUtils;
+	const { loadContexts, initSSHToggle, initAdvancedSection, initExpirySync, checkImageStatus } = ContainerFormUtils;
 
 	const dockerContext = document.getElementById("docker-context");
 	const connectType = document.getElementById("connect-type");
 	const imageInput = document.querySelector('input[name="image"]');
 	const csrf = init.csrfNonce;
 
+	initExpirySync(false);
 	await loadContexts(dockerContext, csrf);
 
 	if (container_context_selected) {

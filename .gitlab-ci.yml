@@ -5,6 +5,9 @@
 
 unit-tests:
   extends: .python-checks
+  # tests are untracked so this job only materializes when they are present
+  rules:
+    - exists: ["tests/**/*"]
   script:
     - python -m pytest --junitxml=pytest.xml
   artifacts:
@@ -21,6 +24,8 @@ static-analysis:
     - vulture
 
 end-to-end:
+  rules:
+    - exists: ["tests/e2e/run.sh"]
   image: docker:29-cli
   services:
     - name: docker:29-dind

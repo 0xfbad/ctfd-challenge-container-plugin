@@ -274,6 +274,9 @@ All analytics endpoints accept `?range=24h|7d|30d|all` (default `7d`)
 
 ## Development
 
+The `tests/` directory is intentionally untracked and exists only in local development checkouts; the CI test jobs
+skip themselves when it is absent.
+
 ```
 ruff format --check .
 ruff check .

@@ -1,10 +1,6 @@
-"""Database coordination for logical challenge-container instances.
+"""database coordination for logical challenge container instances
 
-All methods in this module use short, independent SQLAlchemy sessions. Docker
-and SSH calls must happen *after* a reservation transaction commits and before
-one of the CAS completion methods is called. This keeps slow external I/O out
-of database transactions while unique constraints remain the cross-process
-correctness boundary.
+sessions are short and independent, docker and ssh calls belong between a reservation commit and a completion call
 """
 
 from __future__ import annotations
@@ -32,7 +28,7 @@ RESOURCE_OWNING_STATES = ("provisioning", "running", "cleanup_pending")
 
 
 class CoordinationError(Exception):
-    """Base error for an expected coordination outcome."""
+    pass
 
 
 class InstanceQuotaExceeded(CoordinationError):
@@ -87,17 +83,14 @@ class FinalizedInstance:
 
 
 def owner_key(xid: int, is_team: bool) -> str:
-    """Return the non-null server identity used by uniqueness constraints."""
-
     if xid <= 0:
         raise ValueError("owner id must be positive")
+
     return f"team:{xid}" if is_team else f"user:{xid}"
 
 
 def _new_session():
-    # Do not use Flask-SQLAlchemy's request-scoped session here. A caller may
-    # already have loaded ORM objects, and rolling that session back after a
-    # uniqueness race would invalidate unrelated request state.
+    # not the request scoped session, rolling that back after a uniqueness race would invalidate unrelated request state
     return sessionmaker(bind=db.engine, expire_on_commit=False)()
 
 
@@ -105,6 +98,7 @@ def _reservation(row: ContainerInstanceModel, *, created: bool) -> InstanceReser
     context = row.docker_context
     if context is None or row.docker_context_id is None:
         raise CoordinationError("reserved instance has no docker context")
+
     return InstanceReservation(
         instance_id=row.id,
         provision_token=row.provision_token,
@@ -119,8 +113,6 @@ def _reservation(row: ContainerInstanceModel, *, created: bool) -> InstanceReser
 
 
 class InstanceCoordinator:
-    """Portable DB-backed quota, placement, and lifecycle coordination."""
-
     SQLITE_BUSY_RETRIES = 5
 
     @staticmethod
@@ -130,18 +122,14 @@ class InstanceCoordinator:
             row = session.query(ContainerInstanceModel).filter_by(id=instance_id).first()
             if row is None:
                 return None
+
             return LifecycleUpdate(int(row.expires), int(row.renewals_used), row.solved_at)
         finally:
             session.close()
 
     @staticmethod
     def placement_counts(session=None) -> dict[int, int]:
-        """Return conservative physical placement units by context ID.
-
-        ``placement_units`` is the validated physical member count for a
-        logical instance. It deliberately remains charged through stopping and
-        cleanup-pending states, until absence of Docker resources is confirmed.
-        """
+        """physical placement units by context id, still charged in cleanup_pending until docker absence is confirmed"""
 
         owns_session = session is None
         session = session or _new_session()
@@ -178,11 +166,9 @@ class InstanceCoordinator:
         eligible_context_names: set[str] | None = None,
         provision_timeout_seconds: int = 120,
     ) -> InstanceReservation:
-        """Atomically reserve owner quota, a host, and one host create slot.
+        """atomically reserve owner quota, a host, and one host create slot
 
-        If another worker already owns the same owner/challenge reservation,
-        that durable row is returned with ``created=False``. No transaction is
-        retained after this method returns.
+        an existing reservation for the same owner and challenge is returned with created=False rather than raising
         """
 
         if challenge_id <= 0:
@@ -211,8 +197,7 @@ class InstanceCoordinator:
         provision_token = uuid.uuid4().hex
         busy_attempt = 0
 
-        # Every uniqueness collision is retried from a fresh database snapshot.
-        # The upper bound accommodates simultaneous quota and create-slot races.
+        # bound covers simultaneous quota and create slot races, each collision retries from a fresh snapshot
         max_attempts = max_instances * max_concurrent_creates * 8 + 8
         for _ in range(max_attempts):
             session = _new_session()
@@ -281,8 +266,7 @@ class InstanceCoordinator:
 
                 context, create_slot = choice
                 observed_placement_version = int(context.placement_version)
-                # Linearizes placement against an admin drain/disable. The
-                # version bump and instance insert commit or roll back together.
+                # the version bump and the insert commit together, linearizing placement against an admin drain
                 updated = (
                     session.query(DockerContextModel)
                     .filter(
@@ -322,18 +306,16 @@ class InstanceCoordinator:
                 )
                 session.add(instance)
                 session.commit()
-                # The context object was loaded in this independent session and
-                # remains usable because expire_on_commit=False.
+
+                # reading the row after commit is safe only because the session sets expire_on_commit=False
                 return _reservation(instance, created=True)
             except IntegrityError:
                 session.rollback()
-                # A competing owner/quota/create-slot insert won. Retry from a
-                # clean snapshot; the next pass distinguishes dedupe from quota.
+                # a competing owner, quota, or create slot insert won, the next pass distinguishes dedupe from quota
                 continue
             except OperationalError as error:
                 session.rollback()
-                # SQLite has one writer and may surface SQLITE_BUSY rather than
-                # queueing. Other operational failures are not safe to mask.
+                # sqlite returns SQLITE_BUSY instead of queueing writers, other operational errors must not be masked
                 if "locked" not in str(error).lower() or busy_attempt >= self.SQLITE_BUSY_RETRIES:
                     raise
                 busy_attempt += 1
@@ -341,7 +323,7 @@ class InstanceCoordinator:
             finally:
                 session.close()
 
-        # Re-read once to turn a final owner/challenge race into idempotent success.
+        # a final re read turns a late owner and challenge race into idempotent success
         session = _new_session()
         try:
             existing = (
@@ -351,6 +333,7 @@ class InstanceCoordinator:
                 return _reservation(existing, created=False)
         finally:
             session.close()
+
         raise CreateCapacityUnavailable("could not reserve an instance after concurrent updates")
 
     @staticmethod
@@ -362,11 +345,12 @@ class InstanceCoordinator:
         stack_id: str | None = None,
         physical_members: tuple[PhysicalMember, ...],
     ) -> FinalizedInstance | None:
-        """Atomically persist every physical member and finalize provisioning."""
+        """persist every physical member and finalize provisioning in one transaction"""
 
         entries = [member for member in physical_members if member.is_entry]
         if len(entries) != 1 or entries[0].container_id != entry_container_id:
             raise ValueError("physical members must contain exactly the declared entry container")
+
         service_names = [member.service_name for member in physical_members]
         if len(service_names) != len(set(service_names)):
             raise ValueError("physical member service names must be unique")
@@ -389,6 +373,7 @@ class InstanceCoordinator:
 
             if len(physical_members) != instance.placement_units:
                 raise ValueError("physical member count does not match reserved placement units")
+
             context_name = instance.docker_context.context_name
             created_timestamp = int(instance.created_at)
             for member in physical_members:
@@ -447,6 +432,7 @@ class InstanceCoordinator:
             if updated != 1:
                 session.rollback()
                 return None
+
             entry = entries[0]
             result = FinalizedInstance(
                 container_id=entry_container_id,
@@ -464,7 +450,7 @@ class InstanceCoordinator:
 
     @staticmethod
     def mark_cleanup_pending(instance_id: str, provision_token: str, error: str) -> bool:
-        """Fail closed while retaining quota and placement accounting."""
+        """fail closed while retaining quota and placement accounting"""
 
         session = _new_session()
         try:
@@ -479,9 +465,7 @@ class InstanceCoordinator:
                     {
                         ContainerInstanceModel.state: "cleanup_pending",
                         ContainerInstanceModel.state_version: ContainerInstanceModel.state_version + 1,
-                        # Ambiguous provisioning retains its create slot and
-                        # deadline. Reconciliation must prove Docker absence
-                        # before delete releases either capacity or owner quota.
+                        # create_slot and provision_deadline are left set until reconciliation proves docker absence
                         ContainerInstanceModel.updated_at: time.time(),
                         ContainerInstanceModel.last_error: str(error)[:512],
                     },
@@ -502,10 +486,11 @@ class InstanceCoordinator:
         reason: str | None = None,
         stopped_at: float | None = None,
     ) -> bool:
-        """Release quota/accounting only after the caller proved Docker absence."""
+        """release quota and accounting, the caller must first prove docker absence"""
 
         if provision_token is None and operation_token is None:
             raise ValueError("a provision or operation token is required")
+
         session = _new_session()
         try:
             query = session.query(ContainerInstanceModel).filter(ContainerInstanceModel.id == instance_id)
@@ -516,6 +501,7 @@ class InstanceCoordinator:
             if query.first() is None:
                 session.rollback()
                 return False
+
             if reason is not None:
                 session.query(ContainerHistoryModel).filter_by(instance_id=instance_id).update(
                     {
@@ -527,9 +513,7 @@ class InstanceCoordinator:
                     },
                     synchronize_session=False,
                 )
-            # RESTRICT protects against accidental logical deletion. Once the
-            # caller has proved Docker absence, remove explicit physical rows
-            # and the logical instance in the same transaction.
+            # physical rows are deleted explicitly because the instance foreign key is RESTRICT
             session.query(ContainerInfoModel).filter_by(instance_id=instance_id).delete(synchronize_session=False)
             deleted = query.delete(synchronize_session=False)
             session.commit()
@@ -539,10 +523,9 @@ class InstanceCoordinator:
 
     @staticmethod
     def release_operation(instance_id: str, operation_token: str, error: str | None = None) -> bool:
-        """Release a live operation claim without releasing resource accounting.
+        """release a live operation claim without releasing resource accounting
 
-        This is used when Docker cleanup failed normally. A process crash is
-        recovered by the bounded stale-token takeover in ``claim_operation``.
+        a crashed process is instead recovered by the bounded stale token takeover in claim_operation
         """
 
         session = _new_session()
@@ -576,14 +559,17 @@ class InstanceCoordinator:
         *,
         stale_after_seconds: int = 120,
     ) -> str | None:
-        """Claim a stop/expiry/reconcile operation using a random fencing token."""
+        """claim a stop, expiry, or reconcile operation with a random fencing token"""
 
         if not expected_states:
             raise ValueError("at least one expected state is required")
+
         if target_state != "cleanup_pending":
             raise ValueError("invalid operation target state")
+
         if stale_after_seconds <= 0:
             raise ValueError("operation lease must be positive")
+
         token = uuid.uuid4().hex
         session = _new_session()
         try:
@@ -617,7 +603,7 @@ class InstanceCoordinator:
     def shorten_after_solve(
         instance_id: str, target_expires: int, solved_at: float | None = None
     ) -> LifecycleUpdate | None:
-        """Atomically mark solved and shorten, but never extend, expiry."""
+        """mark solved and shorten expiry, never extend it"""
 
         solved_at = solved_at if solved_at is not None else time.time()
         session = _new_session()
@@ -651,6 +637,7 @@ class InstanceCoordinator:
             if updated != 1:
                 session.rollback()
                 return None
+
             row = session.query(ContainerInstanceModel).filter_by(id=instance_id).one()
             session.query(ContainerInfoModel).filter_by(instance_id=instance_id).update(
                 {ContainerInfoModel.expires: row.expires}, synchronize_session=False
@@ -690,6 +677,7 @@ class InstanceCoordinator:
             if updated != 1:
                 session.rollback()
                 return None
+
             row = session.query(ContainerInstanceModel).filter_by(id=instance_id).one()
             session.query(ContainerInfoModel).filter_by(instance_id=instance_id).update(
                 {
@@ -706,7 +694,7 @@ class InstanceCoordinator:
 
     @staticmethod
     def extend_by_admin(instance_id: str, *, new_expires: int) -> LifecycleUpdate | None:
-        """Atomically extend a running instance without consuming a renewal."""
+        """extend a running instance without consuming a renewal"""
 
         session = _new_session()
         try:
@@ -729,6 +717,7 @@ class InstanceCoordinator:
             if updated != 1:
                 session.rollback()
                 return None
+
             row = session.query(ContainerInstanceModel).filter_by(id=instance_id).one()
             session.query(ContainerInfoModel).filter_by(instance_id=instance_id).update(
                 {ContainerInfoModel.expires: row.expires}, synchronize_session=False
@@ -741,7 +730,7 @@ class InstanceCoordinator:
 
     @staticmethod
     def reconcile_solved_instances(shorten_seconds: int) -> int:
-        """Retry post-solve shortening from CTFd's durable solve records."""
+        """retry post solve shortening from the durable Solves records"""
 
         if shorten_seconds <= 0:
             return 0
@@ -751,18 +740,22 @@ class InstanceCoordinator:
         candidates = ContainerInstanceModel.query.filter_by(state="running", solved_at=None).all()
         reconciled = 0
         for instance in candidates:
+            if instance.team_id is None and instance.user_id is None:
+                continue
+
             solve_query = Solves.query.filter_by(challenge_id=instance.challenge_id)
             if instance.team_id is not None:
                 solve_query = solve_query.filter_by(team_id=instance.team_id)
-            elif instance.user_id is not None:
-                solve_query = solve_query.filter_by(user_id=instance.user_id)
             else:
-                continue
+                solve_query = solve_query.filter_by(user_id=instance.user_id)
+
             solve = solve_query.order_by(Solves.date.asc()).first()
             if solve is None or solve.date is None:
                 continue
+
             solved_at = calendar.timegm(solve.date.utctimetuple()) + solve.date.microsecond / 1_000_000
             target_expires = int(solved_at) + shorten_seconds
             if InstanceCoordinator.shorten_after_solve(instance.id, target_expires, solved_at=solved_at):
                 reconciled += 1
+
         return reconciled

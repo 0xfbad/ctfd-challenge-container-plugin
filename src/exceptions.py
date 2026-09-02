@@ -7,7 +7,6 @@ class ContainerException(Exception):
         return self.message
 
 
-# raised when the container infrastructure is unavailable (no connected docker
-# contexts). routes map this to 503, distinct from generic ContainerException 500
+# routes map this to 503 while a plain ContainerException is 500
 class ContainerUnavailableException(ContainerException):
     pass

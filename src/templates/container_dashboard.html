@@ -544,6 +544,14 @@
 		return 'http://' + container.hostname + ':' + container.port;
 	}
 
+	function containerStatus(state, remaining) {
+		if (state === 'cleanup_pending') return { cls: 'status-warning', text: 'CLEANUP PENDING' };
+		if (state === 'provisioning') return { cls: 'status-warning', text: 'PROVISIONING' };
+		if (remaining <= 0) return { cls: 'status-expired', text: 'EXPIRED' };
+		if (remaining < 300) return { cls: 'status-warning', text: 'EXPIRING' };
+		return { cls: 'status-active', text: 'ACTIVE' };
+	}
+
 	function createContainerRow(container) {
 		const safeUser = escapeHtml(container.user || '');
 		const safeChallenge = escapeHtml(container.challenge || '');
@@ -556,12 +564,7 @@
 		const connCmd = container.cleanup_only ? '' : escapeAttr(buildConnectionCmd(container));
 
 		const now = Math.floor(Date.now() / 1000);
-		const remaining = container.expires - now;
-		const statusClass = container.state === 'cleanup_pending' || container.state === 'provisioning'
-			? 'status-warning' : remaining <= 0 ? 'status-expired' : remaining < 300 ? 'status-warning' : 'status-active';
-		const statusText = container.state === 'cleanup_pending' ? 'CLEANUP PENDING'
-			: container.state === 'provisioning' ? 'PROVISIONING'
-			: remaining <= 0 ? 'EXPIRED' : remaining < 300 ? 'EXPIRING' : 'ACTIVE';
+		const status = containerStatus(container.state, container.expires - now);
 		const actions = container.cleanup_only ? `
 			<button class="btn" onclick="cleanupInstance('${instanceId}')" title="Retry cleanup">
 				<i class="fas fa-sync icon-kill"></i>
@@ -586,7 +589,7 @@
 				<td class="cell-clip-sm" title="${escapeAttr(container.container_id)}"><code>${containerName}</code>${companionBadge}</td>
 				<td>${ctx}</td>
 				<td class="countdown-timer time-remaining" data-expires="${container.expires}"></td>
-				<td><span class="${statusClass}" title="${escapeAttr(container.last_error || '')}">${statusText}</span></td>
+				<td><span class="${status.cls}" title="${escapeAttr(container.last_error || '')}">${status.text}</span></td>
 				<td class="action-buttons">${actions}</td>
 			</tr>
 		`;
@@ -680,6 +683,21 @@
 		return parseInt(val, 10) || 0;
 	}
 
+	function challengeLink(m) {
+		return m.challenge_id
+			? '<a href="/admin/challenges/' + safeId(m.challenge_id) + '">' + escapeHtml(m.challenge_name) + '</a>'
+			: escapeHtml(m.challenge_name);
+	}
+
+	function teamLink(m) {
+		const teamId = safeId(m.team_id);
+		const tip = escapeAttr(m.team_name);
+		const safeName = escapeHtml(m.team_name);
+		return teamId
+			? '<a class="team-clip" href="/admin/teams/' + teamId + '" title="' + tip + '">' + safeName + '</a>'
+			: '<span class="team-clip" title="' + tip + '">' + safeName + '</span>';
+	}
+
 	function formatEventDetails(event) {
 		const m = event.metadata || {};
 		switch (event.type) {
@@ -718,32 +736,20 @@
 			}
 			case 'request_failed': {
 				const parts = [];
-				if (m.challenge_name) {
-					parts.push(m.challenge_id
-						? '<a href="/admin/challenges/' + safeId(m.challenge_id) + '">' + escapeHtml(m.challenge_name) + '</a>'
-						: escapeHtml(m.challenge_name));
-				}
+				if (m.challenge_name) parts.push(challengeLink(m));
 				if (m.reason) parts.push(escapeHtml(m.reason));
 				return parts.join(': ');
 			}
 			case 'renewed': {
 				const rParts = [];
-				if (m.challenge_name) {
-					rParts.push(m.challenge_id
-						? '<a href="/admin/challenges/' + safeId(m.challenge_id) + '">' + escapeHtml(m.challenge_name) + '</a>'
-						: escapeHtml(m.challenge_name));
-				}
+				if (m.challenge_name) rParts.push(challengeLink(m));
 				if (m.renewal) rParts.push(escapeHtml(m.renewal));
 				if (m.time_remaining != null) rParts.push('timer: ' + formatDuration(m.time_remaining));
 				return rParts.join(', ');
 			}
 			case 'solved': {
 				const sParts = [];
-				if (m.challenge_name) {
-					sParts.push(m.challenge_id
-						? '<a href="/admin/challenges/' + safeId(m.challenge_id) + '">' + escapeHtml(m.challenge_name) + '</a>'
-						: escapeHtml(m.challenge_name));
-				}
+				if (m.challenge_name) sParts.push(challengeLink(m));
 				if (m.solve_time != null) sParts.push('solve time: ' + formatDuration(m.solve_time));
 				sParts.push('timer shortened');
 				return sParts.join(', ');
@@ -758,21 +764,13 @@
 						? '<a href="/admin/' + srcType + '/' + srcId + '">' + escapeHtml(m.source_entity) + '</a>' + srcBadges
 						: escapeHtml(m.source_entity)));
 				}
-				if (m.challenge_name) {
-					parts.push(m.challenge_id
-						? '<a href="/admin/challenges/' + safeId(m.challenge_id) + '">' + escapeHtml(m.challenge_name) + '</a>'
-						: escapeHtml(m.challenge_name));
-				}
+				if (m.challenge_name) parts.push(challengeLink(m));
 				return parts.join(' / ');
 			}
 			default: {
 				const defParts = [];
 				if (m.docker_context) defParts.push(escapeHtml(m.docker_context));
-				if (m.challenge_name) {
-					defParts.push(m.challenge_id
-						? '<a href="/admin/challenges/' + safeId(m.challenge_id) + '">' + escapeHtml(m.challenge_name) + '</a>'
-						: escapeHtml(m.challenge_name));
-				}
+				if (m.challenge_name) defParts.push(challengeLink(m));
 				return defParts.join(' / ');
 			}
 		}
@@ -791,13 +789,7 @@
 			? (userId ? '<a href="/admin/users/' + userId + '">' + escapeHtml(event.username) + '</a>' + userBadges(flags) : escapeHtml(event.username))
 			: '';
 		if (m.team_name && html) {
-			const teamId = safeId(m.team_id);
-			const tip = escapeAttr(m.team_name);
-			const safeName = escapeHtml(m.team_name);
-			const teamHtml = teamId
-				? '<a class="team-clip" href="/admin/teams/' + teamId + '" title="' + tip + '">' + safeName + '</a>'
-				: '<span class="team-clip" title="' + tip + '">' + safeName + '</span>';
-			html += ' (' + teamHtml + ')';
+			html += ' (' + teamLink(m) + ')';
 		}
 		return html;
 	}
@@ -1116,7 +1108,6 @@
 
 				_solveMaxWhisker = Math.max(...boxData.map(b => b[4]));
 				_solveGlobalMax = Math.max(...data.flatMap(c => c.times));
-				var maxWhisker = _solveMaxWhisker;
 
 				chart.setOption({
 					tooltip: {
@@ -1146,7 +1137,7 @@
 					dataZoom: [{ type: 'inside', xAxisIndex: 0, filterMode: 'none' }, { type: 'slider', xAxisIndex: 0, filterMode: 'none', labelFormatter: function(v) { return formatDuration(v); } }],
 					grid: { left: 120, right: 40, top: 10, bottom: 50 },
 					yAxis: { type: 'category', data: names, axisTick: { alignWithLabel: true }, jitter: 30 },
-					xAxis: { type: 'value', min: 0, max: maxWhisker * 1.1, axisLabel: { formatter: v => formatDuration(v) } },
+					xAxis: { type: 'value', min: 0, max: _solveMaxWhisker * 1.1, axisLabel: { formatter: v => formatDuration(v) } },
 					series: [
 						{
 							name: 'Solve times',
@@ -1302,13 +1293,7 @@
 			? (userId ? '<a href="/admin/users/' + userId + '">' + escapeHtml(e.username) + '</a>' + userBadges(flags) : escapeHtml(e.username))
 			: '';
 		if (m.team_name) {
-			const teamId = safeId(m.team_id);
-			const tip = escapeAttr(m.team_name);
-			const safeName = escapeHtml(m.team_name);
-			const teamHtml = teamId
-				? '<a class="team-clip" href="/admin/teams/' + teamId + '" title="' + tip + '">' + safeName + '</a>'
-				: '<span class="team-clip" title="' + tip + '">' + safeName + '</span>';
-			submitter += ' <small class="text-muted">(' + teamHtml + ')</small>';
+			submitter += ' <small class="text-muted">(' + teamLink(m) + ')</small>';
 		}
 
 		const srcId = safeId(m.source_id);
@@ -1320,9 +1305,7 @@
 			? (srcId ? '<a' + ownerClipClass + ' href="/admin/' + srcType + '/' + srcId + '"' + ownerTip + '>' + escapeHtml(m.source_entity) + '</a>' + ownerBadges : escapeHtml(m.source_entity))
 			: '';
 
-		const chalHtml = m.challenge_name
-			? (m.challenge_id ? '<a href="/admin/challenges/' + safeId(m.challenge_id) + '">' + escapeHtml(m.challenge_name) + '</a>' : escapeHtml(m.challenge_name))
-			: '';
+		const chalHtml = m.challenge_name ? challengeLink(m) : '';
 
 		return '<tr>' +
 			'<td class="log-time">' + escapeHtml(formatTimestamp(e.timestamp)) + '</td>' +

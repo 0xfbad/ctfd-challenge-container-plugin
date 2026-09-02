@@ -10,12 +10,10 @@ window.ContainerFormUtils = (function () {
 				headers: { "Accept": "application/json", "CSRF-Token": csrfToken },
 				signal: controller.signal,
 			});
-			clearTimeout(timeoutId);
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
 			return await response.json();
-		} catch (error) {
+		} finally {
 			clearTimeout(timeoutId);
-			throw error;
 		}
 	}
 
@@ -115,6 +113,43 @@ window.ContainerFormUtils = (function () {
 		return html;
 	}
 
+	function initExpirySync(applyDefaults) {
+		var h = document.getElementById("cc-expiry-h");
+		var m = document.getElementById("cc-expiry-m");
+		var v = document.getElementById("cc-expiry-val");
+		if (!h || !m || !v) return;
+
+		function sync() { v.value = (parseInt(h.value) || 0) * 3600 + (parseInt(m.value) || 0) * 60; }
+		h.addEventListener("input", sync);
+		m.addEventListener("input", sync);
+
+		fetch("/containers/api/settings", {
+			headers: { "X-Requested-With": "XMLHttpRequest", "CSRF-Token": init.csrfNonce },
+			credentials: "same-origin"
+		})
+		.then(function (r) { return r.json(); })
+		.then(function (data) {
+			var s = data.settings || {};
+			if (s.default_expiration_seconds) {
+				var secs = parseInt(s.default_expiration_seconds.value) || 1800;
+				h.placeholder = Math.floor(secs / 3600) + " (default)";
+				m.placeholder = Math.floor((secs % 3600) / 60) + " (default)";
+				if (applyDefaults) {
+					h.value = Math.floor(secs / 3600);
+					m.value = Math.floor((secs % 3600) / 60);
+					sync();
+				}
+			}
+			if (s.default_max_renewals) {
+				var r = document.getElementById("cc-max-renewals");
+				if (r) {
+					r.placeholder = s.default_max_renewals.value + " (default)";
+					if (applyDefaults) r.value = s.default_max_renewals.value;
+				}
+			}
+		});
+	}
+
 	async function checkImageStatus(imageInput, dockerContext, csrfToken) {
 		var el = document.getElementById("image-status");
 		if (!el || !imageInput) return;
@@ -136,6 +171,7 @@ window.ContainerFormUtils = (function () {
 		loadContexts,
 		initSSHToggle,
 		initAdvancedSection,
+		initExpirySync,
 		checkImageStatus,
 	};
 

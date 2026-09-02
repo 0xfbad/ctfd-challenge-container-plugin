@@ -53,9 +53,7 @@ _DOCKER_VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
 _CONTEXT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _POLICY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
-# A data volume never needs to cover a kernel pseudo-filesystem, daemon socket
-# location, or the entire container filesystem. Reject these even if an
-# infrastructure policy accidentally lists one.
+# kernel pseudo filesystems and daemon socket paths stay rejected even when a policy lists them
 _FORBIDDEN_TARGET_ROOTS = (
     "/dev",
     "/proc",
@@ -68,11 +66,11 @@ MountScope = Literal["entry", "service"]
 
 
 class VolumePolicyError(ValueError):
-    """The environment-owned infrastructure policy is invalid."""
+    """the infrastructure policy from the environment is invalid"""
 
 
 class MountConfigError(ValueError):
-    """A challenge mount declaration is invalid or is not permitted."""
+    """a challenge authored mount declaration is invalid or not permitted"""
 
 
 @dataclass(frozen=True)
@@ -207,31 +205,38 @@ def _validate_target(value: object, *, error_cls: type[ValueError]) -> str:
     return value
 
 
+def _parse_volume_rule(
+    untrusted_logical_name: object, volume_value: object, *, context_name: str, docker_names: set[str]
+) -> VolumeRule:
+    logical_name = _validate_logical_name(untrusted_logical_name)
+    volume_obj = _require_object(volume_value, f"logical volume {logical_name}")
+    _require_exact_keys(volume_obj, required={"docker_name", "targets"}, description=f"logical volume {logical_name}")
+
+    docker_name = volume_obj["docker_name"]
+    if not isinstance(docker_name, str) or not _DOCKER_VOLUME_NAME_RE.fullmatch(docker_name):
+        raise VolumePolicyError(f"logical volume {logical_name} docker_name must be a valid named-volume identifier")
+
+    if docker_name in docker_names:
+        raise VolumePolicyError(f"Docker volume {docker_name} is assigned more than once in {context_name}")
+
+    docker_names.add(docker_name)
+
+    targets_raw = volume_obj["targets"]
+    if not isinstance(targets_raw, list) or not targets_raw:
+        raise VolumePolicyError(f"logical volume {logical_name} targets must be a nonempty array")
+
+    if len(targets_raw) > _MAX_TARGETS_PER_VOLUME:
+        raise VolumePolicyError(f"logical volume {logical_name} supports at most {_MAX_TARGETS_PER_VOLUME} targets")
+
+    targets = tuple(_validate_target(target, error_cls=VolumePolicyError) for target in targets_raw)
+    if len(set(targets)) != len(targets):
+        raise VolumePolicyError(f"logical volume {logical_name} contains duplicate targets")
+
+    return VolumeRule(logical_name=logical_name, docker_name=docker_name, targets=targets)
+
+
 def parse_volume_policy(raw: str | None) -> VolumePolicy:
-    """Parse the infrastructure-owned policy.
-
-    Schema::
-
-        {
-          "schema_version": 1,
-          "policy_id": "event-2026",
-          "revision": 3,
-          "contexts": {
-            "local": {
-              "volumes": {
-                "web-assets": {
-                  "docker_name": "ctfd-web-assets-v3",
-                  "targets": ["/opt/challenge/assets"]
-                }
-              }
-            }
-          }
-        }
-
-    Docker volumes must be pre-created using the fixed labels derived from
-    policy_id, revision, and the logical volume name. Driver selection/options
-    are deliberately not configurable here.
-    """
+    """volumes must be pre created with the labels from required_volume_labels, drivers are not configurable"""
 
     if raw is None or not raw.strip():
         return VolumePolicy.disabled()
@@ -276,33 +281,10 @@ def parse_volume_policy(raw: str | None) -> VolumePolicy:
             volumes: dict[str, VolumeRule] = {}
             docker_names: set[str] = set()
             for untrusted_logical_name, volume_value in volumes_raw.items():
-                logical_name = _validate_logical_name(untrusted_logical_name)
-                volume_obj = _require_object(volume_value, f"logical volume {logical_name}")
-                _require_exact_keys(
-                    volume_obj, required={"docker_name", "targets"}, description=f"logical volume {logical_name}"
+                rule = _parse_volume_rule(
+                    untrusted_logical_name, volume_value, context_name=context_name, docker_names=docker_names
                 )
-
-                docker_name = volume_obj["docker_name"]
-                if not isinstance(docker_name, str) or not _DOCKER_VOLUME_NAME_RE.fullmatch(docker_name):
-                    raise VolumePolicyError(
-                        f"logical volume {logical_name} docker_name must be a valid named-volume identifier"
-                    )
-                if docker_name in docker_names:
-                    raise VolumePolicyError(f"Docker volume {docker_name} is assigned more than once in {context_name}")
-                docker_names.add(docker_name)
-
-                targets_raw = volume_obj["targets"]
-                if not isinstance(targets_raw, list) or not targets_raw:
-                    raise VolumePolicyError(f"logical volume {logical_name} targets must be a nonempty array")
-                if len(targets_raw) > _MAX_TARGETS_PER_VOLUME:
-                    raise VolumePolicyError(
-                        f"logical volume {logical_name} supports at most {_MAX_TARGETS_PER_VOLUME} targets"
-                    )
-                targets = tuple(_validate_target(target, error_cls=VolumePolicyError) for target in targets_raw)
-                if len(set(targets)) != len(targets):
-                    raise VolumePolicyError(f"logical volume {logical_name} contains duplicate targets")
-
-                volumes[logical_name] = VolumeRule(logical_name=logical_name, docker_name=docker_name, targets=targets)
+                volumes[rule.logical_name] = rule
 
             contexts[context_name] = ContextVolumePolicy(context_name=context_name, volumes=volumes)
 
@@ -319,13 +301,7 @@ def load_volume_policy(environ: Mapping[str, str] | None = None) -> VolumePolicy
 
 
 def parse_mount_config(raw: str | object | None, *, expected_scope: MountScope) -> tuple[MountRequest, ...]:
-    """Validate the versioned challenge mount format.
-
-    Entry and service declarations use the same schema; callers must provide
-    the scope they are reading from. All mounts are named volumes and strictly
-    read-only. Host paths, driver options, shorthand strings, and implicit
-    service inheritance are never accepted.
-    """
+    """entry and service declarations share one schema so the caller states the scope it reads from"""
 
     if expected_scope not in ("entry", "service"):
         raise MountConfigError("mount scope must be entry or service")
@@ -391,8 +367,6 @@ def parse_mount_config(raw: str | object | None, *, expected_scope: MountScope) 
 def resolve_mounts_for_context(
     policy: VolumePolicy, context_name: str, mounts: Sequence[MountRequest]
 ) -> dict[str, dict[str, str]]:
-    """Resolve logical requests to Docker SDK volume arguments for one context."""
-
     if not mounts:
         return {}
     context = policy.contexts.get(context_name)
@@ -415,8 +389,6 @@ def resolve_mounts_for_context(
 
 
 def required_volume_labels(policy: VolumePolicy, logical_name: str) -> dict[str, str]:
-    """Return the exact non-secret labels required on a provisioned volume."""
-
     normalized_name = _validate_logical_name(logical_name, error_cls=MountConfigError)
     if policy.revision <= 0:
         raise MountConfigError("named-volume policy is disabled")
@@ -428,14 +400,10 @@ def required_volume_labels(policy: VolumePolicy, logical_name: str) -> dict[str,
 
 
 def docker_volume_metadata(client: DockerClientWithVolumes, docker_name: str) -> VolumeMetadata | None:
-    """Inspect one exact Docker volume without invoking create-on-missing behavior."""
-
     try:
         volume = client.volumes.get(docker_name)
     except Exception as exc:
-        # Avoid importing Docker solely for its NotFound class in this policy
-        # module. Only a genuine 404 is treated as absence; connection and
-        # authorization failures must remain distinguishable to callers.
+        # only a 404 means absent, docker is not imported here so match the status code instead of NotFound
         status_code = getattr(exc, "status_code", None)
         response = getattr(exc, "response", None)
         if status_code == 404 or getattr(response, "status_code", None) == 404:
@@ -483,61 +451,69 @@ def _volume_issues(
     return issues
 
 
+def _context_issues(
+    policy: VolumePolicy,
+    context_name: str,
+    context: ContextVolumePolicy,
+    mounts: Sequence[MountRequest],
+    lookup: VolumeLookup,
+) -> list[ReadinessIssue]:
+    issues: list[ReadinessIssue] = []
+    seen_docker_names: set[str] = set()
+
+    for mount in mounts:
+        rule = context.volumes.get(mount.logical_name)
+        if rule is None:
+            issues.append(ReadinessIssue(context_name, mount.logical_name, "logical_volume_not_allowed"))
+            continue
+
+        if mount.target not in rule.targets:
+            issues.append(ReadinessIssue(context_name, mount.logical_name, "target_not_allowed"))
+            continue
+
+        if rule.docker_name in seen_docker_names:
+            issues.append(ReadinessIssue(context_name, mount.logical_name, "duplicate_resolved_volume"))
+            continue
+
+        seen_docker_names.add(rule.docker_name)
+        try:
+            metadata = lookup(context_name, rule.docker_name)
+        # collapse every docker ssh and transport failure so endpoint and credential details cannot escape
+        except Exception:  # noqa: BLE001
+            issues.append(ReadinessIssue(context_name, mount.logical_name, "volume_inspection_unavailable"))
+            continue
+
+        issues.extend(_volume_issues(policy, context_name, rule, metadata))
+
+    return issues
+
+
 def evaluate_volume_readiness(
     policy: VolumePolicy,
     context_names: Sequence[str],
     mounts: Sequence[MountRequest],
     lookup: VolumeLookup,
 ) -> ReadinessReport:
-    """Return eligible contexts and value-free readiness diagnostics.
-
-    ``lookup`` must perform an exact inspection and return ``None`` only for a
-    confirmed missing volume. It must not call create. Infrastructure errors
-    are represented as unavailable without including exception text, endpoint
-    details, driver options, labels, or other potentially sensitive values.
-    """
+    """lookup must inspect exactly and return None only for a confirmed missing volume, it must never create"""
 
     reports: list[ContextReadiness] = []
     for context_name in dict.fromkeys(context_names):
-        issues: list[ReadinessIssue] = []
         if not mounts:
             reports.append(ContextReadiness(context_name=context_name, ready=True, issues=()))
             continue
 
         context = policy.contexts.get(context_name)
         if context is None:
-            issues.append(ReadinessIssue(context_name, None, "context_policy_missing"))
+            issues = [ReadinessIssue(context_name, None, "context_policy_missing")]
         else:
-            seen_docker_names: set[str] = set()
-            for mount in mounts:
-                rule = context.volumes.get(mount.logical_name)
-                if rule is None:
-                    issues.append(ReadinessIssue(context_name, mount.logical_name, "logical_volume_not_allowed"))
-                    continue
-                if mount.target not in rule.targets:
-                    issues.append(ReadinessIssue(context_name, mount.logical_name, "target_not_allowed"))
-                    continue
-                if rule.docker_name in seen_docker_names:
-                    issues.append(ReadinessIssue(context_name, mount.logical_name, "duplicate_resolved_volume"))
-                    continue
-                seen_docker_names.add(rule.docker_name)
-                try:
-                    metadata = lookup(context_name, rule.docker_name)
-                # Lookup adapters may surface Docker, SSH, or transport-specific
-                # exceptions. Diagnostics intentionally collapse all of them so
-                # endpoint and credential details cannot escape.
-                except Exception:  # noqa: BLE001
-                    issues.append(ReadinessIssue(context_name, mount.logical_name, "volume_inspection_unavailable"))
-                    continue
-                issues.extend(_volume_issues(policy, context_name, rule, metadata))
+            issues = _context_issues(policy, context_name, context, mounts, lookup)
 
         reports.append(ContextReadiness(context_name=context_name, ready=not issues, issues=tuple(issues)))
+
     return ReadinessReport(contexts=tuple(reports))
 
 
 def canonical_mount_config(mounts: Sequence[MountRequest], *, scope: MountScope) -> str:
-    """Serialize validated mounts."""
-
     if scope not in ("entry", "service") or any(mount.scope != scope for mount in mounts):
         raise MountConfigError("all mounts must match the requested scope")
     value = {

@@ -78,8 +78,7 @@ class ContainerMaintenanceModel(db.Model):
 class ContainerHistoryModel(db.Model):
     __tablename__ = "container_history"
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    # Deliberately not a foreign key: logical instances are active-only while
-    # history must survive their deletion.
+    # not a foreign key, instances are active only while history outlives them
     instance_id = db.Column(db.String(32), nullable=False, index=True)
     container_id = db.Column(db.String(512), nullable=False)
     challenge_id = db.Column(db.Integer, db.ForeignKey("challenges.id", ondelete="SET NULL"), nullable=True)
@@ -101,8 +100,7 @@ class DockerContextModel(db.Model):
     hostname = db.Column(db.String(512), nullable=True)
     pub_hostname = db.Column(db.String(512), nullable=False)
     weight = db.Column(db.Integer, nullable=False, default=1, server_default="1")
-    # Active accepts placement; other states retain the endpoint for management
-    # and cleanup without admitting new work.
+    # only active admits new placement, the other states keep the endpoint for cleanup
     state = db.Column(db.String(24), nullable=False, default="active", server_default="active")
     placement_version = db.Column(db.Integer, nullable=False, default=0, server_default="0")
     health_state = db.Column(db.String(16), nullable=False, default="unknown", server_default="unknown")
@@ -123,15 +121,9 @@ class DockerContextModel(db.Model):
 
 
 class ContainerInstanceModel(db.Model):
-    """One active logical challenge instance.
+    """one active logical challenge instance, physical members live in container_info
 
-    Physical members live in ``container_info``. This row is removed only after
-    Docker cleanup is confirmed, so its uniqueness constraints are the durable
-    quota/deduplication boundary across workers and application replicas.
-
-    A context foreign-key ID is used rather than its name so context deletion is
-    restricted while resources remain active. Physical/history rows keep the
-    context-name snapshot for durable auditing.
+    deleted only after docker cleanup is confirmed, so these uniqueness constraints are the cross worker quota boundary
     """
 
     __tablename__ = "container_instances"
@@ -150,7 +142,7 @@ class ContainerInstanceModel(db.Model):
     )
 
     id = db.Column(db.String(32), primary_key=True)
-    # Non-null, normalized server identity (for example user:12 or team:7).
+    # normalized server identity, values look like user:12 or team:7
     owner_key = db.Column(db.String(32), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     team_id = db.Column(db.Integer, db.ForeignKey("teams.id", ondelete="SET NULL"), nullable=True)
@@ -158,21 +150,21 @@ class ContainerInstanceModel(db.Model):
     quota_slot = db.Column(db.Integer, nullable=False)
     state = db.Column(db.String(24), nullable=False, default="provisioning", server_default="provisioning")
     state_version = db.Column(db.Integer, nullable=False, default=0, server_default="0")
+    # the id rather than the name so RESTRICT blocks context deletion while instances are live
     docker_context_id = db.Column(
         db.Integer,
         db.ForeignKey("docker_contexts.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )
-    # Held only while Docker provisioning is in flight. Setting it to NULL
-    # releases the globally unique per-context create slot.
+    # non null only while provisioning is in flight, clearing it frees the per context create slot
     create_slot = db.Column(db.Integer, nullable=True)
     placement_units = db.Column(db.Integer, nullable=False, default=1, server_default="1")
     stack_id = db.Column(db.String(64), nullable=True, unique=True)
     entry_container_id = db.Column(db.String(512), nullable=True, unique=True)
-    # Immutable fencing identity for every Docker object in this provisioning attempt.
+    # immutable fencing identity stamped on every docker object of one provisioning attempt
     provision_token = db.Column(db.String(32), nullable=False, unique=True)
-    # Mutable ownership token for stop/expiry/reconcile operations.
+    # mutable ownership token for stop, expiry, and reconcile operations
     operation_token = db.Column(db.String(32), nullable=True)
     provision_deadline = db.Column(db.Float(precision=53), nullable=True)
     created_at = db.Column(db.Float(precision=53), nullable=False, default=time.time)
@@ -204,12 +196,11 @@ class ContainerFlagShareModel(db.Model):
     challenge_xid = db.Column(db.String(32), nullable=False)
     submitter_user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     submitter_team_id = db.Column(db.Integer, db.ForeignKey("teams.id", ondelete="SET NULL"), nullable=True)
-    # Immutable submitting-user identity (always ``user:<Users.id>``) and a
-    # keyed HMAC-SHA256 digest make deduplication portable without retaining a
-    # queryable low-entropy token. Team identity remains audit metadata only.
+    # immutable submitting user identity, always user:<Users.id>
     submitter_user_xid = db.Column(db.String(32), nullable=False)
     owner_user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     owner_team_id = db.Column(db.Integer, db.ForeignKey("teams.id", ondelete="SET NULL"), nullable=True)
+    # keyed hmac sha256 so the low entropy token is never stored in a queryable form
     submitted_token_digest = db.Column(db.String(64), nullable=False)
     ip = db.Column(db.String(46), nullable=True)
     timestamp = db.Column(db.Float(precision=53), index=True)

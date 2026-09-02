@@ -1,8 +1,4 @@
-"""Typed validation for container challenge and stack configuration.
-
-The challenge authoring APIs accept both HTML form strings and JSON values.
-This module normalizes that boundary once, before ORM mutation or Docker I/O.
-"""
+"""normalizes challenge and stack config from html form strings or json values, before any orm write or docker io"""
 
 from __future__ import annotations
 
@@ -240,11 +236,7 @@ def normalize_network(value: object, service_names: set[str]) -> str | None:
 def normalize_challenge_fields(
     data: Mapping[str, object], *, existing_service_names: set[str] | None = None
 ) -> dict[str, object]:
-    """Normalize only fields present in a create/update request.
-
-    Partial updates validate every field they modify against the current schema.
-    """
-
+    """normalizes only the fields present in the request, absent fields keep their stored values"""
     result = dict(data)
     if "image" in result:
         result["image"] = _string(result["image"], "image", required=True, maximum=MAX_IMAGE)
@@ -286,8 +278,7 @@ def normalize_challenge_fields(
         services_json, services = normalize_services(result["services_json"])
         result["services_json"] = services_json
     if "network_json" in result:
-        # On a partial network-only update, callers should provide the existing
-        # companion names so unknown static-IP keys cannot slip through.
+        # on a network only update the caller supplied names keep unknown static ip keys from slipping through
         service_names = set(services) if "services_json" in result else set(existing_service_names or ())
         result["network_json"] = normalize_network(result["network_json"], service_names)
     return result

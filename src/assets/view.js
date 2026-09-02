@@ -16,12 +16,7 @@ CTFd._internal.challenge.submit = function (preview) {
 
     const params = preview ? { preview: true } : {};
 
-    return CTFd.api.post_challenge_attempt(params, body).then((response) => {
-        if (response.status === 429 || response.status === 403) {
-            return response;
-        }
-        return response;
-    });
+    return CTFd.api.post_challenge_attempt(params, body);
 };
 
 var _expiryInterval = null;
@@ -138,6 +133,7 @@ function showConnection(data, container, challengeId) {
     if (renewBtn) renewBtn.innerHTML = '<i class="fas fa-redo"></i> Renew <span id="renewals-counter"></span>';
     if (data.max_renewals != null) updateRenewButton(data.renewals_used || 0, data.max_renewals);
 
+    var hintText;
     if (data.connect === "web") {
         var url = "http://" + data.hostname + ":" + data.port;
         var link = document.createElement('a');
@@ -145,29 +141,22 @@ function showConnection(data, container, challengeId) {
         link.textContent = url;
         link.target = '_blank';
         container.append(link);
-
-        var hint = document.createElement('div');
-        hint.className = 'connection-hint';
-        hint.textContent = 'click to open in a new tab';
-        container.append(hint);
+        hintText = 'click to open in a new tab';
     } else if (data.connect === "ssh") {
-        var cmd = "ssh " + (data.ssh_username || '') + "@" + data.hostname + " -p " + data.port;
-        container.append(makeCopyField("Command", cmd));
+        container.append(makeCopyField("Command", "ssh " + (data.ssh_username || '') + "@" + data.hostname + " -p " + data.port));
         if (data.ssh_password) {
             container.append(makeCopyField("Password", data.ssh_password));
         }
-        var hint = document.createElement('div');
-        hint.className = 'connection-hint';
-        hint.textContent = 'run the command in your terminal, then enter the password';
-        container.append(hint);
+        hintText = 'run the command in your terminal, then enter the password';
     } else {
-        var cmd = "nc " + data.hostname + " " + data.port;
-        container.append(makeCopyField(null, cmd));
-        var hint = document.createElement('div');
-        hint.className = 'connection-hint';
-        hint.textContent = 'paste into your terminal to connect';
-        container.append(hint);
+        container.append(makeCopyField(null, "nc " + data.hostname + " " + data.port));
+        hintText = 'paste into your terminal to connect';
     }
+
+    var hint = document.createElement('div');
+    hint.className = 'connection-hint';
+    hint.textContent = hintText;
+    container.append(hint);
 
     startTimer(data.expires);
     if (challengeId) _startSync(challengeId);
@@ -256,14 +245,18 @@ function _showServerError(container) {
     hideAll();
 }
 
+function _resetStartButton(btn) {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fas fa-play"></i> Start Instance';
+}
+
 function _doContainerRequest(challengeId, isRetry) {
     var info = resetAlert();
-    var startDiv = document.getElementById("create-chal");
-    var btn = startDiv.querySelector("button");
 
     if (_requestInFlight) return;
-    _requestInFlight = true;
 
+    var btn = document.getElementById("create-chal").querySelector("button");
+    _requestInFlight = true;
     btn.disabled = true;
     btn.innerHTML = '<span class="loading-spinner"></span> ' + (isRetry ? 'Retrying...' : 'Starting...');
 
@@ -289,18 +282,14 @@ function _doContainerRequest(challengeId, isRetry) {
                 info.classList.add('alert-danger');
                 info.style.display = 'block';
             }
-            btn.disabled = false;
-            btn.innerHTML = '<i class="fas fa-play"></i> Start Instance';
         } else {
             showConnection(data, info, challengeId);
-            btn.disabled = false;
-            btn.innerHTML = '<i class="fas fa-play"></i> Start Instance';
         }
+        _resetStartButton(btn);
     })
     .catch(function(e) {
         console.error("Fetch error:", e);
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-play"></i> Start Instance';
+        _resetStartButton(btn);
     })
     .finally(function() { _requestInFlight = false; });
 }
@@ -397,25 +386,25 @@ function container_stop(challengeId) {
         btn.disabled = false;
         extBtn.disabled = false;
         btn.innerHTML = '<i class="fas fa-stop"></i> Stop';
-        extBtn.innerHTML = '<i class="fas fa-plus"></i> Extend';
+        extBtn.innerHTML = '<i class="fas fa-redo"></i> Renew <span id="renewals-counter"></span>';
 
         if (data.error || data.message) {
+            // the container is still running, keep the panel and poller alive
             info.textContent = data.error || data.message;
             info.classList.add('alert-danger');
             info.style.display = 'block';
         } else {
             info.style.display = 'none';
+            if (_expiryInterval) { clearInterval(_expiryInterval); _expiryInterval = null; }
+            _stopSync();
+            showStart();
         }
-
-        if (_expiryInterval) { clearInterval(_expiryInterval); _expiryInterval = null; }
-        _stopSync();
-        showStart();
     })
     .catch(function(e) {
         console.error("Fetch error:", e);
         btn.disabled = false;
         extBtn.disabled = false;
         btn.innerHTML = '<i class="fas fa-stop"></i> Stop';
-        extBtn.innerHTML = '<i class="fas fa-plus"></i> Extend';
+        extBtn.innerHTML = '<i class="fas fa-redo"></i> Renew <span id="renewals-counter"></span>';
     });
 }

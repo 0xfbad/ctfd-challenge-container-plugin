@@ -22,8 +22,7 @@ from .helpers import (
     view_container_info,
 )
 
-# Policies are resolved from storage inside each request. String keys avoid
-# evaluating settings while decorators are installed before an app context.
+# keys and literal defaults resolve to settings per request, decorators bind before an app context exists
 _RL_VIEW = DEFAULTS["rate_limit_requests"]
 _RL_VIEW_INTERVAL = DEFAULTS["rate_limit_interval"]
 _RL_MUTATE = "mutation_rate_limit_requests"
@@ -35,8 +34,7 @@ def validate_request(
 ) -> tuple[dict[str, str] | None, int | None, Users | None]:
     user = get_current_user()
 
-    # also guard non-dict json bodies (lists, strings, numbers). without this
-    # check, request.json.get below raises AttributeError on a list payload
+    # a list or scalar json body would make the get calls below raise AttributeError
     if not isinstance(request.json, dict):
         return {"error": "invalid request"}, 400, None
 
@@ -60,9 +58,9 @@ def validate_request(
 
 
 def _resolve_identity(user: Users) -> tuple[int, bool]:
-    """Return (xid, is_team) for the current user based on user/team mode"""
     if is_team_mode():
         return user.team.id, True
+
     return user.id, False
 
 
@@ -76,6 +74,7 @@ def _resolve_identity(user: Users) -> tuple[int, bool]:
     interval=_RL_VIEW_INTERVAL,
 )
 @handle_container_errors
+@requires_visible_challenge
 def get_connect_type_route(challenge_id):
     return connect_type(challenge_id)
 
@@ -152,6 +151,8 @@ def route_renew_container_route():
     limit=_RL_MUTATE,
     interval=_RL_MUTATE_INTERVAL,
 )
+@handle_container_errors
+# no visibility guard here, a hidden challenge discloses nothing on stop and blocking it would strand the owner quota slot
 def route_stop_container():
     error_response, status_code, user = validate_request(["chal_id"])
     if error_response:
@@ -162,7 +163,7 @@ def route_stop_container():
 
     running_container = ContainerInfoModel.query.filter_by(challenge_id=chal_id, **owner_filter(xid, is_team)).first()
 
-    if running_container:
-        return kill_container(running_container.container_id)
-    else:
+    if running_container is None:
         return {"error": "no container found"}, 400
+
+    return kill_container(running_container.container_id)

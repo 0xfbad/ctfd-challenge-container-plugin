@@ -37,7 +37,6 @@ from .volume_policy import MountConfigError, VolumePolicyError
 logger = logging.getLogger(__name__)
 
 _token_map_lock = threading.Lock()
-# cache keyed by (secret, challenge_id, team_mode, token_length) -> (entity_count, {token -> (entity_id, entity_name)})
 _token_map_cache: dict[tuple[str, int, bool, int], tuple[int, dict[str, tuple[int, str]]]] = {}
 
 
@@ -48,7 +47,6 @@ def _get_token_length() -> int:
 def _find_token_owner(
     secret: str, challenge_id: int, submitted_token: str, exclude_xid: int, team_mode: bool
 ) -> tuple[int, str] | None:
-    """cached lookup of which entity owns a freshness token"""
     token_length = _get_token_length()
     entity_class = Teams if team_mode else Users
     cache_key = (secret, challenge_id, team_mode, token_length)
@@ -62,8 +60,6 @@ def _find_token_owner(
                 return match
             return None
 
-    # snapshot the entities once and count the same list, so a signup that races us
-    # leaves a count mismatch that invalidates the cache on the next request
     entities = entity_class.query.all()
     token_map: dict[str, tuple[int, str]] = {}
     for entity in entities:
@@ -71,6 +67,7 @@ def _find_token_owner(
         token_map[token] = (entity.id, getattr(entity, "name", f"id={entity.id}"))
 
     with _token_map_lock:
+        # count the snapshot not the live table, a racing signup then leaves a mismatch that invalidates the cache
         _token_map_cache[cache_key] = (len(entities), token_map)
 
     match = token_map.get(submitted_token)
@@ -325,59 +322,59 @@ class ContainerChallenge(BaseChallenge):
                 continue
 
             owner = _find_token_owner(secret, challenge.id, submitted_token, xid, team_mode)
-            if owner:
-                source_id, identifier = owner
-                in_team = bool(team_mode and user.team)
-                meta = flag_share_metadata(
-                    challenge.id,
-                    challenge.name,
-                    source_id,
-                    identifier,
-                    "teams" if team_mode else "users",
-                    team_id=user.team.id if in_team else None,
-                    team_name=user.team.name if in_team else None,
-                )
+            if owner is None:
+                continue
 
-                event_logger.log_event(
-                    "flag_sharing",
-                    flag_share_message(user.name, identifier, challenge.name),
-                    user_id=user.id,
-                    username=user.name,
-                    level="warning",
-                    metadata=meta,
-                )
+            source_id, identifier = owner
+            in_team = bool(team_mode and user.team)
+            meta = flag_share_metadata(
+                challenge.id,
+                challenge.name,
+                source_id,
+                identifier,
+                "teams" if team_mode else "users",
+                team_id=user.team.id if in_team else None,
+                team_name=user.team.name if in_team else None,
+            )
 
-                share_row = ContainerFlagShareModel(
+            event_logger.log_event(
+                "flag_sharing",
+                flag_share_message(user.name, identifier, challenge.name),
+                user_id=user.id,
+                username=user.name,
+                level="warning",
+                metadata=meta,
+            )
+
+            share_row = ContainerFlagShareModel(
+                challenge_id=challenge.id,
+                submitter_user_id=user.id,
+                submitter_team_id=user.team.id if (team_mode and user.team) else None,
+                owner_user_id=None if team_mode else source_id,
+                owner_team_id=source_id if team_mode else None,
+                **flag_share_identity_fields(
+                    user=user,
                     challenge_id=challenge.id,
-                    submitter_user_id=user.id,
-                    submitter_team_id=user.team.id if (team_mode and user.team) else None,
-                    owner_user_id=None if team_mode else source_id,
-                    owner_team_id=source_id if team_mode else None,
-                    **flag_share_identity_fields(
-                        user=user,
-                        challenge_id=challenge.id,
-                        submitted_token=submitted_token,
-                        secret=secret,
-                    ),
-                    ip=get_ip(flask_request),
-                    timestamp=time.time(),
-                )
-                try:
-                    db.session.add(share_row)
-                    db.session.commit()
-                except IntegrityError:
-                    # unique constraint hit: same submitter already has a row for this token
-                    # on this challenge (e.g. double-click submit). first row is the record
-                    db.session.rollback()
+                    submitted_token=submitted_token,
+                    secret=secret,
+                ),
+                ip=get_ip(flask_request),
+                timestamp=time.time(),
+            )
 
-                return False, "this flag belongs to another participant. this attempt has been logged."
+            try:
+                db.session.add(share_row)
+                db.session.commit()
+            except IntegrityError:
+                # duplicate submit of the same token, the first row stays the record
+                db.session.rollback()
+
+            return False, "this flag belongs to another participant. this attempt has been logged."
 
         return False, "incorrect"
 
     @classmethod
     def solve(cls, user, team, challenge: ContainerChallengeModel, request: Request) -> None:
-        """Persist the CTFd solve before applying any container side effects."""
-
         super().solve(user=user, team=team, challenge=challenge, request=request)
         team_mode = bool(is_team_mode())
         xid = team.id if team_mode and team is not None else user.id

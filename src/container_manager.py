@@ -3,6 +3,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -34,7 +35,6 @@ logger = logging.getLogger(__name__)
 
 CPU_QUOTA_BASE = 100000
 
-# Human-readable prefix for container and stack names.
 NAME_PREFIX = "chal-"
 
 _SSH_CAPS = ["SYS_CHROOT", "SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "AUDIT_WRITE"]
@@ -44,8 +44,6 @@ _MAINTENANCE_LOCK_PREFIX = "ctfd-challenge-containers"
 
 @contextmanager
 def _maintenance_lock(app: Flask, job_name: str) -> Iterator[bool]:
-    """Take a cross-process maintenance lock for the duration of one job."""
-
     connection = None
     lock_file = None
     dialect = ""
@@ -119,19 +117,19 @@ def _resource_kwargs(max_memory_mb: int | None, max_cpu: float | None) -> dict[s
     if max_cpu:
         try:
             cpu_quota = float(max_cpu)
-            if cpu_quota > 0:
-                kwargs["cpu_quota"] = int(cpu_quota * CPU_QUOTA_BASE)
-                kwargs["cpu_period"] = CPU_QUOTA_BASE
-            else:
-                raise ValueError
         except ValueError:
             raise ContainerException("cpu limit must be a positive number")
+
+        if not math.isfinite(cpu_quota) or cpu_quota <= 0:
+            raise ContainerException("cpu limit must be a positive number")
+
+        kwargs["cpu_quota"] = int(cpu_quota * CPU_QUOTA_BASE)
+        kwargs["cpu_period"] = CPU_QUOTA_BASE
 
     return kwargs
 
 
-# admin-supplied cap_add is filtered against this set. anything else (SYS_ADMIN,
-# SYS_MODULE, etc) is dropped with a warning - granted caps survive no-new-privileges
+# no-new-privileges does not drop granted caps so keep this allowlist minimal
 _ALLOWED_CAPS = frozenset({"NET_ADMIN", "NET_RAW", "SYS_PTRACE", "SYS_NICE"})
 
 
@@ -168,17 +166,17 @@ class ContainerManager:
         self.initialize_connection()
 
     def _ensure_connected(self) -> None:
-        if not self.host_manager.has_contexts():
-            # reload contexts only, don't call initialize_connection, it tears
-            # down the expiration scheduler from a request greenlet and apscheduler
-            # raises "cannot join thread before it is started" under load
-            try:
-                self.load_docker_contexts()
-            except ContainerException:
-                raise ContainerUnavailableException("docker is not connected")
+        if self.host_manager.has_contexts():
+            return
 
-            if not self.host_manager.has_contexts():
-                raise ContainerUnavailableException("no docker contexts available")
+        # reload contexts only, initialize_connection would tear down the expiration scheduler from a request greenlet and apscheduler cannot join it
+        try:
+            self.load_docker_contexts()
+        except ContainerException:
+            raise ContainerUnavailableException("docker is not connected")
+
+        if not self.host_manager.has_contexts():
+            raise ContainerUnavailableException("no docker contexts available")
 
     def initialize_connection(self) -> None:
         try:
@@ -220,8 +218,6 @@ class ContainerManager:
         atexit.register(_shutdown_scheduler)
 
     def _run_maintenance_job(self, name: str, interval: int, operation: Callable[[], None]) -> bool:
-        """Run a due job once across every worker and application replica."""
-
         try:
             with _maintenance_lock(self.app, name) as acquired:
                 if not acquired:
@@ -266,7 +262,6 @@ class ContainerManager:
         kwargs: dict[str, object],
         default: object = None,
     ):
-        """Route a host_manager call to a specific context or fan out across all contexts"""
         self._ensure_connected()
 
         if context_name is not None:
@@ -519,7 +514,7 @@ class ContainerManager:
                     svc_env,
                     ip_address=ips.get(svc_name),
                     hostname=svc_name,
-                    **svc_kwargs,  # type: ignore[arg-type]  # mypy can't narrow **dict unpacking
+                    **svc_kwargs,  # type: ignore[arg-type]  # mypy cannot narrow dict unpacking
                 )
                 companions.append((svc_name, svc_container))
 
@@ -591,27 +586,23 @@ class ContainerManager:
         return self.host_manager.get_connected_contexts()
 
     def kill_expired_containers(self, app: Flask) -> None:
-        # Flask-SQLAlchemy auto-teardown only fires on REQUEST contexts; manually-opened app
-        # contexts leak the scoped session's connection. explicit remove() in finally.
         with app.app_context():
             try:
                 self._kill_expired_containers_inner()
             finally:
+                # flask-sqlalchemy teardown only fires for request contexts so a manual app context leaks the scoped session connection
                 db.session.remove()
 
     def _kill_expired_containers_inner(self) -> None:
-        if True:  # noqa - structural block kept to make the lifecycle sweep auditable as one unit
-            if not self.host_manager.has_contexts():
-                # reload from db only, don't call initialize_connection, it
-                # tears down the scheduler running this very job and raises
-                # "cannot join current thread" from apscheduler
-                try:
-                    self.load_docker_contexts()
-                except ContainerException:
-                    return
-
-            if not self.host_manager.has_contexts():
+        if not self.host_manager.has_contexts():
+            # reload from db only, initialize_connection tears down the scheduler running this job and apscheduler cannot join the current thread
+            try:
+                self.load_docker_contexts()
+            except ContainerException:
                 return
+
+        if not self.host_manager.has_contexts():
+            return
 
         post_solve_expiry = int(get_setting("post_solve_expiry_seconds", 0) or 0)
         if post_solve_expiry > 0:
@@ -698,8 +689,7 @@ class ContainerManager:
 
         self._reconcile_orphans()
 
-    # A Docker/SSH outage after object creation but before DB finalization can
-    # leave labelled resources without an active logical instance.
+    # a docker or ssh outage between container creation and db commit leaves labeled resources with no logical instance
     RECONCILE_INSTANCE_LABEL = "ctf.instance_id"
     RECONCILE_SAFETY_AGE_SECONDS = 300
 
@@ -730,7 +720,7 @@ class ContainerManager:
                     oldest_by_instance[instance_id] = (created_ts, name)
 
             for instance_id, (created_ts, name) in oldest_by_instance.items():
-                # Unknown timestamps are retained because age cannot be proved.
+                # unknown timestamp reads as age 0 so the orphan is retained
                 age = now - created_ts if created_ts > 0 else 0
                 if age < self.RECONCILE_SAFETY_AGE_SECONDS:
                     continue

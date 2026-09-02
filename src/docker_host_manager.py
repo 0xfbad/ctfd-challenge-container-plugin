@@ -7,6 +7,7 @@ import random
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime
 from typing import TypedDict, TypeVar, overload
 
 import docker
@@ -26,37 +27,35 @@ logger = logging.getLogger(__name__)
 LOCAL_CONTEXT_NAME = "local"
 LOCAL_SOCKET_PATH = "/var/run/docker.sock"
 
-# docker SDK HTTP read timeout for control plane ops
-DEFAULT_CLIENT_TIMEOUT = 10
-# image pulls run for minutes, give them their own short-lived client
-PULL_CLIENT_TIMEOUT = 300
-# per-context pool size, caps concurrent in-flight blocking calls per host
+DEFAULT_CLIENT_TIMEOUT = 10  # seconds of http read timeout for control plane calls
+PULL_CLIENT_TIMEOUT = 300  # seconds, pulls can run for minutes
 THREADPOOL_SIZE = 4
 
-# value types that appear in kwargs forwarded to docker containers.run
 _DockerRunVal = str | int | bool | list[str] | dict[str, str] | dict[str, dict[str, str]]
 
 _T = TypeVar("_T")
 
 
 def _confirm_removal_in_progress(container: Container, error: docker.errors.APIError) -> bool:
-    """Wait briefly for Docker's auto-remove operation to become observable."""
-    if getattr(error, "status_code", None) != 409 or "already in progress" not in str(
-        getattr(error, "explanation", error)
-    ):
+    """poll for the container to disappear, a 409 already in progress means docker auto remove owns it"""
+    if getattr(error, "status_code", None) != 409:
         return False
+
+    if "already in progress" not in str(getattr(error, "explanation", error)):
+        return False
+
     for _attempt in range(20):
         try:
             container.reload()
         except docker.errors.NotFound:
             return True
+
         time.sleep(0.05)
+
     return False
 
 
 def _run_with_port_retry(attempt: Callable[[int], _T], *, exhausted_message: str) -> _T:
-    # retry containers.run on a fresh random host port when docker reports the port taken,
-    # the attempt callable owns the actual run (and any static-ip reconnect) for one candidate
     last_err: docker.errors.APIError | None = None
     for _ in range(50):
         host_port = random.randint(40000, 59999)
@@ -89,7 +88,6 @@ class ReconcileEntry(TypedDict):
     created_ts: float
 
 
-# docker context metadata from ~/.docker/contexts/meta/*/meta.json
 _ContextMeta = dict[str, object]
 
 
@@ -102,7 +100,7 @@ def _scan_context_meta(context_name: None = None) -> list[_ContextMeta]: ...
 
 
 def _scan_context_meta(context_name: str | None = None) -> _ContextMeta | list[_ContextMeta] | None:
-    # docker hashes context dirs by sha256, so we scan all entries and match by Name
+    # docker hashes context dir names by sha256 so there is no direct lookup by name
     contexts_dir = os.path.expanduser("~/.docker/contexts/meta")
     if not os.path.isdir(contexts_dir):
         return None if context_name else []
@@ -112,34 +110,56 @@ def _scan_context_meta(context_name: str | None = None) -> _ContextMeta | list[_
         meta_path = os.path.join(contexts_dir, entry, "meta.json")
         if not os.path.isfile(meta_path):
             continue
+
         try:
             with open(meta_path) as f:
                 meta = json.load(f)
-            if context_name:
-                if meta.get("Name") == context_name:
-                    return meta
-            else:
-                results.append(meta)
         except Exception:
             continue
+
+        # valid json that is not an object must not break loading of the other contexts
+        if not isinstance(meta, dict):
+            continue
+
+        if not context_name:
+            results.append(meta)
+            continue
+
+        if meta.get("Name") == context_name:
+            return meta
 
     return None if context_name else results
 
 
-def _resolve_endpoint(context_name: str, hostname: str | None) -> str | None:
+def _endpoint_from_context_meta(context_name: str) -> str | None:
     meta = _scan_context_meta(context_name)
-    if meta:
-        endpoints = meta.get("Endpoints", {})
-        if isinstance(endpoints, dict):
-            docker_ep = endpoints.get("docker", {})
-            if isinstance(docker_ep, dict):
-                endpoint = docker_ep.get("Host")
-                if endpoint:
-                    return str(endpoint)
+    if not meta:
+        return None
+
+    endpoints = meta.get("Endpoints", {})
+    if not isinstance(endpoints, dict):
+        return None
+
+    docker_ep = endpoints.get("docker", {})
+    if not isinstance(docker_ep, dict):
+        return None
+
+    endpoint = docker_ep.get("Host")
+    if not endpoint:
+        return None
+
+    return str(endpoint)
+
+
+def _resolve_endpoint(context_name: str, hostname: str | None) -> str | None:
+    endpoint = _endpoint_from_context_meta(context_name)
+    if endpoint:
+        return endpoint
+
+    if hostname and "@" in hostname:
+        return f"ssh://{hostname}"
 
     if hostname:
-        if "@" in hostname:
-            return f"ssh://{hostname}"
         return f"ssh://root@{hostname}"
 
     if context_name == LOCAL_CONTEXT_NAME and os.path.exists(LOCAL_SOCKET_PATH):
@@ -155,12 +175,14 @@ def discover_contexts() -> list[DiscoveredContext]:
         endpoints = meta.get("Endpoints", {})
         docker_ep = endpoints.get("docker", {}) if isinstance(endpoints, dict) else {}
         endpoint = str(docker_ep.get("Host", "")) if isinstance(docker_ep, dict) else ""
-        if name:
-            discovered.append({"name": name, "endpoint": endpoint})
+        if not name:
+            continue
 
-    if not any(d["name"] == LOCAL_CONTEXT_NAME for d in discovered):
-        if os.path.exists(LOCAL_SOCKET_PATH):
-            discovered.append({"name": LOCAL_CONTEXT_NAME, "endpoint": f"unix://{LOCAL_SOCKET_PATH}"})
+        discovered.append({"name": name, "endpoint": endpoint})
+
+    has_local = any(d["name"] == LOCAL_CONTEXT_NAME for d in discovered)
+    if not has_local and os.path.exists(LOCAL_SOCKET_PATH):
+        discovered.append({"name": LOCAL_CONTEXT_NAME, "endpoint": f"unix://{LOCAL_SOCKET_PATH}"})
 
     return discovered
 
@@ -183,23 +205,17 @@ def ping_endpoint(endpoint: str, timeout: int = 3) -> bool:
 
 class DockerHostManager:
     def __init__(self) -> None:
-        # Configuration and reachability are intentionally separate. A context
-        # that is down during load remains configured so health checks and
-        # cleanup can recover it without an admin reload.
         self._context_configs: dict[str, str] = {}
+        # tracked apart from the configs so an unreachable host stays configured for health checks and cleanup
         self._connected_contexts: set[str] = set()
         self._pub_hostnames: dict[str, str | None] = {}
-        # keyed by (context_name, thread_ident) because paramiko Channels bind
-        # gevent.Event to the Hub of the creating thread. reuse from another
-        # gevent threadpool worker raises gevent.InvalidThreadUseError
+        # keyed by thread ident, paramiko channels bind their gevent events to the hub of the creating thread
         self._clients: dict[tuple[str, int], DockerClient] = {}
         self._config_generation: int = 0
         self._client_generation: int = -1
-        # reentrant so a wrapped op can re-enter lock-protected helpers without
-        # tripping a deadlock if some future caller ever holds the lock across _call
+        # reentrant so a wrapped op can re-enter the lock protected helpers without deadlocking
         self._lock: threading.RLock = threading.RLock()
-        # per-context threadpool keeps paramiko blocking off the gevent hub,
-        # so one hung host can't stop the worker from serving other requests
+        # one pool per context keeps paramiko blocking off the gevent hub, so a hung host cannot stall other requests
         self._threadpools: dict[str, gevent.threadpool.ThreadPool] = {}
 
     def _get_threadpool(self, context_name: str) -> gevent.threadpool.ThreadPool:
@@ -211,12 +227,10 @@ class DockerHostManager:
             return pool
 
     def _call(self, context_name: str, fn, *args, **kwargs):
-        # gevent.threadpool.ThreadPool.apply needs the gevent hub, which only
-        # exists when monkey-patching is active (gunicorn worker). during
-        # Flask CLI paths do not initialize the gevent hub and
-        # apply() hangs in futex, so run inline in those cases
+        # without monkey patching there is no gevent hub and pool apply hangs in futex, flask cli hits this
         if not gevent.monkey.is_module_patched("threading"):
             return fn(*args, **kwargs)
+
         pool = self._get_threadpool(context_name)
         return pool.apply(fn, args=args, kwds=kwargs)
 
@@ -229,43 +243,38 @@ class DockerHostManager:
                 self._clients = {}
                 self._client_generation = self._config_generation
             else:
-                # prune entries for dead threads. gevent threadpool workers
-                # rarely die so this is a cheap safety net, not a hot path.
-                # bounded by num_contexts * THREADPOOL_SIZE
                 live_idents = {t.ident for t in threading.enumerate()}
                 dead_keys = [k for k in self._clients if k[1] not in live_idents]
                 for k in dead_keys:
                     to_close.append(self._clients.pop(k))
 
             key = (context_name, tid)
-            if key in self._clients:
-                client = self._clients[key]
-            else:
+            client = self._clients.get(key)
+            if client is None:
                 url = self._context_configs.get(context_name)
                 if not url:
                     raise Exception(f"no client for context '{context_name}'")
+
                 client = docker.DockerClient(base_url=url, timeout=DEFAULT_CLIENT_TIMEOUT)
                 self._clients[key] = client
 
-        # close outside the lock, paramiko teardown can block on SSH for seconds
+        # close outside the lock, paramiko teardown can block on ssh for seconds
         for old in to_close:
             try:
                 old.close()
             except Exception:
                 pass
+
         return client
 
     def _clear_client(self, context_name: str) -> None:
-        # drop EVERY cached client for this context across all threads so any
-        # worker that next calls _get_client builds a fresh one. preserves the
-        # original contract (next call gets a new client) but accounts for N
-        # cached entries instead of 1
         to_close: list[DockerClient] = []
         with self._lock:
             self._connected_contexts.discard(context_name)
             keys = [k for k in self._clients if k[0] == context_name]
             for k in keys:
                 to_close.append(self._clients.pop(k))
+
         for old in to_close:
             try:
                 old.close()
@@ -273,12 +282,6 @@ class DockerHostManager:
                 pass
 
     def _invoke_client_op(self, context_name, fn):
-        # shared broad-catch: DockerException/SSHException drop the cached client
-        # and re-raise as is. anything else (gevent.InvalidThreadUseError, paramiko
-        # ChannelException, etc) surfaces when the cached client is reused from a
-        # different gevent hub, drop the client and surface as a typed transient.
-        # method-specific exceptions (NotFound, KeyError, etc) MUST be handled
-        # inside fn before they reach this layer
         try:
             result = fn()
             with self._lock:
@@ -287,6 +290,7 @@ class DockerHostManager:
         except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
             self._clear_client(context_name)
             raise
+        # fn must handle its own NotFound and KeyError, anything reaching here means the cached client is unusable
         except Exception:
             self._clear_client(context_name)
             raise ContainerUnavailableException(f"transient client failure on {context_name}")
@@ -305,7 +309,7 @@ class DockerHostManager:
                 logger.warning(f"no endpoint for context '{ctx.context_name}', skipping")
                 continue
 
-            # Retain the resolved endpoint regardless of this load-time ping.
+            # configured regardless of the ping result below
             new_configs[ctx.context_name] = endpoint
             new_pub_hostnames[ctx.context_name] = ctx.pub_hostname
 
@@ -357,19 +361,21 @@ class DockerHostManager:
             return bool(self._connected_contexts)
 
     def ping(self, context_name: str) -> bool:
-        # use a fresh ephemeral client. cached clients share paramiko transports
-        # that wedge on dead-but-unreaped TCP sockets after idle periods, blocking
-        # the 30s health_check past its interval for the full kernel retransmit cycle
         with self._lock:
             url = self._context_configs.get(context_name)
+
         if not url:
             return False
-        if ping_endpoint(url, timeout=3):
-            with self._lock:
-                self._connected_contexts.add(context_name)
-            return True
-        self._clear_client(context_name)
-        return False
+
+        # ephemeral client, a cached paramiko transport wedged on a dead socket blocks the health check for minutes
+        if not ping_endpoint(url, timeout=3):
+            self._clear_client(context_name)
+            return False
+
+        with self._lock:
+            self._connected_contexts.add(context_name)
+
+        return True
 
     def is_container_running(self, context_name: str, container_id: str) -> bool:
         def _do():
@@ -401,8 +407,7 @@ class DockerHostManager:
         def _do():
             try:
                 client = self._get_client(context_name)
-                # sparse=True skips per-container inspect calls, which over ssh opens a
-                # channel per container and exhausts the remote's MaxSessions
+                # sparse skips the per container inspect, which over ssh opens a channel each and exhausts MaxSessions
                 containers = client.containers.list(filters={"status": "running"}, sparse=True)
                 return {c.id for c in containers}
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
@@ -418,7 +423,6 @@ class DockerHostManager:
         port: int,
         command: str,
         environment: dict[str, str | int],
-        # docker run kwargs (name, hostname, mem_limit, cpu_quota, volumes, cap_add, etc.)
         **kwargs: _DockerRunVal,
     ) -> Container:
         def _do():
@@ -472,40 +476,22 @@ class DockerHostManager:
         publish_port: bool | None = None,
         hostname: str | None = None,
         internal_port: int | None = None,
-        # forwarded to docker containers.run (labels, cap_add, mem_limit, etc.)
         **kwargs: _DockerRunVal,
     ) -> tuple[Container, int | None]:
         def _do():
             client = self._get_client(context_name)
             sec_opt = ["no-new-privileges:true"]
 
-            if publish_port and internal_port:
+            def pin_static_ip(container: Container) -> None:
+                if not ip_address:
+                    return
 
-                def attempt(host_port: int) -> tuple[Container, int]:
-                    container = client.containers.run(
-                        image,
-                        name=container_name,
-                        hostname=hostname or container_name,
-                        command=command or None,
-                        detach=True,
-                        auto_remove=True,
-                        cap_drop=["ALL"],
-                        security_opt=sec_opt,
-                        pids_limit=256,
-                        environment=environment,
-                        network=network_name,
-                        ports={str(internal_port): host_port},
-                        **kwargs,
-                    )
-                    if ip_address:
-                        # reconnect with static IP (initial connect used DHCP)
-                        network = client.networks.get(network_name)
-                        network.disconnect(container)
-                        network.connect(container, ipv4_address=ip_address)
-                    return container, host_port
+                # containers.run attaches with dhcp, so reconnect to pin the address
+                network = client.networks.get(network_name)
+                network.disconnect(container)
+                network.connect(container, ipv4_address=ip_address)
 
-                return _run_with_port_retry(attempt, exhausted_message="failed to find available port")
-            else:
+            if not publish_port or not internal_port:
                 container = client.containers.run(
                     image,
                     name=container_name,
@@ -520,21 +506,37 @@ class DockerHostManager:
                     network=network_name,
                     **kwargs,
                 )
-                if ip_address:
-                    network = client.networks.get(network_name)
-                    network.disconnect(container)
-                    network.connect(container, ipv4_address=ip_address)
+                pin_static_ip(container)
                 return container, None
+
+            def attempt(host_port: int) -> tuple[Container, int]:
+                container = client.containers.run(
+                    image,
+                    name=container_name,
+                    hostname=hostname or container_name,
+                    command=command or None,
+                    detach=True,
+                    auto_remove=True,
+                    cap_drop=["ALL"],
+                    security_opt=sec_opt,
+                    pids_limit=256,
+                    environment=environment,
+                    network=network_name,
+                    ports={str(internal_port): host_port},
+                    **kwargs,
+                )
+                pin_static_ip(container)
+                return container, host_port
+
+            return _run_with_port_retry(attempt, exhausted_message="failed to find available port")
 
         return self._call_with_client_op(context_name, _do)
 
     def _parse_container_created(self, created_raw: str) -> float:
-        # docker emits 9-digit fractional seconds, fromisoformat only accepts 6
         if not created_raw:
             return 0.0
-        try:
-            from datetime import datetime
 
+        try:
             iso = created_raw.replace("Z", "+00:00")
             if "." in iso:
                 head, tail = iso.split(".", 1)
@@ -543,14 +545,14 @@ class DockerHostManager:
                     frac, tz_suffix = tail, ""
                 else:
                     frac, tz_suffix = tail[:tz_idx], tail[tz_idx:]
+
+                # docker emits 9 digit fractional seconds, fromisoformat accepts only 6
                 iso = f"{head}.{frac[:6]}{tz_suffix}"
             return datetime.fromisoformat(iso).timestamp()
         except (ValueError, AttributeError):
             return 0.0
 
     def _list_containers(self, context_name: str, filters: dict[str, str]) -> list[ReconcileEntry]:
-        # Return label identity and age for every matching container (any state).
-        # swallows errors and returns [] so a flapping host can't break the sweep loop
         def _do() -> list[ReconcileEntry]:
             try:
                 client = self._get_client(context_name)
@@ -568,9 +570,7 @@ class DockerHostManager:
                         }
                     )
                 return results
-            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
-                self._clear_client(context_name)
-                return []
+            # empty on any failure so a flapping host cannot break the sweep loop
             except Exception:
                 self._clear_client(context_name)
                 return []
@@ -578,12 +578,10 @@ class DockerHostManager:
         return self._call(context_name, _do)
 
     def list_containers_by_label(self, context_name: str, label_key: str) -> list[ReconcileEntry]:
-        # used by the reconcile sweep for any container carrying the given label (any value)
         return self._list_containers(context_name, {"label": label_key})
 
     def kill_stack(self, context_name: str, stack_id: str) -> int:
-        # Missing/unreachable configuration is not evidence of Docker absence.
-        # Fail closed so callers retain DB rows/quota for later reconciliation.
+        # fail closed on an unconfigured context, callers keep their db rows and quota for reconciliation
         with self._lock:
             if context_name not in self._context_configs:
                 raise ContainerUnavailableException(f"docker context '{context_name}' is not configured")
@@ -609,11 +607,7 @@ class DockerHostManager:
         return self._call_with_client_op(context_name, _do)
 
     def force_remove_resources_by_label(self, context_name: str, label: str) -> tuple[int, int]:
-        """Strictly remove containers and networks matching one exact label.
-
-        Docker/SSH failures are propagated, so an empty successful result is
-        usable as proof of absence by lifecycle reconciliation.
-        """
+        """remove containers and networks for one exact label, failures propagate so an empty result proves absence"""
 
         with self._lock:
             if context_name not in self._context_configs:
@@ -646,11 +640,7 @@ class DockerHostManager:
         return self._call_with_client_op(context_name, _do)
 
     def count_resources_by_label(self, context_name: str, label: str) -> tuple[int, int]:
-        """Count containers and networks for an exact label filter.
-
-        Transport failures propagate so callers never mistake an unreachable
-        daemon for proof that no resources remain.
-        """
+        """count containers and networks for one exact label, failures propagate rather than reading as zero"""
 
         def _do() -> tuple[int, int]:
             client = self._get_client(context_name)
@@ -675,7 +665,7 @@ class DockerHostManager:
         return self._call_with_client_op(context_name, _do)
 
     def get_volume_metadata(self, context_name: str, docker_name: str) -> VolumeMetadata | None:
-        """Inspect an exact pre-provisioned volume without creating it."""
+        """inspect an existing volume, never creates one"""
 
         def _do():
             client = self._get_client(context_name)
@@ -701,10 +691,9 @@ class DockerHostManager:
         return self._call(context_name, _do)
 
     def pull_image(self, context_name: str, image: str) -> str:
-        # pulls can run for minutes, use a dedicated short-lived client with a
-        # longer timeout instead of the shared 10s control-plane client
         with self._lock:
             url = self._context_configs.get(context_name)
+
         if not url:
             raise Exception(f"no client for context '{context_name}'")
 
@@ -713,9 +702,8 @@ class DockerHostManager:
             try:
                 client.images.pull(image)
                 return "ok"
+            # only a dead ssh transport implicates the cached client, api errors leave it alone to avoid churn
             except paramiko.ssh_exception.SSHException:
-                # only the ssh transport-dead case implicates the cached client,
-                # api-level DockerException leaves it alone to avoid churn
                 self._clear_client(context_name)
                 raise
             finally:
@@ -734,7 +722,7 @@ class DockerHostManager:
                 attrs = img.attrs or {}
                 size_mb = round((attrs.get("Size") or 0) / 1024 / 1024)
                 created = attrs.get("Created", "")[:19].replace("T", " ")
-                # nix/bazel reproducible builds report 1970/1980, use LastTagTime instead
+                # reproducible builds from nix or bazel report 1970 or 1980, so fall back to LastTagTime
                 if created.startswith("1970") or created.startswith("1980"):
                     last_tag = (attrs.get("Metadata") or {}).get("LastTagTime", "")
                     if last_tag:

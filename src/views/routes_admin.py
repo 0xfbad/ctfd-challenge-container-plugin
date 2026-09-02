@@ -321,7 +321,6 @@ def route_stats_summary():
 
     flag_shares = ContainerFlagShareModel.query.count()
 
-    # sweep line algorithm for peak concurrent containers
     events_list = []
     for r in entry_rows:
         if r.created_at:
@@ -747,6 +746,30 @@ def route_api_add_context():
     return jsonify(success="context added", id=new_context.id)
 
 
+def _endpoint_change_conflict(context: DockerContextModel) -> tuple[Response, int] | None:
+    physical_refs, logical_refs = _context_reference_counts(context)
+    if physical_refs or logical_refs:
+        return jsonify(error="stop and clean all instances before changing a context endpoint"), 409
+
+    try:
+        docker_containers, docker_networks = _context_docker_resource_counts(context)
+    except Exception:
+        logger.warning("could not verify Docker resource absence before endpoint update", exc_info=True)
+        return jsonify(error="could not verify that the context has no Docker resources"), 503
+
+    if not docker_containers and not docker_networks:
+        return None
+
+    return (
+        jsonify(
+            error="Docker resources remain on this context; automatic cleanup must finish first",
+            docker_containers=docker_containers,
+            docker_networks=docker_networks,
+        ),
+        409,
+    )
+
+
 @containers_bp.route("/api/contexts/update/<int:context_id>", methods=["PUT"])
 @admins_only
 def route_api_update_context(context_id):
@@ -763,29 +786,15 @@ def route_api_update_context(context_id):
         if "hostname" in payload:
             requested_hostname = _optional_ssh_target(payload["hostname"])
             if requested_hostname != context.hostname:
-                physical_refs, logical_refs = _context_reference_counts(context)
-                if physical_refs or logical_refs:
-                    return (
-                        jsonify(error="stop and clean all instances before changing a context endpoint"),
-                        409,
-                    )
-                try:
-                    docker_containers, docker_networks = _context_docker_resource_counts(context)
-                except Exception:
-                    logger.warning("could not verify Docker resource absence before endpoint update", exc_info=True)
-                    return jsonify(error="could not verify that the context has no Docker resources"), 503
-                if docker_containers or docker_networks:
-                    return (
-                        jsonify(
-                            error="Docker resources remain on this context; automatic cleanup must finish first",
-                            docker_containers=docker_containers,
-                            docker_networks=docker_networks,
-                        ),
-                        409,
-                    )
+                conflict = _endpoint_change_conflict(context)
+                if conflict is not None:
+                    return conflict
+
             updates["hostname"] = requested_hostname
+
         if "pub_hostname" in payload:
             updates["pub_hostname"] = _required_public_hostname(payload["pub_hostname"])
+
         if "weight" in payload:
             updates["weight"] = parse_strict_int(payload["weight"], "weight", minimum=1, maximum=1_000)
 
@@ -845,36 +854,35 @@ def route_api_delete_context(context_id):
             logger.warning("could not verify Docker resource absence before context deletion", exc_info=True)
             return jsonify(error="could not verify that the context has no Docker resources"), 503
 
-    try:
-        if physical_refs or logical_refs or pinned_challenges or docker_containers or docker_networks or not reachable:
-            if not force:
-                reason = (
-                    "context is referenced by resources or challenges"
-                    if physical_refs or logical_refs or pinned_challenges or docker_containers or docker_networks
-                    else "context is unreachable"
-                )
-                return (
-                    jsonify(
-                        error=f"{reason}; retry with force=true to retire it without deleting its record",
-                        physical_references=physical_refs,
-                        logical_references=logical_refs,
-                        pinned_challenges=pinned_challenges,
-                        docker_containers=docker_containers,
-                        docker_networks=docker_networks,
-                        retirement_available=True,
-                    ),
-                    409,
-                )
+    referenced = bool(physical_refs or logical_refs or pinned_challenges or docker_containers or docker_networks)
+    retire_only = referenced or not reachable
 
+    if retire_only and not force:
+        reason = "context is referenced by resources or challenges" if referenced else "context is unreachable"
+        return (
+            jsonify(
+                error=f"{reason}; retry with force=true to retire it without deleting its record",
+                physical_references=physical_refs,
+                logical_references=logical_refs,
+                pinned_challenges=pinned_challenges,
+                docker_containers=docker_containers,
+                docker_networks=docker_networks,
+                retirement_available=True,
+            ),
+            409,
+        )
+
+    try:
+        if retire_only:
             context.state = "retired_orphaned"
-            db.session.commit()
             action = "retired"
             success = "context retired; record retained for cleanup"
         else:
             db.session.delete(context)
-            db.session.commit()
             action = "deleted"
             success = "context deleted"
+
+        db.session.commit()
     except Exception:
         db.session.rollback()
         logger.exception("failed to delete or retire docker context")
@@ -908,7 +916,7 @@ def route_api_test_context(context_id):
         client = docker.DockerClient(base_url=endpoint)
         client.ping()
         return jsonify(success="context is reachable")
-    except Exception as exc:  # noqa: BLE001 -- Docker transports expose backend-specific failures.
+    except Exception as exc:  # noqa: BLE001
         logger.warning("context test failed: %s", exc)
         return jsonify(error="context unreachable"), 500
     finally:
@@ -919,6 +927,20 @@ def route_api_test_context(context_id):
                 logger.debug("failed to close context test client", exc_info=True)
 
 
+def _suggested_hostname(endpoint: str) -> str:
+    if endpoint.startswith("unix://"):
+        return _socket.gethostname()
+
+    if "://" not in endpoint:
+        return ""
+
+    stripped = endpoint.split("://", 1)[-1]
+    if "@" in stripped:
+        stripped = stripped.split("@", 1)[-1]
+
+    return stripped.split(":")[0].split("/")[0]
+
+
 @containers_bp.route("/api/contexts/discover", methods=["GET"])
 @admins_only
 def route_api_discover_contexts():
@@ -926,38 +948,25 @@ def route_api_discover_contexts():
         found = discover_contexts()
         existing = {ctx.context_name for ctx in DockerContextModel.query.all()}
 
-        available = []
-        for ctx in found:
-            if ctx["name"] in existing:
-                continue
+        available = [
+            {
+                "name": ctx["name"],
+                "endpoint": ctx["endpoint"],
+                "suggested_hostname": _suggested_hostname(ctx["endpoint"]),
+            }
+            for ctx in found
+            if ctx["name"] not in existing
+        ]
 
-            ep = ctx["endpoint"]
-            if ep.startswith("unix://"):
-                suggested = _socket.gethostname()
-            elif "://" in ep:
-                stripped = ep.split("://", 1)[-1]
-                if "@" in stripped:
-                    stripped = stripped.split("@", 1)[-1]
-                suggested = stripped.split(":")[0].split("/")[0]
-            else:
-                suggested = ""
+        if not available:
+            return jsonify(contexts=[])
 
-            available.append(
-                {
-                    "name": ctx["name"],
-                    "endpoint": ctx["endpoint"],
-                    "suggested_hostname": suggested,
-                }
-            )
+        def _ping(ctx: dict[str, str | bool]) -> dict[str, str | bool]:
+            ctx["reachable"] = ping_endpoint(str(ctx["endpoint"]))
+            return ctx
 
-        if available:
-
-            def _ping(ctx: dict[str, str | bool]) -> dict[str, str | bool]:
-                ctx["reachable"] = ping_endpoint(str(ctx["endpoint"]))
-                return ctx
-
-            with ThreadPoolExecutor(max_workers=min(len(available), 8)) as pool:
-                list(pool.map(_ping, available))
+        with ThreadPoolExecutor(max_workers=min(len(available), 8)) as pool:
+            list(pool.map(_ping, available))
 
         return jsonify(contexts=available)
     except Exception:
@@ -1218,7 +1227,6 @@ def _range_cutoff() -> float:
 
 
 def _request_tz() -> tzinfo:
-    """viewer's IANA timezone for localizing analytics buckets; falls back to UTC"""
     name = request.args.get("tz", "")
     if name:
         try:
@@ -1229,9 +1237,7 @@ def _request_tz() -> tzinfo:
 
 
 def _history_rows_since(cutoff: float) -> list[ContainerHistoryModel]:
-    # Apply canonical logical-instance selection before the safety limit. A
-    # large companion-heavy stack must not crowd real player launches out of
-    # the analytics window.
+    # entry filter runs before the row limit so companion rows cannot crowd out real launches
     query = ContainerHistoryModel.query.filter(ContainerHistoryModel.is_entry.is_(True))
     if cutoff > 0:
         query = query.filter(ContainerHistoryModel.created_at >= cutoff)
@@ -1265,10 +1271,9 @@ def route_analytics_activity():
             stop_bucket = int(row.stopped_at // bucket_size) * bucket_size
             stop_buckets[stop_bucket] += 1
 
-    all_keys = sorted(set(create_buckets.keys()) | set(stop_buckets.keys()))
-    labels = [k for k in all_keys]
-    creates = [create_buckets.get(k, 0) for k in all_keys]
-    stops = [stop_buckets.get(k, 0) for k in all_keys]
+    labels = sorted(set(create_buckets) | set(stop_buckets))
+    creates = [create_buckets.get(k, 0) for k in labels]
+    stops = [stop_buckets.get(k, 0) for k in labels]
 
     return jsonify(labels=labels, creates=creates, stops=stops)
 
@@ -1476,7 +1481,7 @@ def route_analytics_heatmap():
     excluded = _excluded_user_ids()
     rows = ContainerHistoryModel.query.filter(ContainerHistoryModel.created_at >= cutoff).all()
 
-    # weekday() is Monday=0..Sunday=6, so the matrix is always Mon-first in the viewer's tz
+    # weekday returns 0 for monday so columns stay mon first
     matrix = [[0] * 7 for _ in range(24)]
     for r in rows:
         if not r.created_at or r.user_id in excluded:
@@ -1484,7 +1489,7 @@ def route_analytics_heatmap():
         dt = datetime.fromtimestamp(r.created_at, tz=tz)
         matrix[dt.hour][dt.weekday()] += 1
 
-    # echarts expects [[day, hour, value], ...]
+    # echarts heatmap series takes day, hour, value triples
     data = []
     for hour in range(24):
         for day in range(7):
