@@ -24,6 +24,7 @@ from .coordination import InstanceCoordinator
 from .event_logger import event_logger, flag_share_message, flag_share_metadata
 from .flag_type import flag_share_identity_fields
 from .freshness import compute_token, extract_token, render_flag
+from .messages import FLAG_NOT_YOURS, TEAM_REQUIRED_FLAG, USER_NOT_FOUND
 from .models import (
     ContainerChallengeModel,
     ContainerFlagShareModel,
@@ -294,12 +295,12 @@ class ContainerChallenge(BaseChallenge):
 
         user = get_current_user()
         if not user:
-            return False, "user not found"
+            return False, USER_NOT_FOUND
 
         team_mode = bool(is_team_mode())
         xid = resolve_xid(user)
         if xid is None:
-            return False, "you must be on a team to submit flags"
+            return False, TEAM_REQUIRED_FLAG
 
         for flag in freshness_flags:
             template = flag.content
@@ -369,7 +370,7 @@ class ContainerChallenge(BaseChallenge):
                 # duplicate submit of the same token, the first row stays the record
                 db.session.rollback()
 
-            return False, "this flag belongs to another participant. this attempt has been logged."
+            return False, FLAG_NOT_YOURS
 
         return False, "incorrect"
 

@@ -15,6 +15,18 @@ from flask import jsonify, request
 from CTFd.utils import get_config
 
 from .exceptions import ContainerException, ContainerUnavailableException
+from .messages import (
+    CHALLENGE_NOT_FOUND,
+    CONTAINER_NOT_FOUND,
+    CONTAINER_NOT_FOUND_RESET,
+    CPU_LIMIT_INVALID,
+    IMAGE_NOT_FOUND,
+    MEMORY_LIMIT_INVALID,
+    NO_RENEWALS,
+    RATE_LIMITED,
+    REQUEST_IN_PROGRESS,
+    SERVER_ERROR,
+)
 from .models import ContainerSettingsModel
 
 logger = logging.getLogger(__name__)
@@ -322,25 +334,27 @@ def error_body(message: str, kind: ErrorKind | None = None) -> dict[str, Any]:
     return {"error": message, "error_kind": kind or classify_error_kind(message)}
 
 
-_USER_SAFE_PATTERNS = (
-    "no renewals remaining",
-    "container not found",
-    "challenge not found",
-    "you can only spawn",
-    "another container request is in progress",
-    "docker image not found",
-    "memory limit must be",
-    "cpu limit must be",
+# equality only, a formatted template can never equal its constant so parameterized messages must not be listed here
+_USER_SAFE = frozenset(
+    {
+        NO_RENEWALS,
+        CONTAINER_NOT_FOUND,
+        CONTAINER_NOT_FOUND_RESET,
+        CHALLENGE_NOT_FOUND,
+        REQUEST_IN_PROGRESS,
+        IMAGE_NOT_FOUND,
+        MEMORY_LIMIT_INVALID,
+        CPU_LIMIT_INVALID,
+    }
 )
 
 
 def sanitize_container_error(err: ContainerException | Exception) -> str:
     msg = str(err)
-    lower = msg.lower()
-    if any(p in lower for p in _USER_SAFE_PATTERNS):
+    if msg in _USER_SAFE:
         return msg
     logger.error(f"container error (sanitized): {msg}")
-    return "a server error occurred, please try again"
+    return SERVER_ERROR
 
 
 def handle_container_errors(f):
@@ -434,15 +448,8 @@ def ratelimit_per_user(
             else:
                 bucket = f"ip{get_ip()}"
 
-            effective_limit_source: RatePolicyValue = limit
-            effective_interval_source: RatePolicyValue = interval
-            # routes decorate before an app context exists, so literal defaults reread storage per request
-            if limit == DEFAULTS["rate_limit_requests"] and interval == DEFAULTS["rate_limit_interval"]:
-                effective_limit_source = "rate_limit_requests"
-                effective_interval_source = "rate_limit_interval"
-
-            effective_limit = _resolve_rate_policy(effective_limit_source, "request count")
-            effective_interval = _resolve_rate_policy(effective_interval_source, "interval")
+            effective_limit = _resolve_rate_policy(limit, "request count")
+            effective_interval = _resolve_rate_policy(interval, "interval")
             key = f"{key_prefix}:{bucket}:{request.endpoint}:{effective_limit}:{effective_interval}"
 
             current_count = _increment_rate_limit(key, effective_interval)
@@ -451,9 +458,7 @@ def ratelimit_per_user(
                 resp = jsonify(
                     {
                         "code": 429,
-                        "message": (
-                            f"Too many requests. Limit is {effective_limit} requests in {effective_interval} seconds"
-                        ),
+                        "message": RATE_LIMITED.format(limit=effective_limit, interval=effective_interval),
                         "error_kind": "user",
                     }
                 )
