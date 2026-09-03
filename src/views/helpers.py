@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from functools import wraps
+from typing import Any
 
 from flask import current_app, g, request
 
@@ -11,6 +12,7 @@ from CTFd.utils.user import is_admin
 from ..challenge_config import normalize_services
 from ..container_manager import ContainerManager
 from ..coordination import (
+    ContextUnavailable,
     CoordinationError,
     CreateCapacityUnavailable,
     FinalizedInstance,
@@ -23,6 +25,32 @@ from ..docker_host_manager import LOCAL_CONTEXT_NAME
 from ..event_logger import event_logger
 from ..exceptions import ContainerException
 from ..freshness import compute_token
+from ..messages import (
+    AWAITING_CLEANUP,
+    CHALLENGE_LOCKED,
+    CHALLENGE_MISCONFIGURED,
+    CHALLENGE_NOT_FOUND,
+    CHALLENGE_UNAVAILABLE,
+    CLEANUP_ALREADY_RUNNING,
+    CLEANUP_FINALIZING,
+    CLEANUP_IN_PROGRESS,
+    CLEANUP_PENDING,
+    CONTAINER_NOT_FOUND,
+    CONTAINER_NOT_FOUND_RESET,
+    CONTEXT_UNAVAILABLE,
+    EXPIRED_NO_RENEW,
+    FINALIZATION_FAILED,
+    HOST_UNAVAILABLE_CLEANUP,
+    HOST_UNREACHABLE,
+    HOSTS_BUSY,
+    INSTANCE_NOT_FOUND,
+    NO_RENEWALS,
+    PLACEMENT_FAILED,
+    PORT_UNAVAILABLE,
+    QUOTA_EXCEEDED,
+    REQUEST_IN_PROGRESS,
+    SOLVED_NO_RENEW,
+)
 from ..models import ContainerChallengeModel, ContainerInfoModel, ContainerInstanceModel, DockerContextModel
 from ..utils import ValidationError, error_body, get_setting, owner_filter, sanitize_container_error
 from ..volume_policy import (
@@ -50,6 +78,15 @@ def _resolve_challenge(chal_id: int) -> ContainerChallengeModel | None:
     return ContainerChallengeModel.query.filter_by(id=chal_id).first()
 
 
+def request_json() -> dict[str, Any] | None:
+    # recursion errors from absurdly nested bodies must not escape as a 500
+    try:
+        body = request.get_json(silent=True)
+    except Exception:
+        return None
+    return body if isinstance(body, dict) else None
+
+
 def requires_visible_challenge(f):
     """hidden and locked states return the same 404 and 403 as CTFd/api/v1/challenges.py"""
 
@@ -58,8 +95,8 @@ def requires_visible_challenge(f):
         chal_id = kwargs.get("chal_id")
         if chal_id is None:
             chal_id = kwargs.get("challenge_id")
-        if chal_id is None and isinstance(request.json, dict):
-            chal_id = request.json.get("chal_id")
+        if chal_id is None:
+            chal_id = (request_json() or {}).get("chal_id")
 
         try:
             chal_id = int(chal_id) if chal_id is not None else None
@@ -67,18 +104,18 @@ def requires_visible_challenge(f):
             chal_id = None
 
         if chal_id is None:
-            return {"error": "challenge not found"}, 404
+            return {"error": CHALLENGE_NOT_FOUND}, 404
 
         challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
         if challenge is None:
-            return {"error": "challenge not found"}, 404
+            return {"error": CHALLENGE_NOT_FOUND}, 404
 
         admin = is_admin()
         if challenge.state == "hidden" and not admin:
-            return {"error": "challenge not found"}, 404
+            return {"error": CHALLENGE_NOT_FOUND}, 404
 
         if challenge.state == "locked" and not admin:
-            return {"error": "challenge locked"}, 403
+            return {"error": CHALLENGE_LOCKED}, 403
 
         g.challenge = challenge
         return f(*args, **kwargs)
@@ -191,24 +228,24 @@ def cleanup_instance(instance_id: str, *, reason: str = "stopped") -> JsonRespon
     container_manager = current_app.container_manager
     instance = ContainerInstanceModel.query.filter_by(id=instance_id).first()
     if instance is None:
-        return error_body("container instance not found", "transient")
+        return error_body(INSTANCE_NOT_FOUND, "transient")
 
     if instance.docker_context is None:
-        return error_body("container context is unavailable; cleanup will retry automatically", "transient")
+        return error_body(CONTEXT_UNAVAILABLE, "transient")
 
     context_name = instance.docker_context.context_name
     operation_token = InstanceCoordinator.claim_operation(
         instance_id, ("running", "provisioning", "cleanup_pending"), "cleanup_pending"
     )
     if operation_token is None:
-        return error_body("container cleanup is already in progress", "transient")
+        return error_body(CLEANUP_ALREADY_RUNNING, "transient")
 
     try:
         container_manager.host_manager.force_remove_resources_by_label(context_name, f"ctf.instance_id={instance_id}")
     except Exception as error:
         logger.warning("failed to clean instance %s; retaining cleanup state", instance_id, exc_info=True)
         InstanceCoordinator.release_operation(instance_id, operation_token, str(error))
-        return error_body("container host unavailable; cleanup will be retried", "transient")
+        return error_body(HOST_UNAVAILABLE_CLEANUP, "transient")
 
     if not InstanceCoordinator.delete_after_confirmed_cleanup(
         instance_id,
@@ -216,7 +253,7 @@ def cleanup_instance(instance_id: str, *, reason: str = "stopped") -> JsonRespon
         reason=reason,
         stopped_at=time.time(),
     ):
-        return error_body("container cleanup finalization is already in progress", "transient")
+        return error_body(CLEANUP_FINALIZING, "transient")
 
     return {"success": "container cleaned"}
 
@@ -224,7 +261,7 @@ def cleanup_instance(instance_id: str, *, reason: str = "stopped") -> JsonRespon
 def kill_container(container_id: str) -> JsonResponse:
     container = ContainerInfoModel.query.filter_by(container_id=container_id).first()
     if not container:
-        return error_body("container not found", "transient")
+        return error_body(CONTAINER_NOT_FOUND, "user")
 
     context_name = container.docker_context
     challenge_name = container.challenge.name if container.challenge else None
@@ -260,28 +297,28 @@ def kill_container(container_id: str) -> JsonResponse:
 def renew_container(chal_id: int, xid: int, is_team: bool) -> JsonResponse | tuple[JsonResponse, int]:
     challenge = _resolve_challenge(chal_id)
     if challenge is None:
-        return error_body("challenge not found", "permanent"), 400
+        return error_body(CHALLENGE_NOT_FOUND, "permanent"), 400
 
     running_container = ContainerInfoModel.query.filter_by(
         challenge_id=challenge.id, is_entry=True, **owner_filter(xid, is_team)
     ).first()
 
     if running_container is None:
-        return error_body("container not found, try resetting the container", "transient")
+        return error_body(CONTAINER_NOT_FOUND_RESET, "user"), 400
 
     container_manager = current_app.container_manager
     try:
         if not container_manager.is_container_running(running_container.container_id, running_container.docker_context):
             kill_container(running_container.container_id)
-            return error_body("container not found, try resetting the container", "transient")
+            return error_body(CONTAINER_NOT_FOUND_RESET, "user"), 400
     except ContainerException:
-        return error_body("the container host is temporarily unreachable, please wait", "transient")
+        return error_body(HOST_UNREACHABLE, "transient"), 503
 
     max_renewals = resolve_max_renewals(challenge)
     renewals_used = running_container.renewals_used
 
     if renewals_used >= max_renewals:
-        return error_body("no renewals remaining", "transient")
+        return error_body(NO_RENEWALS, "user"), 400
 
     now = int(time.time())
     time_remaining = max(0, running_container.expires - now)
@@ -297,11 +334,11 @@ def renew_container(chal_id: int, xid: int, is_team: bool) -> JsonResponse | tup
     if update is None:
         lifecycle = InstanceCoordinator.get_lifecycle(running_container.instance_id)
         if lifecycle and lifecycle.solved_at is not None:
-            return error_body("solved containers cannot be renewed", "transient")
+            return error_body(SOLVED_NO_RENEW, "user"), 400
         if lifecycle and lifecycle.expires <= now:
-            return error_body("expired containers cannot be renewed", "transient")
+            return error_body(EXPIRED_NO_RENEW, "user"), 400
 
-        return error_body("no renewals remaining", "transient")
+        return error_body(NO_RENEWALS, "user"), 400
 
     new_expires = update.expires
     renewals_used = update.renewals_used - 1
@@ -446,11 +483,13 @@ def _cleanup_failed_reservation(
         return False
 
 
-def create_container(chal_id: int, xid: int, uid: int, is_team: bool) -> JsonResponse | tuple[JsonResponse, int]:
+def create_container(
+    chal_id: int, xid: int, uid: int, is_team: bool
+) -> JsonResponse | tuple[JsonResponse, int] | tuple[JsonResponse, int, dict[str, str]]:
     container_manager = current_app.container_manager
     challenge = _resolve_challenge(chal_id)
     if challenge is None:
-        return error_body("challenge not found", "permanent"), 400
+        return error_body(CHALLENGE_NOT_FOUND, "permanent"), 400
 
     extra_env: dict[str, str] = {}
     freshness_secret_raw = get_setting("freshness_secret")
@@ -503,11 +542,14 @@ def create_container(chal_id: int, xid: int, uid: int, is_team: bool) -> JsonRes
         )
     except InstanceQuotaExceeded:
         maximum = int(get_setting("max_containers_per_user", 4) or 4)
-        return error_body(
-            f"you can only spawn {maximum} containers at a time, please stop other containers", "user"
-        ), 409
-    except CreateCapacityUnavailable:
-        return error_body("all container hosts are busy, please try again shortly", "transient"), 429
+        return error_body(QUOTA_EXCEEDED.format(maximum=maximum), "user"), 409
+    except CreateCapacityUnavailable as err:
+        # busy create slots and an exhausted retry budget share a status but not a cause
+        logger.warning("no create capacity for challenge %s: %s", challenge.id, err)
+        return error_body(HOSTS_BUSY, "transient"), 429, {"Retry-After": "5"}
+    except ContextUnavailable as err:
+        logger.warning("no docker context for challenge %s: %s", challenge.id, err)
+        return error_body(HOSTS_BUSY, "transient"), 503
     except CoordinationError as err:
         return error_body(sanitize_container_error(ContainerException(str(err)))), 503
 
@@ -516,14 +558,12 @@ def create_container(chal_id: int, xid: int, uid: int, is_team: bool) -> JsonRes
         if reservation.state == "running" and existing is not None:
             return build_connection_response("already_running", challenge, existing, reservation.context_name)
         if reservation.state == "provisioning":
-            return error_body("another container request is in progress, please wait", "transient"), 429
-        return error_body(
-            "the previous container is being cleaned up automatically; please retry shortly", "transient"
-        ), 503
+            return error_body(REQUEST_IN_PROGRESS, "transient"), 429, {"Retry-After": "5"}
+        return error_body(CLEANUP_IN_PROGRESS, "transient"), 503
 
     if not reservation.context_name:
         _cleanup_failed_reservation(container_manager, reservation, "reservation has no docker context")
-        return error_body("container placement failed", "transient"), 503
+        return error_body(PLACEMENT_FAILED, "transient"), 503
 
     try:
         entry_volumes, service_volumes = _resolve_runtime_volumes(
@@ -584,7 +624,7 @@ def create_container(chal_id: int, xid: int, uid: int, is_team: bool) -> JsonRes
         if host_port is None:
             error = ContainerException("could not determine the entry container port")
             _cleanup_failed_reservation(container_manager, reservation, error)
-            return error_body("could not determine container port", "transient"), 500
+            return error_body(PORT_UNAVAILABLE, "transient"), 500
 
         members = (PhysicalMember(entry_container.id, int(host_port), True, "entry"),) + tuple(
             PhysicalMember(svc_container.id, 0, False, svc_name) for svc_name, svc_container in companions
@@ -619,7 +659,7 @@ def create_container(chal_id: int, xid: int, uid: int, is_team: bool) -> JsonRes
         if port is None:
             error = ContainerException("could not determine the container port")
             _cleanup_failed_reservation(container_manager, reservation, error)
-            return error_body("could not determine container port", "transient"), 500
+            return error_body(PORT_UNAVAILABLE, "transient"), 500
         stack_id = None
         members = (PhysicalMember(created_container.id, int(port), True, "entry"),)
 
@@ -635,7 +675,7 @@ def create_container(chal_id: int, xid: int, uid: int, is_team: bool) -> JsonRes
             raise ContainerException("the provisioning reservation changed before finalization")
     except Exception as err:
         _cleanup_failed_reservation(container_manager, reservation, err)
-        return error_body("database finalization failed; container cleanup has been scheduled", "transient"), 500
+        return error_body(FINALIZATION_FAILED, "transient"), 500
 
     log_container_event(
         event_type="created",
@@ -657,7 +697,7 @@ def view_container_info(chal_id: int, xid: int, is_team: bool) -> JsonResponse |
     container_manager = current_app.container_manager
     challenge = _resolve_challenge(chal_id)
     if challenge is None:
-        return error_body("challenge not found", "permanent"), 400
+        return error_body(CHALLENGE_NOT_FOUND, "permanent"), 400
 
     running_container = ContainerInfoModel.query.filter_by(
         challenge_id=challenge.id, is_entry=True, **owner_filter(xid, is_team)
@@ -673,7 +713,7 @@ def view_container_info(chal_id: int, xid: int, is_team: bool) -> JsonResponse |
     if running_container.instance.state == "cleanup_pending":
         return {
             "status": "cleanup_pending",
-            "message": "The previous instance is awaiting confirmed cleanup.",
+            "message": AWAITING_CLEANUP,
             "error_kind": "transient",
         }, 503
 
@@ -685,7 +725,7 @@ def view_container_info(chal_id: int, xid: int, is_team: bool) -> JsonResponse |
         response = build_connection_response(
             "host_unavailable", challenge, running_container, running_container.docker_context
         )
-        response["message"] = "the container host is temporarily unreachable, please wait"
+        response["message"] = HOST_UNREACHABLE
         return response
 
     if is_running:
@@ -696,7 +736,7 @@ def view_container_info(chal_id: int, xid: int, is_team: bool) -> JsonResponse |
     cleanup = kill_container(running_container.container_id)
     if "success" not in cleanup:
         msg = cleanup.get("error")
-        return error_body(msg if isinstance(msg, str) else "container cleanup is pending", "transient"), 503
+        return error_body(msg if isinstance(msg, str) else CLEANUP_PENDING, "transient"), 503
 
     return {"status": "instance not started"}
 
@@ -708,14 +748,14 @@ def _check_misconfigured(
         logger.warning(f"challenge {challenge.id} ({challenge.name}) missing image or port")
         return {
             "status": "misconfigured",
-            "message": "This challenge has a broken configuration. This is on our end, not yours.",
+            "message": CHALLENGE_MISCONFIGURED,
         }
 
     if not container_manager.host_manager.has_contexts():
         logger.warning(f"no docker contexts available for challenge {challenge.id} ({challenge.name})")
         return {
             "status": "misconfigured",
-            "message": "This challenge is temporarily unavailable due to a server configuration issue. This is on our end, not yours.",
+            "message": CHALLENGE_UNAVAILABLE,
         }
 
     return None
@@ -725,6 +765,6 @@ def connect_type(chal_id: int) -> JsonResponse | tuple[JsonResponse, int]:
     challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
 
     if challenge is None:
-        return {"error": "challenge not found"}, 400
+        return {"error": CHALLENGE_NOT_FOUND}, 400
 
     return {"status": "ok", "connect": challenge.ctype}
