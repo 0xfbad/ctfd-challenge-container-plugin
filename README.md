@@ -117,6 +117,11 @@ Managed through `/admin/config`, no config files
 The settings API validates an entire update before committing it. Settings apply live; disruptive freshness changes
 are confirmed in the admin UI.
 
+Fleet-wide create admission is `max_concurrent_creates` x number of active healthy hosts; a cohort larger than that
+gets `HOSTS_BUSY` 429s at start time. Raise the setting in /admin/config in steps (2 -> 8 -> 16, max 32) with a
+class-sized load test at each step - the bottleneck moves from the database to concurrent image pulls and container
+creates on each runner, against `provision_timeout_seconds` (default 120).
+
 ## Container security
 
 Every container gets `cap_drop=ALL`, `no-new-privileges`, a pids limit of 256, and `auto_remove=True`. SSH challenges automatically get the capabilities sshd needs (SETUID, SETGID, CHOWN, etc). Additional capabilities are restricted to `NET_ADMIN`, `NET_RAW`, `SYS_PTRACE`, and `SYS_NICE`; `SYS_ADMIN`, privileged mode, and arbitrary service fields are rejected.
