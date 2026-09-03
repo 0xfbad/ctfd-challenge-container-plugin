@@ -17,6 +17,7 @@ import docker
 import paramiko
 from apscheduler.schedulers import SchedulerNotRunningError
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.gevent import GeventScheduler
 from docker.models.containers import Container
 from flask import Flask
 from sqlalchemy import text
@@ -27,6 +28,7 @@ from .coordination import InstanceCoordinator
 from .docker_host_manager import DockerHostManager, ReconcileEntry, _DockerRunVal
 from .event_logger import event_logger
 from .exceptions import ContainerException, ContainerUnavailableException
+from .messages import CPU_LIMIT_INVALID, IMAGE_NOT_FOUND, MEMORY_LIMIT_INVALID
 from .models import ContainerInfoModel, ContainerInstanceModel, ContainerMaintenanceModel
 from .orchestrator import Orchestrator
 from .utils import get_setting
@@ -112,16 +114,16 @@ def _resource_kwargs(max_memory_mb: int | None, max_cpu: float | None) -> dict[s
             if mem_limit > 0:
                 kwargs["mem_limit"] = f"{mem_limit}m"
         except ValueError:
-            raise ContainerException("memory limit must be an integer")
+            raise ContainerException(MEMORY_LIMIT_INVALID)
 
     if max_cpu:
         try:
             cpu_quota = float(max_cpu)
         except ValueError:
-            raise ContainerException("cpu limit must be a positive number")
+            raise ContainerException(CPU_LIMIT_INVALID)
 
         if not math.isfinite(cpu_quota) or cpu_quota <= 0:
-            raise ContainerException("cpu limit must be a positive number")
+            raise ContainerException(CPU_LIMIT_INVALID)
 
         kwargs["cpu_quota"] = int(cpu_quota * CPU_QUOTA_BASE)
         kwargs["cpu_period"] = CPU_QUOTA_BASE
@@ -200,7 +202,11 @@ class ContainerManager:
             logger.info("scheduler skipped (CLI mode)")
             return
 
-        self.expiration_scheduler = BackgroundScheduler()
+        from gevent import monkey
+
+        # the apscheduler thread pool executor dies at interpreter shutdown under gevent, GeventExecutor does not
+        scheduler_cls = GeventScheduler if monkey.is_module_patched("threading") else BackgroundScheduler
+        self.expiration_scheduler = scheduler_cls()
         self.expiration_scheduler.add_job(
             func=self._maintenance_tick,
             trigger="interval",
@@ -215,7 +221,10 @@ class ContainerManager:
             if self.expiration_scheduler.running:
                 self.expiration_scheduler.shutdown(wait=False)
 
-        atexit.register(_shutdown_scheduler)
+        # initialize_connection can run more than once, the hook reads the current scheduler so one is enough
+        if not getattr(self, "_shutdown_hook_registered", False):
+            atexit.register(_shutdown_scheduler)
+            self._shutdown_hook_registered = True
 
     def _run_maintenance_job(self, name: str, interval: int, operation: Callable[[], None]) -> bool:
         try:
@@ -242,7 +251,10 @@ class ContainerManager:
 
     def _maintenance_tick(self) -> None:
         with self.app.app_context():
-            expiry_interval = int(get_setting("expiration_check_interval", 5) or 5)
+            try:
+                expiry_interval = int(get_setting("expiration_check_interval", 5) or 5)
+            finally:
+                db.session.remove()
         self._run_maintenance_job("expiry", expiry_interval, lambda: self.kill_expired_containers(self.app))
 
         def health_check() -> None:
@@ -265,7 +277,7 @@ class ContainerManager:
         self._ensure_connected()
 
         if context_name is not None:
-            if context_name not in self.host_manager._context_configs:
+            if context_name not in self.host_manager.get_configured_contexts():
                 raise ContainerUnavailableException(f"docker context '{context_name}' is not configured")
             try:
                 return getattr(self.host_manager, method_name)(context_name, *args, **kwargs)
@@ -379,7 +391,7 @@ class ContainerManager:
             return container, ctx
         except docker.errors.ImageNotFound:
             self._log_create_error(ctx, image, f"image {image} not found")
-            raise ContainerException("docker image not found")
+            raise ContainerException(IMAGE_NOT_FOUND)
         except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
             self._log_create_error(ctx, image, str(e))
             raise
@@ -553,7 +565,7 @@ class ContainerManager:
     def get_images_for_context(self, context_name: str) -> list[str]:
         self._ensure_connected()
 
-        if context_name not in self.host_manager._context_configs:
+        if context_name not in self.host_manager.get_configured_contexts():
             return []
 
         return self.host_manager.get_images(context_name)
@@ -564,7 +576,7 @@ class ContainerManager:
         results = {}
         targets = [context_name] if context_name else self.host_manager.get_connected_contexts()
         for ctx in targets:
-            if ctx not in self.host_manager._context_configs:
+            if ctx not in self.host_manager.get_configured_contexts():
                 results[ctx] = "failed: context not available"
                 continue
             try:
