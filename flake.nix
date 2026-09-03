@@ -21,7 +21,8 @@
         default = pkgs.mkShell {
           packages = with pkgs; [
             uv
-            (python3.withPackages (ps: [ ps.ruff ps.mypy ps.pytest ps.vulture ps.markupsafe ]))
+            # CTFd pins SQLAlchemy 1.4, the plugin models and coordination queries are 1.4 only
+            (python3.withPackages (ps: [ ps.ruff ps.mypy ps.pytest ps.vulture ps.markupsafe ps.sqlalchemy_1_4 ]))
           ];
           shellHook = ''
             echo "ruff check .          lint"
