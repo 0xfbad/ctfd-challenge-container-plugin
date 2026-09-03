@@ -12,7 +12,8 @@ from CTFd.plugins.challenges import CHALLENGE_CLASSES
 from . import event_bus
 from .challenges import ContainerChallenge
 from .container_manager import ContainerManager
-from .docker_host_manager import LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH
+from .database import prepare_database
+from .docker_host_manager import LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH, _new_docker_client
 from .event_logger import event_logger
 from .flag_type import register as register_freshness_flag
 from .freshness import generate_secret
@@ -44,11 +45,9 @@ def _seed_local_context(app: Flask) -> None:
     if DockerContextModel.query.count() > 0:
         return
 
-    import docker as docker_lib
-
     client = None
     try:
-        client = docker_lib.DockerClient(base_url=f"unix://{LOCAL_SOCKET_PATH}")
+        client = _new_docker_client(f"unix://{LOCAL_SOCKET_PATH}")
         client.ping()
     except Exception:
         return
@@ -73,9 +72,7 @@ def _seed_local_context(app: Flask) -> None:
 
 
 def load(app: Flask) -> None:
-    app.db.create_all()
-    # mysql invalidates open transaction metadata after ddl, so drop the scoped session before seeding
-    app.db.session.remove()
+    prepare_database(app)
     CHALLENGE_CLASSES["container"] = ContainerChallenge
     register_freshness_flag()
 
