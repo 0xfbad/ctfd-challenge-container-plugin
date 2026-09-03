@@ -29,11 +29,64 @@ LOCAL_SOCKET_PATH = "/var/run/docker.sock"
 
 DEFAULT_CLIENT_TIMEOUT = 10  # seconds of http read timeout for control plane calls
 PULL_CLIENT_TIMEOUT = 300  # seconds, pulls can run for minutes
+SSH_CONNECT_TIMEOUT = 10  # seconds, paramiko resets the socket timeout once the transport is up
 THREADPOOL_SIZE = 4
 
 _DockerRunVal = str | int | bool | list[str] | dict[str, str] | dict[str, dict[str, str]]
 
 _T = TypeVar("_T")
+
+_SSH_ADAPTER_PATCH_LOCK = threading.RLock()
+_SSH_ADAPTER_PATCHED = False
+
+
+def _apply_ssh_connect_timeouts(params: dict[str, object]) -> None:
+    """the docker sdk timeout is not forwarded to SSHClient.connect
+    without these a blackholed host occupies a context worker forever
+    """
+    params.update(
+        timeout=SSH_CONNECT_TIMEOUT,
+        banner_timeout=SSH_CONNECT_TIMEOUT,
+        auth_timeout=SSH_CONNECT_TIMEOUT,
+    )
+
+
+def _install_bounded_ssh_adapter() -> None:
+    """process wide timeout fix for docker-py 7.x"""
+    global _SSH_ADAPTER_PATCHED
+    if _SSH_ADAPTER_PATCHED:
+        return
+    with _SSH_ADAPTER_PATCH_LOCK:
+        if _SSH_ADAPTER_PATCHED:
+            return
+        try:
+            from docker.api import client as api_client
+
+            original_adapter = api_client.SSHHTTPAdapter
+        except (ImportError, AttributeError):
+            return  # unit tests stub docker without this module, the pinned dependency always has it
+
+        # the sentinel name is shared with ctfd-remote-desktop so whichever plugin loads first wins
+        if getattr(original_adapter, "_ctfd_bounded_connect", False):
+            _SSH_ADAPTER_PATCHED = True
+            return
+
+        # the base is resolved at runtime so mypy cannot prove it is a class
+        class BoundedSSHHTTPAdapter(original_adapter):  # type: ignore[misc, valid-type]
+            _ctfd_bounded_connect = True
+
+            def _create_paramiko_client(self, base_url):
+                super()._create_paramiko_client(base_url)
+                _apply_ssh_connect_timeouts(self.ssh_params)
+
+        api_client.SSHHTTPAdapter = BoundedSSHHTTPAdapter
+        _SSH_ADAPTER_PATCHED = True
+
+
+def _new_docker_client(endpoint: str, timeout: int = DEFAULT_CLIENT_TIMEOUT) -> DockerClient:
+    if endpoint.startswith("ssh://"):
+        _install_bounded_ssh_adapter()
+    return docker.DockerClient(base_url=endpoint, timeout=timeout)
 
 
 def _confirm_removal_in_progress(container: Container, error: docker.errors.APIError) -> bool:
@@ -190,7 +243,7 @@ def discover_contexts() -> list[DiscoveredContext]:
 def ping_endpoint(endpoint: str, timeout: int = 3) -> bool:
     client = None
     try:
-        client = docker.DockerClient(base_url=endpoint, timeout=timeout)
+        client = _new_docker_client(endpoint, timeout=timeout)
         client.ping()
         return True
     except Exception:
@@ -255,7 +308,7 @@ class DockerHostManager:
                 if not url:
                     raise Exception(f"no client for context '{context_name}'")
 
-                client = docker.DockerClient(base_url=url, timeout=DEFAULT_CLIENT_TIMEOUT)
+                client = _new_docker_client(url)
                 self._clients[key] = client
 
         # close outside the lock, paramiko teardown can block on ssh for seconds
@@ -316,7 +369,7 @@ class DockerHostManager:
             def _check(endpoint=endpoint):
                 client = None
                 try:
-                    client = docker.DockerClient(base_url=endpoint, timeout=DEFAULT_CLIENT_TIMEOUT)
+                    client = _new_docker_client(endpoint)
                     client.ping()
                     return None
                 except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
@@ -698,7 +751,7 @@ class DockerHostManager:
             raise Exception(f"no client for context '{context_name}'")
 
         def _do():
-            client = docker.DockerClient(base_url=url, timeout=PULL_CLIENT_TIMEOUT)
+            client = _new_docker_client(url, timeout=PULL_CLIENT_TIMEOUT)
             try:
                 client.images.pull(image)
                 return "ok"
