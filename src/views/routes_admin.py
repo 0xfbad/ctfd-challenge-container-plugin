@@ -10,11 +10,12 @@ import socket as _socket
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import UTC, datetime, tzinfo
 from statistics import median
 
-import docker
 from flask import Response, current_app, jsonify, render_template, request, stream_with_context
 
 from CTFd.models import Teams, Users, db
@@ -27,6 +28,7 @@ from ..docker_host_manager import (
     LOCAL_CONTEXT_NAME,
     LOCAL_SOCKET_PATH,
     ImageInfo,
+    _new_docker_client,
     _resolve_endpoint,
     discover_contexts,
     ping_endpoint,
@@ -42,6 +44,7 @@ from ..event_logger import (
 )
 from ..exceptions import ContainerException
 from ..freshness import generate_secret
+from ..messages import INVALID_REQUEST
 from ..models import (
     CONTEXT_STATES,
     ContainerChallengeModel,
@@ -64,12 +67,15 @@ from ..utils import (
     validate_settings_patch,
 )
 from . import containers_bp
-from .helpers import cleanup_instance, get_hostname_for_context, kill_container, resolve_expiration
+from .helpers import cleanup_instance, get_hostname_for_context, kill_container, request_json, resolve_expiration
 
 logger = logging.getLogger(__name__)
 
 _MAX_ANALYTICS_ROWS = 50000
 _MAX_SSE_CONNECTIONS = 10
+_CONTEXT_TEST_TIMEOUT = 5  # seconds, this ping runs synchronously inside an admin request
+# the settings value column is TEXT, an oversized write fails under mysql strict mode
+_MAX_IMAGE_CACHE_BYTES = 60_000
 _sse_connection_count = 0
 _sse_connection_lock = threading.Lock()
 
@@ -421,51 +427,66 @@ def route_get_flag_sharing():
     return jsonify(events=events)
 
 
-@containers_bp.route("/api/events/stream", methods=["GET"])
-@admins_only
-def route_events_stream():
+@contextmanager
+def _sse_connection_slot() -> Iterator[bool]:
+    """claimed from inside the generator, a client that aborts before the first chunk never starts it"""
     global _sse_connection_count
 
     with _sse_connection_lock:
+        claimed = _sse_connection_count < _MAX_SSE_CONNECTIONS
+        if claimed:
+            _sse_connection_count += 1
+    try:
+        yield claimed
+    finally:
+        if claimed:
+            with _sse_connection_lock:
+                _sse_connection_count -= 1
+
+
+@containers_bp.route("/api/events/stream", methods=["GET"])
+@admins_only
+def route_events_stream():
+    with _sse_connection_lock:
         if _sse_connection_count >= _MAX_SSE_CONNECTIONS:
             return jsonify(error="too many event stream connections"), 429
-        _sse_connection_count += 1
 
     def event_stream():
-        global _sse_connection_count
-        q = queue.Queue(maxsize=100)
+        with _sse_connection_slot() as claimed:
+            if not claimed:
+                return
 
-        def listener(event):
-            try:
-                q.put_nowait(event)
-            except queue.Full:
-                try:
-                    q.get_nowait()
-                except queue.Empty:
-                    pass
+            q = queue.Queue(maxsize=100)
+
+            def listener(event):
                 try:
                     q.put_nowait(event)
                 except queue.Full:
-                    pass
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        q.put_nowait(event)
+                    except queue.Full:
+                        pass
 
-        event_logger.add_listener(listener)
+            event_logger.add_listener(listener)
 
-        try:
-            recent_events = event_logger.get_recent_events(limit=200)
-            for event in recent_events:
-                yield f"data: {json.dumps(event)}\n\n"
+            try:
+                recent_events = event_logger.get_recent_events(limit=200)
+                for event in recent_events:
+                    yield f"data: {json.dumps(event)}\n\n"
 
-            while True:
-                try:
-                    event_data = q.get(timeout=30)
-                    yield f"data: {json.dumps(event_data)}\n\n"
-                except queue.Empty:
-                    yield ": keepalive\n\n"
+                while True:
+                    try:
+                        event_data = q.get(timeout=30)
+                        yield f"data: {json.dumps(event_data)}\n\n"
+                    except queue.Empty:
+                        yield ": keepalive\n\n"
 
-        finally:
-            event_logger.remove_listener(listener)
-            with _sse_connection_lock:
-                _sse_connection_count -= 1
+            finally:
+                event_logger.remove_listener(listener)
 
     return Response(
         stream_with_context(event_stream()),
@@ -482,9 +503,9 @@ def route_events_stream():
 @admins_only
 def route_kill_container():
     if not request.is_json:
-        return jsonify(error="invalid request"), 400
+        return jsonify(error=INVALID_REQUEST), 400
 
-    container_id = request.json.get("container_id")
+    container_id = (request_json() or {}).get("container_id")
     if not container_id:
         return jsonify(error="no container_id specified"), 400
 
@@ -514,9 +535,9 @@ def route_kill_container():
 @admins_only
 def route_admin_extend():
     if not request.is_json:
-        return jsonify(error="invalid request"), 400
+        return jsonify(error=INVALID_REQUEST), 400
 
-    container_id = request.json.get("container_id")
+    container_id = (request_json() or {}).get("container_id")
     if not container_id:
         return jsonify(error="no container_id specified"), 400
 
@@ -580,8 +601,8 @@ def route_purge_containers():
 @admins_only
 def route_cleanup_instance():
     if not request.is_json:
-        return jsonify(error="invalid request"), 400
-    instance_id = request.json.get("instance_id")
+        return jsonify(error=INVALID_REQUEST), 400
+    instance_id = (request_json() or {}).get("instance_id")
     if not isinstance(instance_id, str) or not re.fullmatch(r"[0-9a-f]{32}", instance_id):
         return jsonify(error="invalid instance_id"), 400
     result = cleanup_instance(instance_id, reason="admin_cleanup")
@@ -754,7 +775,7 @@ def route_api_list_contexts():
 @admins_only
 def route_api_add_context():
     if not request.is_json:
-        return jsonify(error="invalid request"), 400
+        return jsonify(error=INVALID_REQUEST), 400
 
     try:
         payload = _context_payload(creating=True)
@@ -825,7 +846,7 @@ def _endpoint_change_conflict(context: DockerContextModel) -> tuple[Response, in
 @admins_only
 def route_api_update_context(context_id):
     if not request.is_json:
-        return jsonify(error="invalid request"), 400
+        return jsonify(error=INVALID_REQUEST), 400
 
     context = DockerContextModel.query.get(context_id)
     if not context:
@@ -964,7 +985,7 @@ def route_api_test_context(context_id):
 
     client = None
     try:
-        client = docker.DockerClient(base_url=endpoint)
+        client = _new_docker_client(endpoint, timeout=_CONTEXT_TEST_TIMEOUT)
         client.ping()
         return jsonify(success="context is reachable")
     except Exception as exc:  # noqa: BLE001
@@ -1085,7 +1106,11 @@ def route_api_images_matrix():
 
     display_images = sorted(matrix.keys())
 
-    set_setting("image_cache", json.dumps({"matrix": matrix, "contexts": connected, "scanned_at": time.time()}))
+    payload = json.dumps({"matrix": matrix, "contexts": connected, "scanned_at": time.time()})
+    if len(payload.encode()) > _MAX_IMAGE_CACHE_BYTES:
+        logger.warning("image cache of %s bytes exceeds the settings column, skipping the write", len(payload))
+    else:
+        set_setting("image_cache", payload)
 
     return jsonify(images=display_images, contexts=connected, matrix=matrix)
 
@@ -1095,9 +1120,16 @@ def _load_image_cache() -> dict[str, object] | None:
     if not raw or not isinstance(raw, str):
         return None
     try:
-        return json.loads(raw)
+        cache = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return None
+
+    if not isinstance(cache, dict) or not isinstance(cache.get("matrix"), dict):
+        return None
+    if "contexts" not in cache or "scanned_at" not in cache:
+        return None
+
+    return cache
 
 
 @containers_bp.route("/api/images/cache", methods=["GET"])
@@ -1146,13 +1178,13 @@ def route_api_reload_contexts():
 @admins_only
 def route_pull_image():
     if not request.is_json:
-        return jsonify(error="invalid request"), 400
+        return jsonify(error=INVALID_REQUEST), 400
 
-    image = request.json.get("image")
+    image = (request_json() or {}).get("image")
     if not image:
         return jsonify(error="image is required"), 400
 
-    context_name = request.json.get("context_name")
+    context_name = (request_json() or {}).get("context_name")
 
     container_manager = current_app.container_manager
     try:
@@ -1186,7 +1218,7 @@ def route_get_settings():
 @admins_only
 def route_update_settings():
     if not request.is_json:
-        return jsonify(error="invalid request"), 400
+        return jsonify(error=INVALID_REQUEST), 400
 
     try:
         changed = validate_settings_patch(request.get_json(silent=True))
@@ -1219,7 +1251,7 @@ def route_update_settings():
 @admins_only
 def route_update_freshness_secret():
     if not request.is_json:
-        return jsonify(error="invalid request"), 400
+        return jsonify(error=INVALID_REQUEST), 400
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict) or payload.get("action") not in {"regenerate", "disable"}:
         return jsonify(error="action must be regenerate or disable"), 400
