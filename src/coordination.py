@@ -251,7 +251,7 @@ class InstanceCoordinator:
         raise CreateCapacityUnavailable("could not reserve an instance after concurrent updates")
 
     def _attempt_reserve(self, session, request: _ReserveRequest) -> InstanceReservation | None:
-        """returns None when the placement version cas loses, the caller retries from a fresh snapshot"""
+        """returns None when the context stopped admitting placement, the caller retries from a fresh snapshot"""
 
         existing = self._existing_reservation(session, request.identity, request.challenge_id)
         if existing is not None:
@@ -370,23 +370,24 @@ class InstanceCoordinator:
                 )
                 .all()
             }
-            create_slot = next(
-                (slot for slot in range(max_concurrent_creates) if slot not in used_create_slots),
-                None,
-            )
-            if create_slot is not None:
-                return context, create_slot
+            free_slots = [slot for slot in range(max_concurrent_creates) if slot not in used_create_slots]
+            if free_slots:
+                # a deterministic pick makes every concurrent requester target the same slot
+                return context, random.choice(free_slots)
 
         raise CreateCapacityUnavailable("all docker context create slots are busy")
 
     @staticmethod
     def _bump_placement_version(session, context: DockerContextModel) -> bool:
-        observed_placement_version = int(context.placement_version)
+        """placement_version is a placement counter and the row lock carrier, not a cas token
+
+        the update x-locks the context row, which linearizes placement against an admin drain,
+        and the state predicates fail it closed once a drain has committed
+        """
         updated = (
             session.query(DockerContextModel)
             .filter(
                 DockerContextModel.id == context.id,
-                DockerContextModel.placement_version == observed_placement_version,
                 DockerContextModel.state == "active",
                 DockerContextModel.health_state == "healthy",
             )
