@@ -218,6 +218,15 @@ class ContainerManager:
             coalesce=True,
             max_instances=1,
         )
+        # its own job so a dead host connect never delays the expiry tick
+        self.expiration_scheduler.add_job(
+            func=self._warm_up_tick,
+            trigger="interval",
+            seconds=5,
+            misfire_grace_time=30,
+            coalesce=True,
+            max_instances=1,
+        )
         self.expiration_scheduler.start()
 
         def _shutdown_scheduler():
@@ -252,14 +261,16 @@ class ContainerManager:
             logger.exception("maintenance job %s failed", name)
             return False
 
-    def _maintenance_tick(self) -> None:
-        # both of these run on every worker, under the cross worker maintenance lock only one worker
-        # would ever populate its catalog and connectivity and the other four would degrade to no-ops
-        self._refresh_catalog()
+    def _warm_up_tick(self) -> None:
+        # every worker warms its own connectivity, under the maintenance lock only one would
         try:
             self.host_manager.warm_up()
         except Exception:
             logger.exception("context warm up failed")
+
+    def _maintenance_tick(self) -> None:
+        # every worker refreshes its own catalog, the cross worker lock below is only for the jobs
+        self._refresh_catalog()
 
         with self.app.app_context():
             try:
