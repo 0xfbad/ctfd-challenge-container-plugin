@@ -39,6 +39,8 @@ CPU_QUOTA_BASE = 100000
 
 NAME_PREFIX = "chal-"
 
+CATALOG_REFRESH_INTERVAL = 10  # seconds between per worker catalog re-reads, the load is a plain db query
+
 _SSH_CAPS = ["SYS_CHROOT", "SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "AUDIT_WRITE"]
 _RESERVATION_ID = re.compile(r"^[0-9a-f]{32}$")
 _MAINTENANCE_LOCK_PREFIX = "ctfd-challenge-containers"
@@ -164,6 +166,7 @@ class ContainerManager:
         self.app = app
         self.host_manager = DockerHostManager()
         self.orchestrator = Orchestrator(self.host_manager)
+        self._last_catalog_refresh: float = 0.0
 
         self.initialize_connection()
 
@@ -250,6 +253,14 @@ class ContainerManager:
             return False
 
     def _maintenance_tick(self) -> None:
+        # both of these run on every worker, under the cross worker maintenance lock only one worker
+        # would ever populate its catalog and connectivity and the other four would degrade to no-ops
+        self._refresh_catalog()
+        try:
+            self.host_manager.warm_up()
+        except Exception:
+            logger.exception("context warm up failed")
+
         with self.app.app_context():
             try:
                 expiry_interval = int(get_setting("expiration_check_interval", 5) or 5)
@@ -265,6 +276,21 @@ class ContainerManager:
                     db.session.remove()
 
         self._run_maintenance_job("health", 30, health_check)
+
+    def _refresh_catalog(self) -> None:
+        if time.time() - self._last_catalog_refresh < CATALOG_REFRESH_INTERVAL:
+            return
+
+        # stamped before the call so a raising refresh cannot hot loop
+        self._last_catalog_refresh = time.time()
+        try:
+            with self.app.app_context():
+                try:
+                    self.load_docker_contexts()
+                finally:
+                    db.session.remove()
+        except Exception:
+            logger.exception("catalog refresh failed")
 
     def _dispatch_to_context(
         self,
@@ -289,7 +315,12 @@ class ContainerManager:
                 result = getattr(self.host_manager, method_name)(ctx, *args, **kwargs)
                 if result is not None and result != default:
                     return result
-            except (docker.errors.NotFound, docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+            except (
+                docker.errors.NotFound,
+                docker.errors.DockerException,
+                paramiko.ssh_exception.SSHException,
+                ContainerUnavailableException,
+            ):
                 continue
         return default
 
@@ -304,7 +335,10 @@ class ContainerManager:
 
         result = set()
         for ctx in self.host_manager.get_connected_contexts():
-            result.update(self.host_manager.get_running_container_ids(ctx))
+            try:
+                result.update(self.host_manager.get_running_container_ids(ctx))
+            except ContainerUnavailableException:
+                continue
         return result
 
     def get_container_logs(self, container_id: str, context_name: str | None = None, tail: int = 200) -> str:
@@ -336,8 +370,8 @@ class ContainerManager:
 
         if not _valid_reservation_identity(instance_id) or not _valid_reservation_identity(provision_token):
             raise ContainerException("managed reservations require valid instance and provision identities")
-        if context_name not in self.host_manager.get_connected_contexts():
-            raise ContainerException("reserved docker context is not reachable")
+        if context_name not in self.host_manager.get_configured_contexts():
+            raise ContainerException("reserved docker context is not configured")
 
         kwargs: dict[str, _DockerRunVal] = _resource_kwargs(max_memory_mb, max_cpu)
 
@@ -422,8 +456,8 @@ class ContainerManager:
 
         if not _valid_reservation_identity(instance_id) or not _valid_reservation_identity(provision_token):
             raise ContainerException("managed reservations require valid instance and provision identities")
-        if context_name not in self.host_manager.get_connected_contexts():
-            raise ContainerException("reserved docker context is not reachable")
+        if context_name not in self.host_manager.get_configured_contexts():
+            raise ContainerException("reserved docker context is not configured")
 
         services: dict[str, dict[str, str | dict[str, str]]] = json.loads(services_json) if services_json else {}
         network_cfg: dict[str, str | dict[str, str]] = json.loads(network_json) if network_json else {}
@@ -547,7 +581,11 @@ class ContainerManager:
 
         images_by_context: dict[str, list[str]] = {}
         for ctx in self.host_manager.get_connected_contexts():
-            for tag in self.host_manager.get_images(ctx):
+            try:
+                tags = self.host_manager.get_images(ctx)
+            except ContainerUnavailableException:
+                continue
+            for tag in tags:
                 if tag not in images_by_context:
                     images_by_context[tag] = []
                 images_by_context[tag].append(ctx)
@@ -586,13 +624,7 @@ class ContainerManager:
         return results
 
     def is_connected(self) -> bool:
-        if not self.host_manager.has_contexts():
-            return False
-
-        for ctx in self.host_manager.get_connected_contexts():
-            if self.host_manager.ping(ctx):
-                return True
-        return False
+        return bool(self.host_manager.get_connected_contexts())
 
     def get_connected_contexts(self) -> list[str]:
         return self.host_manager.get_connected_contexts()
@@ -607,7 +639,7 @@ class ContainerManager:
 
     def _kill_expired_containers_inner(self) -> None:
         if not self.host_manager.has_contexts():
-            # reload from db only, initialize_connection tears down the scheduler running this job and apscheduler cannot join the current thread
+            # cheap catalog re-read, initialize_connection tears down the scheduler running this job and apscheduler cannot join the current thread
             try:
                 self.load_docker_contexts()
             except ContainerException:

@@ -661,8 +661,17 @@ def route_get_images_for_context(context_name):
 @admins_only
 def route_get_contexts():
     container_manager = current_app.container_manager
-    contexts = container_manager.get_connected_contexts()
+    contexts = container_manager.host_manager.get_configured_contexts()
     return jsonify(contexts=contexts)
+
+
+def _probe_context(container_manager, context_name: str) -> None:
+    """one bounded probe on an explicit admin action so a freshly touched context reports health immediately"""
+    orchestrator = container_manager.orchestrator
+    if container_manager.host_manager.ping(context_name):
+        orchestrator.mark_healthy(context_name)
+    else:
+        orchestrator.mark_unhealthy(context_name, "connection failed")
 
 
 def _context_payload(*, creating: bool) -> dict[str, object]:
@@ -808,6 +817,7 @@ def route_api_add_context():
 
     container_manager = current_app.container_manager
     container_manager.load_docker_contexts()
+    _probe_context(container_manager, context_name)
 
     event_logger.log_event(
         "context_changed",
@@ -891,6 +901,7 @@ def route_api_update_context(context_id):
 
     container_manager = current_app.container_manager
     container_manager.load_docker_contexts()
+    _probe_context(container_manager, context.context_name)
 
     event_logger.log_event(
         "context_changed",

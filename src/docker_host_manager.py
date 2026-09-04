@@ -29,7 +29,8 @@ LOCAL_SOCKET_PATH = "/var/run/docker.sock"
 
 DEFAULT_CLIENT_TIMEOUT = 10  # seconds of http read timeout for control plane calls
 PULL_CLIENT_TIMEOUT = 300  # seconds, pulls can run for minutes
-SSH_CONNECT_TIMEOUT = 10  # seconds, paramiko resets the socket timeout once the transport is up
+CLIENT_FAILURE_COOLDOWN = 60  # seconds a context stays negative cached after a failed client construction
+SSH_CONNECT_TIMEOUT = 10  # seconds, fallback ssh connect bound when no per call value is set
 THREADPOOL_SIZE = 4
 
 _DockerRunVal = str | int | bool | list[str] | dict[str, str] | dict[str, dict[str, str]]
@@ -38,17 +39,15 @@ _T = TypeVar("_T")
 
 _SSH_ADAPTER_PATCH_LOCK = threading.RLock()
 _SSH_ADAPTER_PATCHED = False
+_SSH_CONNECT_TIMEOUT = threading.local()
 
 
-def _apply_ssh_connect_timeouts(params: dict[str, object]) -> None:
+def _apply_ssh_connect_timeouts(params: dict[str, object], timeout: int | float) -> None:
     """the docker sdk timeout is not forwarded to SSHClient.connect
     without these a blackholed host occupies a context worker forever
     """
-    params.update(
-        timeout=SSH_CONNECT_TIMEOUT,
-        banner_timeout=SSH_CONNECT_TIMEOUT,
-        auth_timeout=SSH_CONNECT_TIMEOUT,
-    )
+    bounded = max(1.0, float(timeout))
+    params.update(timeout=bounded, banner_timeout=bounded, auth_timeout=bounded)
 
 
 def _install_bounded_ssh_adapter() -> None:
@@ -74,19 +73,42 @@ def _install_bounded_ssh_adapter() -> None:
         # the base is resolved at runtime so mypy cannot prove it is a class
         class BoundedSSHHTTPAdapter(original_adapter):  # type: ignore[misc, valid-type]
             _ctfd_bounded_connect = True
+            _ctfd_ssh_connect_timeout = _SSH_CONNECT_TIMEOUT
 
             def _create_paramiko_client(self, base_url):
                 super()._create_paramiko_client(base_url)
-                _apply_ssh_connect_timeouts(self.ssh_params)
+                # resolved off the class so a foreign plugin adapter keeps owning its own local
+                timeout = getattr(getattr(type(self), "_ctfd_ssh_connect_timeout", None), "value", SSH_CONNECT_TIMEOUT)
+                _apply_ssh_connect_timeouts(self.ssh_params, timeout)
 
         api_client.SSHHTTPAdapter = BoundedSSHHTTPAdapter
         _SSH_ADAPTER_PATCHED = True
 
 
+def _ssh_timeout_local() -> threading.local:
+    """the installed adapter may belong to another plugin, publish the per call timeout where it will read it"""
+    try:
+        from docker.api import client as api_client
+
+        return getattr(api_client.SSHHTTPAdapter, "_ctfd_ssh_connect_timeout", _SSH_CONNECT_TIMEOUT)
+    except (ImportError, AttributeError):
+        return _SSH_CONNECT_TIMEOUT
+
+
 def _new_docker_client(endpoint: str, timeout: int = DEFAULT_CLIENT_TIMEOUT) -> DockerClient:
-    if endpoint.startswith("ssh://"):
-        _install_bounded_ssh_adapter()
-    return docker.DockerClient(base_url=endpoint, timeout=timeout)
+    if not endpoint.startswith("ssh://"):
+        return docker.DockerClient(base_url=endpoint, timeout=timeout)
+
+    _install_bounded_ssh_adapter()
+    local = _ssh_timeout_local()
+    local.value = timeout
+    try:
+        return docker.DockerClient(base_url=endpoint, timeout=timeout)
+    finally:
+        try:
+            del local.value
+        except AttributeError:
+            pass
 
 
 def _confirm_removal_in_progress(container: Container, error: docker.errors.APIError) -> bool:
@@ -266,10 +288,22 @@ class DockerHostManager:
         self._clients: dict[tuple[str, int], DockerClient] = {}
         self._config_generation: int = 0
         self._client_generation: int = -1
+        # negative cache, a dead host costs one bounded connect per cooldown window instead of one per request
+        self._client_failures: dict[str, float] = {}
         # reentrant so a wrapped op can re-enter the lock protected helpers without deadlocking
         self._lock: threading.RLock = threading.RLock()
         # one pool per context keeps paramiko blocking off the gevent hub, so a hung host cannot stall other requests
         self._threadpools: dict[str, gevent.threadpool.ThreadPool] = {}
+
+    def _mark_connected(self, context_name: str) -> None:
+        self._connected_contexts.add(context_name)
+        self._client_failures.pop(context_name, None)
+
+    def _mark_connect_failed(self, context_name: str) -> None:
+        self._client_failures[context_name] = time.time()
+
+    def _cooling_down(self, context_name: str) -> bool:
+        return time.time() - self._client_failures.get(context_name, 0.0) < CLIENT_FAILURE_COOLDOWN
 
     def _get_threadpool(self, context_name: str) -> gevent.threadpool.ThreadPool:
         with self._lock:
@@ -280,6 +314,11 @@ class DockerHostManager:
             return pool
 
     def _call(self, context_name: str, fn, *args, **kwargs):
+        # gated in the calling greenlet so a dead host consumes no threadpool slot
+        with self._lock:
+            if self._cooling_down(context_name):
+                raise ContainerUnavailableException(f"docker context '{context_name}' is unreachable")
+
         # without monkey patching there is no gevent hub and pool apply hangs in futex, flask cli hits this
         if not gevent.monkey.is_module_patched("threading"):
             return fn(*args, **kwargs)
@@ -308,7 +347,12 @@ class DockerHostManager:
                 if not url:
                     raise Exception(f"no client for context '{context_name}'")
 
-                client = _new_docker_client(url)
+                try:
+                    client = _new_docker_client(url)
+                except Exception:
+                    self._mark_connect_failed(context_name)
+                    raise
+                self._mark_connected(context_name)
                 self._clients[key] = client
 
         # close outside the lock, paramiko teardown can block on ssh for seconds
@@ -338,12 +382,17 @@ class DockerHostManager:
         try:
             result = fn()
             with self._lock:
-                self._connected_contexts.add(context_name)
+                self._mark_connected(context_name)
             return result
+        # NotFound and ImageNotFound subclass APIError, an escaped 404 means the daemon answered so keep the client
+        except docker.errors.APIError:
+            with self._lock:
+                self._mark_connected(context_name)
+            raise
         except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
             self._clear_client(context_name)
             raise
-        # fn must handle its own NotFound and KeyError, anything reaching here means the cached client is unusable
+        # fn must handle its own KeyError, anything reaching here means the cached client is unusable
         except Exception:
             self._clear_client(context_name)
             raise ContainerUnavailableException(f"transient client failure on {context_name}")
@@ -352,9 +401,9 @@ class DockerHostManager:
         return self._call(context_name, lambda: self._invoke_client_op(context_name, fn))
 
     def load_contexts(self, contexts: list[DockerContextModel]) -> None:
+        """catalog only, no network io, connectivity is established by warm_up and ping"""
         new_configs = {}
         new_pub_hostnames = {}
-        new_connected = set()
 
         for ctx in contexts:
             endpoint = _resolve_endpoint(ctx.context_name, ctx.hostname)
@@ -362,41 +411,30 @@ class DockerHostManager:
                 logger.warning(f"no endpoint for context '{ctx.context_name}', skipping")
                 continue
 
-            # configured regardless of the ping result below
             new_configs[ctx.context_name] = endpoint
             new_pub_hostnames[ctx.context_name] = ctx.pub_hostname
 
-            def _check(endpoint=endpoint):
-                client = None
-                try:
-                    client = _new_docker_client(endpoint)
-                    client.ping()
-                    return None
-                except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
-                    return e
-                finally:
-                    if client:
-                        try:
-                            client.close()
-                        except Exception:
-                            pass
-
-            try:
-                err = self._call(ctx.context_name, _check)
-            except Exception as e:
-                err = e
-
-            if err is None:
-                new_connected.add(ctx.context_name)
-                logger.info(f"connected to context '{ctx.context_name}' at {endpoint}")
-            else:
-                logger.error(f"could not connect to context '{ctx.context_name}': {err}")
-
         with self._lock:
+            unchanged = {name for name, url in new_configs.items() if self._context_configs.get(name) == url}
+            # bumping unconditionally would discard every cached client on each catalog refresh
+            if new_configs != self._context_configs:
+                self._config_generation += 1
             self._context_configs = new_configs
-            self._connected_contexts = new_connected
             self._pub_hostnames = new_pub_hostnames
-            self._config_generation += 1
+            self._connected_contexts &= unchanged
+            self._client_failures = {name: at for name, at in self._client_failures.items() if name in unchanged}
+
+    def warm_up(self) -> None:
+        """serial bounded probes for contexts that are configured but not known reachable"""
+        with self._lock:
+            targets = [
+                name
+                for name in self._context_configs
+                if name not in self._connected_contexts and not self._cooling_down(name)
+            ]
+
+        for name in targets:
+            self.ping(name)
 
     def get_pub_hostname(self, context_name: str) -> str | None:
         return self._pub_hostnames.get(context_name)
@@ -410,8 +448,9 @@ class DockerHostManager:
             return sorted(self._context_configs)
 
     def has_contexts(self) -> bool:
+        """configured, not connected, reachability is tracked separately"""
         with self._lock:
-            return bool(self._connected_contexts)
+            return bool(self._context_configs)
 
     def ping(self, context_name: str) -> bool:
         with self._lock:
@@ -421,12 +460,15 @@ class DockerHostManager:
             return False
 
         # ephemeral client, a cached paramiko transport wedged on a dead socket blocks the health check for minutes
+        # never gated on the cooldown, this is the recovery path
         if not ping_endpoint(url, timeout=3):
             self._clear_client(context_name)
+            with self._lock:
+                self._mark_connect_failed(context_name)
             return False
 
         with self._lock:
-            self._connected_contexts.add(context_name)
+            self._mark_connected(context_name)
 
         return True
 

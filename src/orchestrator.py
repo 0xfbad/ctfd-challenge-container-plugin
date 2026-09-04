@@ -10,8 +10,8 @@ from CTFd.models import db
 
 from .coordination import InstanceCoordinator
 from .docker_host_manager import DockerHostManager
-from .event_logger import MetadataDict, event_logger
-from .models import ContainerChallengeModel, DockerContextModel
+from .event_logger import event_logger
+from .models import DockerContextModel
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +33,6 @@ class Orchestrator:
         self.weights: dict[str, int] = {}
         self.lock = Lock()
 
-    @staticmethod
-    def _challenge_image() -> str | None:
-        chal = ContainerChallengeModel.query.filter(ContainerChallengeModel.image.isnot(None)).first()
-        return chal.image if chal else None
-
     def _refresh_db_counts(self) -> None:
         contexts = DockerContextModel.query.all()
         counts_by_id = InstanceCoordinator.placement_counts(db.session)
@@ -53,50 +48,12 @@ class Orchestrator:
             }
 
     def load_from_db(self) -> None:
+        # catalog only, health is owned by the periodic health check so boot does no network io
         # no state filter, draining and retired contexts still need cleanup and down hosts stay retryable
         contexts = DockerContextModel.query.all()
         self.host_manager.load_contexts(contexts)
-        connected = set(self.host_manager.get_connected_contexts())
-        now = time.time()
-        events = []
-
-        for context in contexts:
-            name = context.context_name
-            is_connected = name in connected
-            previous_health = context.health_state
-            context.health_state = "healthy" if is_connected else "unhealthy"
-            context.health_checked_at = now
-            context.health_error = None if is_connected else "connection failed"
-
-            if is_connected:
-                meta: MetadataDict = {"context_name": name}
-                image_info = self.host_manager.get_image_info(name, self._challenge_image())
-                if image_info:
-                    meta["image"] = {
-                        "id": image_info["id"],
-                        "size_mb": image_info["size_mb"],
-                        "created": image_info["created"],
-                    }
-                if previous_health != "healthy":
-                    events.append(("host_healthy", f"context {name} is healthy", "info", meta))
-            elif previous_health != "unhealthy":
-                events.append(
-                    (
-                        "host_unhealthy",
-                        f"context {name} marked unhealthy: connection failed",
-                        "warning",
-                        {"context_name": name, "reason": "connection failed"},
-                    )
-                )
-
-        db.session.commit()
         self._refresh_db_counts()
-
-        for event_type, message, level, metadata in events:
-            event_logger.log_event(event_type, message, level=level, metadata=metadata)
-
-        healthy_count = sum(1 for context in contexts if context.health_state == "healthy")
-        logger.info("loaded %d configured contexts, %d healthy", len(contexts), healthy_count)
+        logger.info("loaded %d configured contexts", len(contexts))
 
     def mark_unhealthy(self, context_name: str, reason: str = "unreachable") -> None:
         context = DockerContextModel.query.filter_by(context_name=context_name).first()

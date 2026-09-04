@@ -13,7 +13,7 @@ from . import event_bus
 from .challenges import ContainerChallenge
 from .container_manager import ContainerManager
 from .database import prepare_database
-from .docker_host_manager import LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH, _new_docker_client
+from .docker_host_manager import LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH
 from .event_logger import event_logger
 from .flag_type import register as register_freshness_flag
 from .freshness import generate_secret
@@ -45,18 +45,9 @@ def _seed_local_context(app: Flask) -> None:
     if DockerContextModel.query.count() > 0:
         return
 
-    client = None
-    try:
-        client = _new_docker_client(f"unix://{LOCAL_SOCKET_PATH}")
-        client.ping()
-    except Exception:
+    # fail closed without touching the daemon, the health tick decides reachability
+    if not os.path.exists(LOCAL_SOCKET_PATH):
         return
-    finally:
-        if client:
-            try:
-                client.close()
-            except Exception:
-                pass
 
     db.session.add(
         DockerContextModel(
