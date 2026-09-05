@@ -17,7 +17,7 @@ from CTFd.exceptions.challenges import (
 from CTFd.models import Teams, Users, db
 from CTFd.plugins.challenges import BaseChallenge, calculate_value
 from CTFd.plugins.challenges.decay import DECAY_FUNCTIONS
-from CTFd.utils.user import get_current_user, get_ip
+from CTFd.utils.user import get_current_user, get_ip, is_admin
 
 from .challenge_config import normalize_challenge_fields, normalize_services
 from .coordination import InstanceCoordinator
@@ -414,19 +414,8 @@ class ContainerChallenge(BaseChallenge):
             "id": challenge.id,
             "name": challenge.name,
             "value": challenge.value,
-            "docker_context": challenge.docker_context,
-            "image": challenge.image,
-            "port": challenge.port,
-            "command": challenge.command,
             "ctype": challenge.ctype,
-            "ssh_username": challenge.ssh_username,
-            "ssh_password": challenge.ssh_password,
             "expiration_seconds": challenge.expiration_seconds,
-            "max_memory_mb": challenge.max_memory_mb,
-            "max_cpu": challenge.max_cpu,
-            "cap_add": challenge.cap_add,
-            "services_json": challenge.services_json,
-            "network_json": challenge.network_json,
             "description": challenge.description,
             "connection_info": challenge.connection_info,
             "category": challenge.category,
@@ -444,4 +433,20 @@ class ContainerChallenge(BaseChallenge):
                 "scripts": cls.scripts,
             },
         }
+        if is_admin():
+            data.update(
+                {
+                    "docker_context": challenge.docker_context,
+                    "image": challenge.image,
+                    "port": challenge.port,
+                    "command": challenge.command,
+                    "ssh_username": challenge.ssh_username,
+                    "ssh_password": challenge.ssh_password,
+                    "max_memory_mb": challenge.max_memory_mb,
+                    "max_cpu": challenge.max_cpu,
+                    "cap_add": challenge.cap_add,
+                    "services_json": challenge.services_json,
+                    "network_json": challenge.network_json,
+                }
+            )
         return data
