@@ -182,7 +182,6 @@ function view_container_info(challengeId) {
             icon.className = 'fas fa-exclamation-triangle';
             icon.style.marginRight = '6px';
             banner.appendChild(icon);
-            // fallback copy only, src/messages.py is the source of truth
             banner.appendChild(document.createTextNode(
                 data.message || 'This challenge has a broken configuration. This is on our end, not yours.'
             ));
@@ -214,20 +213,18 @@ function view_container_info(challengeId) {
 }
 
 var _requestInFlight = false;
-// the retry wait outlives _requestInFlight, the finally handler clears that flag as soon as the first response lands
-var _retryPending = false;
+var _retryPending = false; // request cleanup clears _requestInFlight before the retry timer fires
 
-// mirror of _PERMANENT_ERROR_PATTERNS and _USER_ERROR_PATTERNS in src/utils.py, change both together
 function _isPermanentError(msg) {
     if (!msg) return false;
-    var permanent = ["image not found", "challenge not found"];
+    var permanent = ["image not found", "challenge not found"]; // keep fallback patterns in src/utils.py consistent
     var lower = msg.toLowerCase();
     return permanent.some(function(p) { return lower.indexOf(p) !== -1; });
 }
 
 function _isUserError(msg) {
     if (!msg) return false;
-    var userErrs = [
+    var userErrs = [ // keep fallback patterns in src/utils.py consistent
         "you can only spawn",
         "rate limit", "too many",
         "not a member of a team",
@@ -247,7 +244,6 @@ function _errorKind(data, msg) {
 }
 
 function _showServerError(container) {
-    // fallback copy only, src/messages.py is the source of truth
     container.innerHTML = '<div class="server-error-banner">' +
         '<i class="fas fa-exclamation-triangle banner-icon"></i>' +
         '<div class="error-title">This challenge isn\'t available right now</div>' +
@@ -286,12 +282,10 @@ function _doContainerRequest(challengeId, isRetry) {
         if (data.error || data.message) {
             var errMsg = data.error || data.message;
             var kind = _errorKind(data, errMsg);
-            // a single retry only, /api/request allows 10 mutations per 60s and each attempt spends one
-            if (!isRetry && kind === "transient") {
-                var seconds = parseInt(payload.retryAfter, 10);
+            var seconds = parseInt(payload.retryAfter, 10);
+            if (!isRetry && kind === "transient" && !(seconds > 30)) { // cleanup waits must show the error without an automatic retry
                 if (!(seconds >= 1)) seconds = 2;
                 var delay = Math.min(seconds, 30) * 1000;
-                // jitter keeps a barrier synced cohort from retrying in lockstep
                 delay = delay * (0.8 + Math.random() * 0.4);
                 btn.innerHTML = '<span class="loading-spinner"></span> Retrying...';
                 _requestInFlight = false;
@@ -416,7 +410,6 @@ function container_stop(challengeId) {
         extBtn.innerHTML = '<i class="fas fa-redo"></i> Renew <span id="renewals-counter"></span>';
 
         if (data.error || data.message) {
-            // the container is still running, keep the panel and poller alive
             info.textContent = data.error || data.message;
             info.classList.add('alert-danger');
             info.style.display = 'block';

@@ -7,6 +7,9 @@ class ContainerException(Exception):
         return self.message
 
 
-# routes map this to 503 while a plain ContainerException is 500
 class ContainerUnavailableException(ContainerException):
+    pass
+
+
+class ContainerStartTimeout(ContainerUnavailableException):
     pass

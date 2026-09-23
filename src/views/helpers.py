@@ -70,25 +70,26 @@ JsonResponse = dict[str, str | int | bool | None]
 
 
 def _resolve_challenge(chal_id: int) -> ContainerChallengeModel | None:
-    """prefer the challenge stashed on g, admin paths and tests call helpers outside requires_visible_challenge"""
+
     stashed = getattr(g, "challenge", None)
     if stashed is not None and getattr(stashed, "id", None) == chal_id:
         return stashed
 
-    return ContainerChallengeModel.query.filter_by(id=chal_id).first()
+    return ContainerChallengeModel.query.filter_by(
+        id=chal_id
+    ).first()  # admin callers can bypass the visibility decorator
 
 
 def request_json() -> dict[str, Any] | None:
-    # recursion errors from absurdly nested bodies must not escape as a 500
+
     try:
-        body = request.get_json(silent=True)
+        body = request.get_json(silent=True)  # malformed nested bodies can raise recursion errors
     except Exception:
         return None
     return body if isinstance(body, dict) else None
 
 
 def requires_visible_challenge(f):
-    """hidden and locked states return the same 404 and 403 as CTFd/api/v1/challenges.py"""
 
     @wraps(f)
     def wrapper(*args, **kwargs):
@@ -157,7 +158,7 @@ def resolve_expiration(challenge: ContainerChallengeModel) -> int:
 
 def resolve_max_renewals(challenge: ContainerChallengeModel) -> int:
     max_renewals = challenge.max_renewals
-    if max_renewals is None:  # max_renewals of 0 disables renewals so a falsy test would wrongly fall back
+    if max_renewals is None:  # zero disables renewals
         max_renewals = get_setting("default_max_renewals", 2)
 
     return int(max_renewals)
@@ -193,8 +194,7 @@ def get_hostname_for_context(context_name: str | None) -> str:
     if not context_name:
         return _request_hostname()
 
-    # local containers are colocated so users connect via the CTFd hostname
-    if context_name == LOCAL_CONTEXT_NAME:
+    if context_name == LOCAL_CONTEXT_NAME:  # local containers share the ctfd hostname
         return _request_hostname()
 
     context = DockerContextModel.query.filter_by(context_name=context_name).first()
@@ -207,7 +207,7 @@ def get_hostname_for_context(context_name: str | None) -> str:
     if not context.hostname:
         return _request_hostname()
 
-    return context.hostname.split("@")[-1]  # ssh contexts store hostname as user@host
+    return context.hostname.split("@")[-1]  # ssh endpoints can include a username
 
 
 def _log_request_failed(challenge: ContainerChallengeModel, uid: int, err: Exception) -> None:
@@ -379,7 +379,6 @@ def renew_container(chal_id: int, xid: int, is_team: bool) -> JsonResponse | tup
 def _runtime_volume_plan(
     challenge: ContainerChallengeModel, container_manager: ContainerManager
 ) -> tuple[VolumePolicy, dict[str, tuple[MountRequest, ...]], set[str] | None]:
-    """eligible contexts is None when no mounts are configured, meaning every context qualifies"""
 
     try:
         policy = load_volume_policy()
@@ -393,7 +392,7 @@ def _runtime_volume_plan(
         raise ContainerException(str(exc)) from exc
 
     if not any(plan.values()):
-        return policy, plan, None
+        return policy, plan, None  # without mounts every context is eligible
 
     configured = set(container_manager.host_manager.get_configured_contexts())
     candidates = [
@@ -432,14 +431,13 @@ def _resolve_runtime_volumes(
     context_name: str,
     container_manager: ContainerManager,
 ) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, dict[str, str]]]]:
-    """recheck the selected daemon immediately before mutating it, the earlier plan can be stale"""
 
     resolved: dict[str, dict[str, dict[str, str]]] = {}
     for service_name, mounts in plan.items():
         if not mounts:
             resolved[service_name] = {}
             continue
-        readiness = evaluate_volume_readiness(
+        readiness = evaluate_volume_readiness(  # the selected daemon can change after placement planning
             policy,
             [context_name],
             mounts,
@@ -459,10 +457,8 @@ def _cleanup_failed_reservation(
     *,
     ambiguous_external_io: bool = False,
 ) -> bool:
-    """release the reservation only after a daemon query proves no resource exists"""
 
-    if ambiguous_external_io:
-        # a timed out docker or ssh call can still land later so an empty label query proves nothing
+    if ambiguous_external_io:  # timed out daemon requests can still create resources later
         InstanceCoordinator.mark_cleanup_pending(reservation.instance_id, reservation.provision_token, str(error))
         return False
 
@@ -512,9 +508,8 @@ def create_container(
         _log_request_failed(challenge, uid, err)
         return error_body(sanitize_container_error(err)), 400
 
-    # the expiry clock starts after host inspection so slow probes do not eat into the runtime
     expiration = resolve_expiration(challenge)
-    expires = int(time.time() + expiration)
+    expires = int(time.time() + expiration)  # host inspection must not reduce container lifetime
     effective_memory_mb = (
         int(challenge.max_memory_mb)
         if challenge.max_memory_mb is not None
@@ -544,7 +539,6 @@ def create_container(
         maximum = int(get_setting("max_containers_per_user", 4) or 4)
         return error_body(QUOTA_EXCEEDED.format(maximum=maximum), "user"), 409
     except CreateCapacityUnavailable as err:
-        # busy create slots and an exhausted retry budget share a status but not a cause
         logger.warning("no create capacity for challenge %s: %s", challenge.id, err)
         return error_body(HOSTS_BUSY, "transient"), 429, {"Retry-After": "5"}
     except ContextUnavailable as err:
@@ -559,7 +553,7 @@ def create_container(
             return build_connection_response("already_running", challenge, existing, reservation.context_name)
         if reservation.state == "provisioning":
             return error_body(REQUEST_IN_PROGRESS, "transient"), 429, {"Retry-After": "5"}
-        return error_body(CLEANUP_IN_PROGRESS, "transient"), 503
+        return error_body(CLEANUP_IN_PROGRESS, "transient"), 503, {"Retry-After": "300"}
 
     if not reservation.context_name:
         _cleanup_failed_reservation(container_manager, reservation, "reservation has no docker context")
@@ -619,7 +613,7 @@ def create_container(
         except Exception as err:
             _log_request_failed(challenge, uid, err)
             _cleanup_failed_reservation(container_manager, reservation, err, ambiguous_external_io=True)
-            return error_body(sanitize_container_error(err)), 503
+            return error_body(sanitize_container_error(err)), 503, {"Retry-After": "300"}
 
         if host_port is None:
             error = ContainerException("could not determine the entry container port")
@@ -653,7 +647,7 @@ def create_container(
         except Exception as err:
             _log_request_failed(challenge, uid, err)
             _cleanup_failed_reservation(container_manager, reservation, err, ambiguous_external_io=True)
-            return error_body(sanitize_container_error(err)), 503
+            return error_body(sanitize_container_error(err)), 503, {"Retry-After": "300"}
 
         port = container_manager.get_container_port(created_container.id, context_name)
         if port is None:

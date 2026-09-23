@@ -14,7 +14,7 @@ from flask import jsonify, request
 
 from CTFd.utils import get_config
 
-from .exceptions import ContainerException, ContainerUnavailableException
+from .exceptions import ContainerException, ContainerStartTimeout, ContainerUnavailableException
 from .messages import (
     CHALLENGE_NOT_FOUND,
     CONTAINER_NOT_FOUND,
@@ -26,6 +26,7 @@ from .messages import (
     RATE_LIMITED,
     REQUEST_IN_PROGRESS,
     SERVER_ERROR,
+    START_TIMEOUT,
 )
 from .models import ContainerSettingsModel
 
@@ -309,8 +310,11 @@ def owner_filter(xid: int, is_team: bool) -> dict[str, int]:
 
 ErrorKind = Literal["user", "transient", "permanent"]
 
-# mirror of the fallback substring lists in src/assets/view.js, change both together
-_PERMANENT_ERROR_PATTERNS: tuple[str, ...] = ("image not found", "challenge not found")
+
+_PERMANENT_ERROR_PATTERNS: tuple[str, ...] = (
+    "image not found",
+    "challenge not found",
+)  # keep fallback patterns in src/assets/view.js consistent
 _USER_ERROR_PATTERNS: tuple[str, ...] = (
     "you can only spawn",
     "rate limit",
@@ -334,7 +338,6 @@ def error_body(message: str, kind: ErrorKind | None = None) -> dict[str, Any]:
     return {"error": message, "error_kind": kind or classify_error_kind(message)}
 
 
-# equality only, a formatted template can never equal its constant so parameterized messages must not be listed here
 _USER_SAFE = frozenset(
     {
         NO_RENEWALS,
@@ -350,6 +353,8 @@ _USER_SAFE = frozenset(
 
 
 def sanitize_container_error(err: ContainerException | Exception) -> str:
+    if isinstance(err, ContainerStartTimeout):
+        return START_TIMEOUT
     msg = str(err)
     if msg in _USER_SAFE:
         return msg
@@ -396,7 +401,6 @@ def _increment_rate_limit(key: str, interval: int) -> int:
         client = _rate_limit_redis_client(redis_url)
         return int(client.eval(_RATE_LIMIT_LUA, 1, f"challenge-containers:{key}", interval))
 
-    # no portable atomic increment outside redis, this fallback can undercount under concurrent requests
     from CTFd.cache import cache
 
     try:
@@ -404,7 +408,7 @@ def _increment_rate_limit(key: str, interval: int) -> int:
             return 1
     except (AttributeError, NotImplementedError):
         pass
-    current_count = int(cache.get(key) or 0) + 1
+    current_count = int(cache.get(key) or 0) + 1  # without redis concurrent requests can undercount
     cache.set(key, current_count, timeout=interval)
     return current_count
 
@@ -433,7 +437,7 @@ def ratelimit_per_user(
     interval: RatePolicyValue = 300,
     key_prefix: str = "rl_user",
 ):
-    # the ctfd ratelimit decorator keys on ip which throttles every user behind one egress ip
+
     def decorator(f):
         @functools.wraps(f)
         def wrapper(*args, **kwargs):
@@ -444,7 +448,7 @@ def ratelimit_per_user(
 
             user = get_current_user()
             if user is not None:
-                bucket = f"u{user.id}"
+                bucket = f"u{user.id}"  # ip limits would combine users behind the same gateway
             else:
                 bucket = f"ip{get_ip()}"
 
