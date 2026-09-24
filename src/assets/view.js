@@ -1,3 +1,5 @@
+if (typeof _containerView !== "undefined" && _containerView) _endContainerView(_containerView);
+
 CTFd._internal.challenge.data = undefined;
 CTFd._internal.challenge.renderer = null;
 CTFd._internal.challenge.preRender = function () {};
@@ -23,6 +25,26 @@ var _expiryInterval = null;
 var _syncInterval = null;
 var _activeChalId = null;
 var _activeExpiresAt = null;
+var _containerView = null;
+var _retryTimer = null;
+
+function _isCurrentContainerView(view, challengeId) {
+    return view && view === _containerView &&
+        (challengeId == null || view.challengeId === challengeId) &&
+        view.info === document.getElementById("deployment-info");
+}
+
+function _endContainerView(view) {
+    if (!view || view !== _containerView) return;
+    _containerView = null;
+    if (view.modal) view.modal.removeEventListener("hide.bs.modal", view.onHide);
+    if (view.jqueryModal) view.jqueryModal.off("hide.bs.modal", view.onHide);
+    _stopSync();
+    if (_expiryInterval) { clearInterval(_expiryInterval); _expiryInterval = null; }
+    if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
+    _requestInFlight = false;
+    _retryPending = false;
+}
 
 function _startSync(challengeId) {
     _activeChalId = challengeId;
@@ -31,7 +53,8 @@ function _startSync(challengeId) {
 }
 
 function _syncNow() {
-    if (!_activeChalId) return;
+    var view = _containerView;
+    if (!_activeChalId || !_isCurrentContainerView(view, _activeChalId)) return;
     fetch("/containers/api/view_info", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "application/json", "CSRF-Token": init.csrfNonce },
@@ -39,6 +62,7 @@ function _syncNow() {
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
+        if (!_isCurrentContainerView(view)) return;
         if (data.status === "instance not started") {
             _stopSync();
             if (_expiryInterval) { clearInterval(_expiryInterval); _expiryInterval = null; }
@@ -92,12 +116,17 @@ function formatTime(seconds) {
 }
 
 function startTimer(expiresAt) {
+    var view = _containerView;
     if (_expiryInterval) clearInterval(_expiryInterval);
     _activeExpiresAt = expiresAt;
 
     var timer = document.getElementById("instance-timer");
 
     function tick() {
+        if (!_isCurrentContainerView(view)) {
+            clearInterval(interval);
+            return;
+        }
         var left = Math.max(0, Math.floor((_activeExpiresAt * 1000 - Date.now()) / 1000));
         timer.textContent = left > 0 ? formatTime(left) : "expired";
         timer.className = "bar-timer" + (left <= 0 ? " timer-expired" : left < 300 ? " timer-warning" : "");
@@ -111,8 +140,9 @@ function startTimer(expiresAt) {
         }
     }
 
+    var interval = setInterval(tick, 1000);
+    _expiryInterval = interval;
     tick();
-    _expiryInterval = setInterval(tick, 1000);
 }
 
 function updateRenewButton(renewalsUsed, maxRenewals) {
@@ -165,7 +195,20 @@ function showConnection(data, container, challengeId) {
 
 
 function view_container_info(challengeId) {
+    _endContainerView(_containerView);
     var info = resetAlert();
+    var view = { challengeId: challengeId, info: info };
+    _containerView = view;
+    view.modal = document.getElementById("challenge-window");
+    if (view.modal) {
+        view.onHide = function() { _endContainerView(view); };
+        view.modal.addEventListener("hide.bs.modal", view.onHide, { once: true });
+        var jquery = CTFd.lib && CTFd.lib.$;
+        if (jquery && jquery.fn && jquery.fn.jquery) {
+            view.jqueryModal = jquery(view.modal);
+            view.jqueryModal.one("hide.bs.modal", view.onHide);
+        }
+    }
 
     fetch("/containers/api/view_info", {
         method: "POST",
@@ -174,6 +217,7 @@ function view_container_info(challengeId) {
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
+        if (!_isCurrentContainerView(view)) return;
         if (data.status === "misconfigured") {
             info.style.display = 'block';
             var banner = document.createElement('div');
@@ -260,9 +304,10 @@ function _resetStartButton(btn) {
 }
 
 function _doContainerRequest(challengeId, isRetry) {
-    var info = resetAlert();
-
+    var view = _containerView;
+    if (!_isCurrentContainerView(view, challengeId)) return;
     if (_requestInFlight || _retryPending) return;
+    var info = resetAlert();
 
     var btn = document.getElementById("create-chal").querySelector("button");
     _requestInFlight = true;
@@ -278,6 +323,7 @@ function _doContainerRequest(challengeId, isRetry) {
         return r.json().then(function(d) { return { data: d, retryAfter: r.headers.get("Retry-After") }; });
     })
     .then(function(payload) {
+        if (!_isCurrentContainerView(view)) return;
         var data = payload.data;
         if (data.error || data.message) {
             var errMsg = data.error || data.message;
@@ -290,7 +336,9 @@ function _doContainerRequest(challengeId, isRetry) {
                 btn.innerHTML = '<span class="loading-spinner"></span> Retrying...';
                 _requestInFlight = false;
                 _retryPending = true;
-                setTimeout(function() {
+                _retryTimer = setTimeout(function() {
+                    if (!_isCurrentContainerView(view)) return;
+                    _retryTimer = null;
                     _retryPending = false;
                     _doContainerRequest(challengeId, true);
                 }, delay);
@@ -309,10 +357,11 @@ function _doContainerRequest(challengeId, isRetry) {
         _resetStartButton(btn);
     })
     .catch(function(e) {
+        if (!_isCurrentContainerView(view)) return;
         console.error("Fetch error:", e);
         _resetStartButton(btn);
     })
-    .finally(function() { _requestInFlight = false; });
+    .finally(function() { if (_isCurrentContainerView(view)) _requestInFlight = false; });
 }
 
 function makeCopyField(label, value) {
@@ -357,6 +406,8 @@ function container_request(challengeId) {
 }
 
 function container_renew(challengeId) {
+    var view = _containerView;
+    if (!_isCurrentContainerView(view, challengeId)) return;
     var btn = document.getElementById("extend-chal");
 
     btn.disabled = true;
@@ -369,6 +420,7 @@ function container_renew(challengeId) {
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
+        if (!_isCurrentContainerView(view)) return;
         btn.innerHTML = '<i class="fas fa-redo"></i> Renew <span id="renewals-counter"></span>';
         if (data.error || data.message) {
             btn.disabled = false;
@@ -382,6 +434,7 @@ function container_renew(challengeId) {
         }
     })
     .catch(function(e) {
+        if (!_isCurrentContainerView(view)) return;
         console.error("Fetch error:", e);
         btn.disabled = false;
         btn.innerHTML = '<i class="fas fa-redo"></i> Renew <span id="renewals-counter"></span>';
@@ -389,6 +442,8 @@ function container_renew(challengeId) {
 }
 
 function container_stop(challengeId) {
+    var view = _containerView;
+    if (!_isCurrentContainerView(view, challengeId)) return;
     var info = resetAlert();
     var btn = document.getElementById("terminate-chal");
     var extBtn = document.getElementById("extend-chal");
@@ -404,6 +459,7 @@ function container_stop(challengeId) {
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
+        if (!_isCurrentContainerView(view)) return;
         btn.disabled = false;
         extBtn.disabled = false;
         btn.innerHTML = '<i class="fas fa-stop"></i> Stop';
@@ -421,6 +477,7 @@ function container_stop(challengeId) {
         }
     })
     .catch(function(e) {
+        if (!_isCurrentContainerView(view)) return;
         console.error("Fetch error:", e);
         btn.disabled = false;
         extBtn.disabled = false;

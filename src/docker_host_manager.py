@@ -45,15 +45,11 @@ _SSH_CONNECT_TIMEOUT = threading.local()
 
 
 def _apply_ssh_connect_timeouts(params: dict[str, object], timeout: int | float) -> None:
-
     bounded = max(1.0, float(timeout))
-    params.update(
-        timeout=bounded, banner_timeout=bounded, auth_timeout=bounded
-    )  # docker does not pass its timeout to SSHClient.connect
+    params.update(timeout=bounded, banner_timeout=bounded, auth_timeout=bounded)  # docker omits ssh connect timeouts
 
 
 def _install_bounded_ssh_adapter() -> None:
-
     global _SSH_ADAPTER_PATCHED
     if _SSH_ADAPTER_PATCHED:
         return
@@ -67,9 +63,7 @@ def _install_bounded_ssh_adapter() -> None:
         except (ImportError, AttributeError):
             return
 
-        if getattr(
-            original_adapter, "_ctfd_bounded_connect", False
-        ):  # shared with ctfd-remote-desktop to prevent duplicate wrapping
+        if getattr(original_adapter, "_ctfd_bounded_connect", False):  # ctfd-remote-desktop shares this adapter
             _SSH_ADAPTER_PATCHED = True
             return
 
@@ -88,7 +82,6 @@ def _install_bounded_ssh_adapter() -> None:
 
 
 def _ssh_timeout_local() -> threading.local:
-
     try:
         from docker.api import client as api_client
 
@@ -116,13 +109,11 @@ def _new_docker_client(endpoint: str, timeout: int = DEFAULT_CLIENT_TIMEOUT) -> 
 
 
 def _confirm_removal_in_progress(container: Container, error: docker.errors.APIError) -> bool:
-
     if getattr(error, "status_code", None) != 409:
         return False
 
-    if "already in progress" not in str(
-        getattr(error, "explanation", error)
-    ):  # docker auto removal can overlap this request
+    explanation = str(getattr(error, "explanation", error))
+    if "already in progress" not in explanation:  # docker auto removal can overlap this request
         return False
 
     for _attempt in range(20):
@@ -137,7 +128,6 @@ def _confirm_removal_in_progress(container: Container, error: docker.errors.APIE
 
 
 def _run_with_creation_timeout(client: DockerClient, *args, **kwargs) -> Container:
-
     previous_timeout = client.api.timeout
     client.api.timeout = CREATE_CLIENT_TIMEOUT  # clients are confined to one worker thread
     try:
@@ -193,7 +183,6 @@ def _scan_context_meta(context_name: None = None) -> list[_ContextMeta]: ...
 
 
 def _scan_context_meta(context_name: str | None = None) -> _ContextMeta | list[_ContextMeta] | None:
-
     contexts_dir = os.path.expanduser("~/.docker/contexts/meta")
     if not os.path.isdir(contexts_dir):
         return None if context_name else []
@@ -310,9 +299,7 @@ class DockerHostManager:
 
         self._lock: threading.RLock = threading.RLock()  # client operations call helpers that acquire this lock
 
-        self._threadpools: dict[
-            str, gevent.threadpool.ThreadPool
-        ] = {}  # a blocked host must not occupy workers used by other hosts
+        self._threadpools: dict[str, gevent.threadpool.ThreadPool] = {}  # stalled hosts need separate pools
 
     def _mark_connected(self, context_name: str) -> None:
         self._connected_contexts.add(context_name)
@@ -333,7 +320,6 @@ class DockerHostManager:
             return pool
 
     def _call(self, context_name: str, fn, *args, **kwargs):
-
         with self._lock:
             if self._cooling_down(context_name):  # unreachable hosts must not consume threadpool slots
                 raise ContainerUnavailableException(f"docker context '{context_name}' is unreachable")
@@ -421,7 +407,6 @@ class DockerHostManager:
         return self._call(context_name, lambda: self._invoke_client_op(context_name, fn))
 
     def load_contexts(self, contexts: list[DockerContextModel]) -> None:
-
         new_configs = {}
         new_pub_hostnames = {}
 
@@ -445,7 +430,6 @@ class DockerHostManager:
             self._client_failures = {name: at for name, at in self._client_failures.items() if name in unchanged}
 
     def warm_up(self) -> None:
-
         with self._lock:
             targets = [
                 name
@@ -468,7 +452,6 @@ class DockerHostManager:
             return sorted(self._context_configs)
 
     def has_contexts(self) -> bool:
-
         with self._lock:
             return bool(self._context_configs)
 
@@ -697,7 +680,6 @@ class DockerHostManager:
         return self._list_containers(context_name, {"label": label_key})
 
     def kill_stack(self, context_name: str, stack_id: str) -> int:
-
         with self._lock:
             if context_name not in self._context_configs:  # failed cleanup must retain database reservations
                 raise ContainerUnavailableException(f"docker context '{context_name}' is not configured")
@@ -723,7 +705,6 @@ class DockerHostManager:
         return self._call_with_client_op(context_name, _do)
 
     def force_remove_resources_by_label(self, context_name: str, label: str) -> tuple[int, int]:
-
         with self._lock:
             if context_name not in self._context_configs:
                 raise ContainerUnavailableException(f"docker context '{context_name}' is not configured")
@@ -755,7 +736,6 @@ class DockerHostManager:
         return self._call_with_client_op(context_name, _do)
 
     def count_resources_by_label(self, context_name: str, label: str) -> tuple[int, int]:
-
         def _do() -> tuple[int, int]:
             client = self._get_client(context_name)
             containers = client.containers.list(filters={"label": label}, all=True)
@@ -779,7 +759,6 @@ class DockerHostManager:
         return self._call_with_client_op(context_name, _do)
 
     def get_volume_metadata(self, context_name: str, docker_name: str) -> VolumeMetadata | None:
-
         def _do():
             client = self._get_client(context_name)
             return docker_volume_metadata(client, docker_name)
@@ -836,9 +815,7 @@ class DockerHostManager:
                 size_mb = round((attrs.get("Size") or 0) / 1024 / 1024)
                 created = attrs.get("Created", "")[:19].replace("T", " ")
 
-                if created.startswith("1970") or created.startswith(
-                    "1980"
-                ):  # reproducible builds use placeholder dates
+                if created.startswith(("1970", "1980")):  # reproducible builds use placeholder dates
                     last_tag = (attrs.get("Metadata") or {}).get("LastTagTime", "")
                     if last_tag:
                         created = last_tag[:19].replace("T", " ")

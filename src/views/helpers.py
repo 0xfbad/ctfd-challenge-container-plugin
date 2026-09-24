@@ -70,18 +70,14 @@ JsonResponse = dict[str, str | int | bool | None]
 
 
 def _resolve_challenge(chal_id: int) -> ContainerChallengeModel | None:
-
     stashed = getattr(g, "challenge", None)
     if stashed is not None and getattr(stashed, "id", None) == chal_id:
         return stashed
 
-    return ContainerChallengeModel.query.filter_by(
-        id=chal_id
-    ).first()  # admin callers can bypass the visibility decorator
+    return ContainerChallengeModel.query.filter_by(id=chal_id).first()  # admin routes lack cached challenges
 
 
 def request_json() -> dict[str, Any] | None:
-
     try:
         body = request.get_json(silent=True)  # malformed nested bodies can raise recursion errors
     except Exception:
@@ -90,7 +86,6 @@ def request_json() -> dict[str, Any] | None:
 
 
 def requires_visible_challenge(f):
-
     @wraps(f)
     def wrapper(*args, **kwargs):
         chal_id = kwargs.get("chal_id")
@@ -194,10 +189,7 @@ def _request_hostname() -> str:
 
 
 def get_hostname_for_context(context_name: str | None) -> str:
-    if not context_name:
-        return _request_hostname()
-
-    if context_name == LOCAL_CONTEXT_NAME:  # local containers share the ctfd hostname
+    if not context_name or context_name == LOCAL_CONTEXT_NAME:
         return _request_hostname()
 
     context = DockerContextModel.query.filter_by(context_name=context_name).first()
@@ -382,7 +374,6 @@ def renew_container(chal_id: int, xid: int, is_team: bool) -> JsonResponse | tup
 def _runtime_volume_plan(
     challenge: ContainerChallengeModel, container_manager: ContainerManager
 ) -> tuple[VolumePolicy, dict[str, tuple[MountRequest, ...]], set[str] | None]:
-
     try:
         policy = load_volume_policy()
         plan: dict[str, tuple[MountRequest, ...]] = {
@@ -434,7 +425,6 @@ def _resolve_runtime_volumes(
     context_name: str,
     container_manager: ContainerManager,
 ) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, dict[str, str]]]]:
-
     resolved: dict[str, dict[str, dict[str, str]]] = {}
     for service_name, mounts in plan.items():
         if not mounts:
@@ -460,12 +450,7 @@ def _cleanup_failed_reservation(
     *,
     ambiguous_external_io: bool = False,
 ) -> bool:
-
-    if ambiguous_external_io:  # timed out daemon requests can still create resources later
-        InstanceCoordinator.mark_cleanup_pending(reservation.instance_id, reservation.provision_token, str(error))
-        return False
-
-    if not reservation.context_name:
+    if ambiguous_external_io or not reservation.context_name:  # timed out creates can finish later
         InstanceCoordinator.mark_cleanup_pending(reservation.instance_id, reservation.provision_token, str(error))
         return False
 

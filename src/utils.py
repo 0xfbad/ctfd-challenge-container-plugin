@@ -113,7 +113,7 @@ def get_setting(key: str, default: float | str | bool | None = None) -> int | fl
 
         if not current_app:
             return default
-    except RuntimeError:  # current_app raises outside an app context
+    except RuntimeError:
         return default
 
     row = ContainerSettingsModel.query.filter_by(key=key).first()
@@ -437,7 +437,6 @@ def ratelimit_per_user(
     interval: RatePolicyValue = 300,
     key_prefix: str = "rl_user",
 ):
-
     def decorator(f):
         @functools.wraps(f)
         def wrapper(*args, **kwargs):

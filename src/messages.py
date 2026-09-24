@@ -6,7 +6,6 @@ CONTEXT_UNAVAILABLE: Final = "container context is unavailable; cleanup will ret
 HOST_UNAVAILABLE_CLEANUP: Final = "container host unavailable; cleanup will be retried"
 PLACEMENT_FAILED: Final = "container placement failed"
 
-
 QUOTA_EXCEEDED: Final = "you can only spawn {maximum} containers at a time, please stop other containers"
 REQUEST_IN_PROGRESS: Final = "another container request is in progress, please wait"
 RATE_LIMITED: Final = "Too many requests. Limit is {limit} requests in {interval} seconds"
@@ -14,7 +13,6 @@ NO_RENEWALS: Final = "no renewals remaining"
 SOLVED_NO_RENEW: Final = "solved containers cannot be renewed"
 EXPIRED_NO_RENEW: Final = "expired containers cannot be renewed"
 CHALLENGE_LOCKED: Final = "challenge locked"
-
 
 CLEANUP_IN_PROGRESS: Final = "Container cleanup is in progress. Please try again in a few minutes."
 START_TIMEOUT: Final = "Container creation timed out. Please try again in a few minutes."
@@ -24,7 +22,6 @@ CLEANUP_FINALIZING: Final = "container cleanup finalization is already in progre
 AWAITING_CLEANUP: Final = "The previous instance is awaiting confirmed cleanup."
 PORT_UNAVAILABLE: Final = "could not determine container port"
 FINALIZATION_FAILED: Final = "database finalization failed; container cleanup has been scheduled"
-
 
 CONTAINER_NOT_FOUND: Final = "container not found"
 CONTAINER_NOT_FOUND_RESET: Final = "container not found, try resetting the container"
@@ -39,7 +36,6 @@ TEAM_REQUIRED: Final = "user not a member of a team"
 TEAM_REQUIRED_FLAG: Final = "you must be on a team to submit flags"
 MEMORY_LIMIT_INVALID: Final = "memory limit must be an integer"
 CPU_LIMIT_INVALID: Final = "cpu limit must be a positive number"
-
 
 SERVER_ERROR: Final = "a server error occurred, please try again"
 IMAGE_NOT_FOUND: Final = "docker image not found"
