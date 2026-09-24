@@ -445,6 +445,8 @@ class ContainerChallenge(BaseChallenge):
                     "max_memory_mb": challenge.max_memory_mb,
                     "max_cpu": challenge.max_cpu,
                     "cap_add": challenge.cap_add,
+                    "max_renewals": challenge.max_renewals,
+                    "volumes": challenge.volumes,
                     "services_json": challenge.services_json,
                     "network_json": challenge.network_json,
                 }
