@@ -173,17 +173,20 @@ def build_connection_response(
     expires: int | None = None,
     renewals_used: int | None = None,
 ) -> JsonResponse:
-    return {
+    response: JsonResponse = {
         "status": status,
         "hostname": get_hostname_for_context(context_name),
         "port": container.port,
-        "ssh_username": challenge.ssh_username,
-        "ssh_password": challenge.ssh_password,
         "connect": challenge.ctype,
         "expires": container.expires if expires is None else expires,
         "renewals_used": container.renewals_used if renewals_used is None else renewals_used,
         "max_renewals": resolve_max_renewals(challenge),
     }
+    if challenge.ctype == "ssh":
+        response["ssh_username"] = challenge.ssh_username
+        response["ssh_password"] = challenge.ssh_password
+
+    return response
 
 
 def _request_hostname() -> str:
