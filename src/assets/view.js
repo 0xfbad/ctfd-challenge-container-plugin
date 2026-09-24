@@ -303,7 +303,7 @@ function _resetStartButton(btn) {
     btn.innerHTML = '<i class="fas fa-play"></i> Start Instance';
 }
 
-function _doContainerRequest(challengeId, isRetry) {
+function _doContainerRequest(challengeId, isRetry, retryDeadline) {
     var view = _containerView;
     if (!_isCurrentContainerView(view, challengeId)) return;
     if (_requestInFlight || _retryPending) return;
@@ -320,7 +320,7 @@ function _doContainerRequest(challengeId, isRetry) {
         body: JSON.stringify({ chal_id: challengeId }),
     })
     .then(function(r) {
-        return r.json().then(function(d) { return { data: d, retryAfter: r.headers.get("Retry-After") }; });
+        return r.json().then(function(d) { return { data: d, status: r.status, retryAfter: r.headers.get("Retry-After") }; });
     })
     .then(function(payload) {
         if (!_isCurrentContainerView(view)) return;
@@ -329,10 +329,11 @@ function _doContainerRequest(challengeId, isRetry) {
             var errMsg = data.error || data.message;
             var kind = _errorKind(data, errMsg);
             var seconds = parseInt(payload.retryAfter, 10);
-            if (!isRetry && kind === "transient" && !(seconds > 30)) { // cleanup waits must show the error without an automatic retry
-                if (!(seconds >= 1)) seconds = 2;
-                var delay = Math.min(seconds, 30) * 1000;
-                delay = delay * (0.8 + Math.random() * 0.4);
+            var capacityWait = payload.status === 429 && kind === "transient" && seconds >= 1;
+            if (!(seconds >= 1)) seconds = 2;
+            var delay = Math.min(seconds, 30) * 1000 * (0.8 + Math.random() * 0.4);
+            var canRetry = capacityWait ? Date.now() + delay < retryDeadline : !isRetry;
+            if (canRetry && kind === "transient" && seconds <= 30) { // cleanup waits must show the error without an automatic retry
                 btn.innerHTML = '<span class="loading-spinner"></span> Retrying...';
                 _requestInFlight = false;
                 _retryPending = true;
@@ -340,7 +341,14 @@ function _doContainerRequest(challengeId, isRetry) {
                     if (!_isCurrentContainerView(view)) return;
                     _retryTimer = null;
                     _retryPending = false;
-                    _doContainerRequest(challengeId, true);
+                    if (capacityWait && Date.now() >= retryDeadline) {
+                        info.textContent = errMsg;
+                        info.classList.add('alert-danger');
+                        info.style.display = 'block';
+                        _resetStartButton(btn);
+                        return;
+                    }
+                    _doContainerRequest(challengeId, true, retryDeadline);
                 }, delay);
                 return;
             }
@@ -402,7 +410,7 @@ function makeCopyField(label, value) {
 }
 
 function container_request(challengeId) {
-    _doContainerRequest(challengeId, false);
+    _doContainerRequest(challengeId, false, Date.now() + 25000);
 }
 
 function container_renew(challengeId) {
