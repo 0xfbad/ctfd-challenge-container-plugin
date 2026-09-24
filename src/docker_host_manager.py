@@ -12,7 +12,7 @@ from typing import TypedDict, TypeVar, overload
 
 import docker
 import gevent.monkey
-import gevent.threadpool
+import gevent.pool
 import paramiko
 from docker import DockerClient
 from docker.models.containers import Container
@@ -33,7 +33,7 @@ CREATE_CLIENT_TIMEOUT = 60  # cold creation can exceed the timeout used for heal
 PULL_CLIENT_TIMEOUT = 300
 CLIENT_FAILURE_COOLDOWN = 60
 SSH_CONNECT_TIMEOUT = 10
-THREADPOOL_SIZE = 4
+HOST_CONCURRENCY = 4
 
 _DockerRunVal = str | int | bool | list[str] | dict[str, str] | dict[str, dict[str, str]]
 
@@ -129,7 +129,7 @@ def _confirm_removal_in_progress(container: Container, error: docker.errors.APIE
 
 def _run_with_creation_timeout(client: DockerClient, *args, **kwargs) -> Container:
     previous_timeout = client.api.timeout
-    client.api.timeout = CREATE_CLIENT_TIMEOUT  # clients are confined to one worker thread
+    client.api.timeout = CREATE_CLIENT_TIMEOUT  # the operation exclusively owns this client
     try:
         return client.containers.run(*args, **kwargs)
     except RequestTimeout as error:
@@ -291,15 +291,15 @@ class DockerHostManager:
         self._connected_contexts: set[str] = set()  # unreachable hosts must remain configured for cleanup
         self._pub_hostnames: dict[str, str | None] = {}
 
-        self._clients: dict[tuple[str, int], DockerClient] = {}  # paramiko channels belong to the creating gevent hub
+        self._clients: dict[tuple[str, int], DockerClient] = {}  # each operation exclusively leases a client
+        self._idle_clients: dict[tuple[str, int], list[tuple[int, DockerClient]]] = {}
         self._config_generation: int = 0
-        self._client_generation: int = -1
 
         self._client_failures: dict[str, float] = {}
 
         self._lock: threading.RLock = threading.RLock()  # client operations call helpers that acquire this lock
 
-        self._threadpools: dict[str, gevent.threadpool.ThreadPool] = {}  # stalled hosts need separate pools
+        self._pools: dict[tuple[str, int], gevent.pool.Pool] = {}  # keep ssh transports on an active hub
 
     def _mark_connected(self, context_name: str) -> None:
         self._connected_contexts.add(context_name)
@@ -311,75 +311,92 @@ class DockerHostManager:
     def _cooling_down(self, context_name: str) -> bool:
         return time.time() - self._client_failures.get(context_name, 0.0) < CLIENT_FAILURE_COOLDOWN
 
-    def _get_threadpool(self, context_name: str) -> gevent.threadpool.ThreadPool:
+    def _get_pool(self, context_name: str) -> gevent.pool.Pool:
+        key = (context_name, threading.get_native_id())
         with self._lock:
-            pool = self._threadpools.get(context_name)
+            pool = self._pools.get(key)
             if pool is None:
-                pool = gevent.threadpool.ThreadPool(maxsize=THREADPOOL_SIZE)
-                self._threadpools[context_name] = pool
+                pool = gevent.pool.Pool(size=HOST_CONCURRENCY)
+                self._pools[key] = pool
             return pool
 
     def _call(self, context_name: str, fn, *args, **kwargs):
         with self._lock:
-            if self._cooling_down(context_name):  # unreachable hosts must not consume threadpool slots
+            if self._cooling_down(context_name):
                 raise ContainerUnavailableException(f"docker context '{context_name}' is unreachable")
 
-        if not gevent.monkey.is_module_patched("threading"):  # flask commands run without a gevent hub
+        if (context_name, threading.get_ident()) in self._clients:
             return fn(*args, **kwargs)
 
-        pool = self._get_threadpool(context_name)
-        return pool.apply(fn, args=args, kwds=kwargs)
+        def leased_call():
+            generation = self._config_generation
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                self._release_client(context_name, generation)
+
+        if not gevent.monkey.is_module_patched("threading"):
+            return leased_call()
+
+        return self._get_pool(context_name).apply(leased_call)
+
+    @staticmethod
+    def _close_clients(clients: list[DockerClient]) -> None:
+        for client in clients:
+            try:
+                client.close()
+            except Exception:
+                pass
 
     def _get_client(self, context_name: str) -> DockerClient:
-        tid = threading.get_ident()
+        key = (context_name, threading.get_ident())
+        idle_key = (context_name, threading.get_native_id())
         to_close: list[DockerClient] = []
         with self._lock:
-            if self._client_generation != self._config_generation:
-                to_close.extend(self._clients.values())
-                self._clients = {}
-                self._client_generation = self._config_generation
-            else:
-                live_idents = {t.ident for t in threading.enumerate()}
-                dead_keys = [k for k in self._clients if k[1] not in live_idents]
-                for k in dead_keys:
-                    to_close.append(self._clients.pop(k))
+            idle = self._idle_clients.get(idle_key, [])
+            to_close = [client for generation, client in idle if generation != self._config_generation]
+            idle[:] = [(generation, client) for generation, client in idle if generation == self._config_generation]
+        self._close_clients(to_close)
 
-            key = (context_name, tid)
+        with self._lock:
             client = self._clients.get(key)
             if client is None:
-                url = self._context_configs.get(context_name)
-                if not url:
-                    raise Exception(f"no client for context '{context_name}'")
-
-                try:
-                    client = _new_docker_client(url)
-                except Exception:
-                    self._mark_connect_failed(context_name)
-                    raise
+                idle = self._idle_clients.get(idle_key, [])
+                if idle:
+                    _, client = idle.pop()
+                else:
+                    url = self._context_configs.get(context_name)
+                    if not url:
+                        raise Exception(f"no client for context '{context_name}'")
+                    try:
+                        client = _new_docker_client(url)
+                    except Exception:
+                        self._mark_connect_failed(context_name)
+                        raise
                 self._mark_connected(context_name)
                 self._clients[key] = client
 
-        for old in to_close:
-            try:
-                old.close()  # ssh teardown must not hold the manager lock
-            except Exception:
-                pass
-
         return client
 
+    def _release_client(self, context_name: str, generation: int) -> None:
+        with self._lock:
+            client = self._clients.pop((context_name, threading.get_ident()), None)
+            if client is None:
+                return
+            if generation == self._config_generation:
+                key = (context_name, threading.get_native_id())
+                self._idle_clients.setdefault(key, []).append((generation, client))
+                return
+        self._close_clients([client])
+
     def _clear_client(self, context_name: str) -> None:
-        to_close: list[DockerClient] = []
         with self._lock:
             self._connected_contexts.discard(context_name)
-            keys = [k for k in self._clients if k[0] == context_name]
-            for k in keys:
-                to_close.append(self._clients.pop(k))
-
-        for old in to_close:
-            try:
-                old.close()
-            except Exception:
-                pass
+            client = self._clients.pop((context_name, threading.get_ident()), None)
+            to_close = [client] if client is not None else []
+            idle_key = (context_name, threading.get_native_id())
+            to_close.extend(client for _, client in self._idle_clients.pop(idle_key, []))
+        self._close_clients(to_close)
 
     def _invoke_client_op(self, context_name, fn):
         try:
