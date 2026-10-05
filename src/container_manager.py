@@ -236,7 +236,7 @@ class ContainerManager:
         self.expiration_scheduler.add_job(
             func=self._prepare_files_tick,
             trigger="interval",
-            seconds=5,
+            seconds=1,  # the shared cooldown spaces preparation across workers
             misfire_grace_time=30,
             coalesce=True,
             max_instances=1,

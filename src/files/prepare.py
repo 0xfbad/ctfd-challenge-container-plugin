@@ -9,7 +9,7 @@ from CTFd.utils import get_config
 from CTFd.utils.dates import ctf_ended
 
 from .. import utils
-from .store import StoreError, validate_recipe
+from .store import StoreBusy, StoreError, validate_recipe
 from .web import _owner_identity, _store, _templates
 
 
@@ -52,7 +52,7 @@ def _prepare_batch(store, team_mode, secret, length, batch_size):
     challenges = [
         value
         for (value,) in Challenges.query.with_entities(Challenges.id)
-        .filter(Challenges.id.in_(recipe_ids), Challenges.state == "visible")
+        .filter(Challenges.id.in_(recipe_ids))
         .order_by(Challenges.id)
     ]
     if not challenges:
@@ -94,6 +94,7 @@ def _prepare_batch(store, team_mode, secret, length, batch_size):
             .all()
         )
         for (owner_id,) in candidates:
+            previous_cursor = cursor
             cursor = [challenge_id, owner_id]
             examined += 1
             if templates is None:
@@ -124,6 +125,9 @@ def _prepare_batch(store, team_mode, secret, length, batch_size):
                     background=True,
                     observed_order=observed_order,
                 )
+            except StoreBusy:
+                store._write(path, previous_cursor)
+                return
             except StoreError:
                 continue
         if examined == batch_size:
