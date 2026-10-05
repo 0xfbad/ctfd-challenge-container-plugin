@@ -61,12 +61,17 @@ def _maintenance_lock(app: Flask, job_name: str) -> Iterator[bool]:
             if dialect in {"mysql", "mariadb", "postgresql"}:
                 connection = engine.connect()
 
-        if dialect in {"mysql", "mariadb"}:
-            assert connection is not None
-            acquired = bool(connection.execute(text("SELECT GET_LOCK(:name, 0)"), {"name": lock_name}).scalar())
-        elif dialect == "postgresql":
-            assert connection is not None
-            acquired = bool(connection.execute(text("SELECT pg_try_advisory_lock(:key)"), {"key": lock_key}).scalar())
+        if connection is not None:
+            try:
+                if dialect in {"mysql", "mariadb"}:
+                    acquired = bool(connection.execute(text("SELECT GET_LOCK(:name, 0)"), {"name": lock_name}).scalar())
+                else:
+                    acquired = bool(
+                        connection.execute(text("SELECT pg_try_advisory_lock(:key)"), {"key": lock_key}).scalar()
+                    )
+            except Exception:
+                connection.invalidate()  # the server can grant a lock before the acquisition error arrives
+                raise
         elif dialect == "sqlite":
             lock_path = os.path.join(tempfile.gettempdir(), f"{lock_name}.lock")
             lock_file = open(lock_path, "a+")
@@ -87,6 +92,7 @@ def _maintenance_lock(app: Flask, job_name: str) -> Iterator[bool]:
                 elif dialect == "postgresql":
                     connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": lock_key})
             except Exception:
+                connection.invalidate()  # pooled close does not release named locks
                 logger.warning("failed to release maintenance lock %s", job_name, exc_info=True)
         if connection is not None:
             connection.close()
