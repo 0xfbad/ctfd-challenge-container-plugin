@@ -85,14 +85,20 @@ def validate_recipe(data):
 
 
 class Store:
-    def __init__(self, root, *, max_pending=128, max_jobs=2048, max_bytes=None, retention_seconds=604800):
+    def __init__(self, root, *, max_pending=128, max_jobs=0, max_bytes=None, retention_seconds=None):
         if max_bytes is None:
             try:
-                max_bytes = int(os.environ.get("PERSONALIZED_FILES_MAX_BYTES", "2147483648"))
+                max_bytes = int(os.environ.get("PERSONALIZED_FILES_MAX_BYTES", "0"))
             except ValueError as error:
                 raise StoreError("invalid file cache byte limit") from error
-            if not 1 <= max_bytes <= 2**63 - 1:
-                raise StoreError("invalid file cache byte limit")
+        if type(max_bytes) is not int or not 0 <= max_bytes <= 2**63 - 1:
+            raise StoreError("invalid file cache byte limit")
+        if type(max_jobs) is not int or max_jobs < 0:
+            raise StoreError("invalid file catalog limit")
+        if type(max_pending) is not int or max_pending < 2:
+            raise StoreError("invalid file queue limit")
+        if retention_seconds is not None and (type(retention_seconds) is not int or retention_seconds < 0):
+            raise StoreError("invalid file retention interval")
         self.root = Path(root)
         self.max_pending = max_pending
         self.max_jobs = max_jobs
@@ -292,6 +298,11 @@ class Store:
                     continue
         return total
 
+    def available_space(self):
+        usage = shutil.disk_usage(self.root)
+        reserve = usage.total // 20  # the handout volume shares a disk with database and logs
+        return usage.free - reserve
+
     @staticmethod
     def _request_order(job):
         return job.get("requested_at", int(job["created"] * 1_000_000_000))
@@ -449,15 +460,15 @@ class Store:
                 previous_order = max(previous_order, self._demand_order())
             jobs = self._retire_obsolete(challenge_id, recipe, jobs)
             jobs = self._retire_identity(challenge_id, owner, key, jobs)
-            if len(jobs) >= self.max_jobs or any(item.get("obsolete") for item in jobs):
+            if (self.max_jobs and len(jobs) >= self.max_jobs) or any(item.get("obsolete") for item in jobs):
                 self._collect(evict=not background)
                 jobs = self._jobs()
-            catalog_full = not job and len(jobs) >= self.max_jobs
+            catalog_full = self.max_jobs and not job and len(jobs) >= self.max_jobs
             pending = [item for item in jobs if item["state"] in ("queued", "running")]
             pending_limit = self.max_pending // 2 if background else self.max_pending
             if catalog_full or len(pending) >= pending_limit:
                 raise QueueFull("artifact queue is full, retry later")
-            if background:
+            if background and self.max_bytes:
                 reserved = sum(item["recipe"]["max_output_bytes"] for item in pending)
                 payload_bytes = self._payload_bytes([item for item in jobs if item["key"] != key])
                 if payload_bytes + reserved + recipe["max_output_bytes"] > self.max_bytes:
@@ -571,9 +582,10 @@ class Store:
         jobs = self._jobs()
         now = time.time()
         usage = {}
-        for job in jobs:
-            directory = self.root / "artifacts" / job["key"]
-            usage[job["key"]] = sum(path.stat().st_size for path in directory.glob("*") if path.is_file())
+        if self.max_bytes:
+            for job in jobs:
+                directory = self.root / "artifacts" / job["key"]
+                usage[job["key"]] = sum(path.stat().st_size for path in directory.glob("*") if path.is_file())
         total = sum(usage.values())
         candidates = sorted(
             (job for job in jobs if job["state"] not in ("queued", "running")), key=lambda job: job["updated"]
@@ -581,19 +593,22 @@ class Store:
         remaining = len(jobs)
         recipes = {}
         for job in candidates:
-            expired = now - job["updated"] >= self.retention_seconds
+            expired = self.retention_seconds is not None and now - job["updated"] >= self.retention_seconds
             challenge_id = job["challenge_id"]
             if challenge_id not in recipes:
                 recipes[challenge_id] = self._available_recipe(challenge_id)
             obsolete = recipes[challenge_id] != job["recipe"] or job.get("obsolete")
-            pressure = evict and (total + required_bytes > self.max_bytes or remaining >= self.max_jobs)
+            pressure = evict and (
+                (self.max_bytes and total + required_bytes > self.max_bytes)
+                or (self.max_jobs and remaining >= self.max_jobs)
+            )
             if not expired and not obsolete and not pressure:
                 continue
             remove_if_exists(self.root / "artifacts" / job["key"])
             self._job_path(job["key"]).unlink(missing_ok=True)
-            total -= usage[job["key"]]
+            total -= usage.get(job["key"], 0)
             remaining -= 1
-        if total + required_bytes > self.max_bytes:
+        if self.max_bytes and total + required_bytes > self.max_bytes:
             raise QueueFull("artifact storage is full")
 
     def claim(self):
@@ -612,13 +627,20 @@ class Store:
                     job["key"],
                 ),
             )
-            payload_bytes = self._payload_bytes(jobs) if any(job.get("background", False) for job in candidates) else 0
+            payload_bytes = (
+                self._payload_bytes(jobs)
+                if self.max_bytes and any(job.get("background", False) for job in candidates)
+                else 0
+            )
+            available_bytes = self.available_space()
             for job in candidates:
                 if self._available_recipe(job["challenge_id"]) != job["recipe"]:
                     job.update(state="failed", error="configuration changed", updated=time.time())
                     self._write(self._job_path(job["key"]), job)
                     continue
-                if job.get("background", False):
+                if job["recipe"]["max_output_bytes"] > available_bytes:
+                    continue
+                if job.get("background", False) and self.max_bytes:
                     required = payload_bytes - self._payload_bytes([job]) + job["recipe"]["max_output_bytes"]
                     if required > self.max_bytes:
                         continue

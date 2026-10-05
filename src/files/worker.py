@@ -320,6 +320,8 @@ def run_once(store, generator=None, *, maintenance=None):
                     _retry_store(store.collect, required_bytes=job["recipe"]["max_output_bytes"], evict=False)
                 else:
                     _retry_store(store.collect, required_bytes=job["recipe"]["max_output_bytes"])
+                if store.available_space() < job["recipe"]["max_output_bytes"]:
+                    raise GenerationError("artifact storage is full")
                 generator(job, stage)
                 _retry_store(store.publish, job, stage)
             except Exception as exc:
