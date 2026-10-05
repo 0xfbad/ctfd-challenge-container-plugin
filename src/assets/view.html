@@ -334,7 +334,9 @@
 </style>
 
 <div class="instance-container">
+	{% if authed() %}
 	<img class="d-none" src onerror='view_container_info({{ challenge.id }})'>
+	{% endif %}
 
 	<div class="instance-header">
 		<span>Challenge Instance</span>
@@ -368,10 +370,16 @@
 	<div class="instance-content">
 		<div id="deployment-info" class="deployment-info" style="display: none;"></div>
 
-		<div class="instance-start d-none" id="create-chal">
+		<div class="instance-start{% if authed() %} d-none{% endif %}" id="create-chal"{% if not authed() %} title="Sign in to start an instance"{% endif %}>
+			{% if authed() %}
 			<button onclick="container_request({{ challenge.id }})" class="btn btn-outline-success btn-sm">
 				<i class="fas fa-play"></i> Start Instance
 			</button>
+			{% else %}
+			<button class="btn btn-outline-secondary btn-sm" disabled aria-label="Start Instance (sign in required)">
+				<i class="fas fa-lock" aria-hidden="true"></i> Start Instance
+			</button>
+			{% endif %}
 		</div>
 
 		<div class="instance-bar d-none" id="running-bar">
