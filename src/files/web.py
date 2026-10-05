@@ -264,6 +264,11 @@ def status() -> Response | tuple[Response, int]:
         abort(403)
     try:
         return jsonify(success=True, data=_store().summary())
+    except StoreBusy:
+        response = jsonify(success=False, state="busy")
+        response.status_code = 202
+        response.headers["Retry-After"] = str(_RETRY_SECONDS)
+        return response
     except (StoreError, OSError):
         return jsonify(success=False, error="File generation status is unavailable."), 503
 

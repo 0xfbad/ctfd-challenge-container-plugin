@@ -512,6 +512,12 @@
 			const response = await fetch({{ url_for('personalized_files.status') | tojson }}, {cache: 'no-store', credentials: 'same-origin'});
 			if (!response.ok || response.redirected) throw new Error('File status unavailable');
 			const result = await response.json();
+			if (response.status === 202 && result.success === false && result.state === 'busy') {
+				error.className = 'text-muted';
+				error.textContent = 'Refreshing file status...';
+				error.hidden = false;
+				return;
+			}
 			if (!result.success) throw new Error('File status unavailable');
 			const data = result.data;
 			const metrics = {
@@ -532,12 +538,14 @@
 				document.getElementById(`file-generation-${stat}`).textContent =
 					stat === 'size' || stat === 'free' ? formatFileBytes(value) : value;
 			}
+			error.className = 'text-danger';
 			error.textContent = data.storage_blocked ? 'Low disk space' : 'File status unavailable';
 			error.hidden = !data.storage_blocked;
 		} catch {
 			for (const stat of ['download', 'background', 'running', 'ready', 'failed', 'files', 'size', 'free']) {
 				document.getElementById(`file-generation-${stat}`).textContent = '-';
 			}
+			error.className = 'text-danger';
 			error.textContent = 'File status unavailable';
 			error.hidden = false;
 		}
