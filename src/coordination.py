@@ -645,6 +645,9 @@ class InstanceCoordinator:
         target_state: str,
         *,
         stale_after_seconds: int = 120,
+        expected_state_version: int | None = None,
+        maintenance_cutoff: int | None = None,
+        reconcile_safety_age_seconds: int | None = None,
     ) -> str | None:
         """claim a stop, expiry, or reconcile operation with a random fencing token"""
 
@@ -657,6 +660,35 @@ class InstanceCoordinator:
         if stale_after_seconds <= 0:
             raise ValueError("operation lease must be positive")
 
+        conditions = [
+            ContainerInstanceModel.id == instance_id,
+            ContainerInstanceModel.state.in_(expected_states),
+        ]
+        if expected_state_version is not None:
+            conditions.append(ContainerInstanceModel.state_version == expected_state_version)
+
+        if maintenance_cutoff is not None:
+            if (
+                expected_state_version is None
+                or reconcile_safety_age_seconds is None
+                or reconcile_safety_age_seconds <= 0
+            ):
+                raise ValueError("maintenance claims require a state version and positive safety age")
+
+            stale_before = maintenance_cutoff - reconcile_safety_age_seconds
+            conditions.append(
+                ((ContainerInstanceModel.state == "running") & (ContainerInstanceModel.expires < maintenance_cutoff))
+                | (
+                    (ContainerInstanceModel.state == "cleanup_pending")
+                    & (ContainerInstanceModel.updated_at < stale_before)
+                )
+                | (
+                    (ContainerInstanceModel.state == "provisioning")
+                    & ContainerInstanceModel.provision_deadline.isnot(None)
+                    & (ContainerInstanceModel.provision_deadline < stale_before)
+                )
+            )
+
         token = uuid.uuid4().hex
         session = _new_session()
         try:
@@ -664,8 +696,7 @@ class InstanceCoordinator:
             updated = (
                 session.query(ContainerInstanceModel)
                 .filter(
-                    ContainerInstanceModel.id == instance_id,
-                    ContainerInstanceModel.state.in_(expected_states),
+                    *conditions,
                     (
                         ContainerInstanceModel.operation_token.is_(None)
                         | (ContainerInstanceModel.updated_at < now - stale_after_seconds)

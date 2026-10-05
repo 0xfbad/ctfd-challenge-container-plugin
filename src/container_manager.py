@@ -698,8 +698,11 @@ class ContainerManager:
         for instance in logical_instances:
             operation_token = InstanceCoordinator.claim_operation(
                 instance.id,
-                ("running", "cleanup_pending", "provisioning"),
+                (instance.state,),
                 "cleanup_pending",
+                expected_state_version=instance.state_version,
+                maintenance_cutoff=now,
+                reconcile_safety_age_seconds=self.RECONCILE_SAFETY_AGE_SECONDS,
             )
             if operation_token is None:
                 continue
