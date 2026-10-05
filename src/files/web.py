@@ -263,16 +263,7 @@ def status() -> Response | tuple[Response, int]:
     if user is None or user.banned or user.type != "admin":
         abort(403)
     try:
-        summary = _store().summary()
-        rows = summary["challenges"]
-        names = dict(
-            Challenges.query.with_entities(Challenges.id, Challenges.name).filter(
-                Challenges.id.in_([row["challenge_id"] for row in rows])
-            )
-        )
-        for row in rows:
-            row["name"] = names.get(row["challenge_id"], "Deleted challenge")
-        return jsonify(success=True, data=summary)
+        return jsonify(success=True, data=_store().summary())
     except (StoreError, OSError):
         return jsonify(success=False, error="File generation status is unavailable."), 503
 

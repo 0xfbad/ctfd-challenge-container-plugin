@@ -330,56 +330,23 @@ class Store:
     def summary(self):
         states = ("queued", "running", "ready", "failed")
         with self.lock(shared=True):
-            jobs = self._jobs()
             recipes = {}
-            for path in sorted((self.root / "recipes").glob("*.json")):
-                if not path.stem.isdecimal():
-                    continue
-                recipe = self._available_recipe(int(path.stem))
-                if recipe is not None:
-                    recipes[int(path.stem)] = recipe
-            rows = {}
-            for challenge_id, recipe in recipes.items():
-                rows[challenge_id] = {
-                    "challenge_id": challenge_id,
-                    "version": recipe["version"],
-                    "image": recipe["image"],
-                    **dict.fromkeys(states, 0),
-                    "obsolete": 0,
-                }
-            for job in jobs:
-                row = rows.get(job["challenge_id"])
-                if row is None:
-                    continue
-                state = (
-                    job["state"]
-                    if recipes[job["challenge_id"]] == job["recipe"] and not job.get("obsolete")
-                    else "obsolete"
-                )
-                row[state] += 1
-            counts = {state: sum(job["state"] == state for job in jobs) for state in states}
-            payload_bytes = self._payload_bytes(jobs)
-            now = time.time()
-            pending = [job for job in jobs if job["state"] == "queued"]
-            oldest = min((job["created"] for job in pending), default=now)
-            active = [job for job in jobs if job["state"] in ("queued", "running")]
-            background_pending = sum(job.get("background", False) for job in active)
+            jobs = []
+            for job in self._jobs():
+                challenge_id = job["challenge_id"]
+                if challenge_id not in recipes:
+                    recipes[challenge_id] = self._available_recipe(challenge_id)
+                if job["recipe"] == recipes[challenge_id] and not job.get("obsolete"):
+                    jobs.append(job)
+            queued = [job for job in jobs if job["state"] == "queued"]
+            background_queued = sum(job.get("background", False) for job in queued)
+            available_bytes = self.available_space() if queued else 0
             return {
-                "counts": counts,
-                "jobs": len(jobs),
-                "max_jobs": self.max_jobs,
-                "pending": counts["queued"] + counts["running"],
-                "max_pending": self.max_pending,
-                "background_pending": background_pending,
-                "demand_pending": len(active) - background_pending,
-                "max_background_pending": self.max_pending // 2,
-                "max_bytes": self.max_bytes,
-                "payload_bytes": payload_bytes,
-                "oldest_wait_seconds": max(0, int(now - oldest)),
-                "retention_seconds": self.retention_seconds,
-                "configured_challenges": len(rows),
-                "challenges": [rows[key] for key in sorted(rows)[:100]],
-                "omitted_challenges": max(0, len(rows) - 100),
+                "counts": {state: sum(job["state"] == state for job in jobs) for state in states},
+                "download_queued": len(queued) - background_queued,
+                "background_queued": background_queued,
+                "storage_blocked": bool(queued)
+                and all(job["recipe"]["max_output_bytes"] > available_bytes for job in queued),
             }
 
     def request(
