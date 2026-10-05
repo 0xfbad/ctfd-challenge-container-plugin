@@ -39,7 +39,7 @@ CPU_QUOTA_BASE = 100000
 
 NAME_PREFIX = "chal-"
 
-CATALOG_REFRESH_INTERVAL = 10  # seconds between per worker catalog re-reads, the load is a plain db query
+CATALOG_REFRESH_INTERVAL = 10
 
 _SSH_CAPS = ["SYS_CHROOT", "SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE", "AUDIT_WRITE"]
 _RESERVATION_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -139,8 +139,9 @@ def _resource_kwargs(max_memory_mb: int | None, max_cpu: float | None) -> dict[s
     return kwargs
 
 
-# no-new-privileges does not drop granted caps so keep this allowlist minimal
-_ALLOWED_CAPS = frozenset({"NET_ADMIN", "NET_RAW", "SYS_PTRACE", "SYS_NICE"})
+_ALLOWED_CAPS = frozenset(
+    {"NET_ADMIN", "NET_RAW", "SYS_PTRACE", "SYS_NICE"}
+)  # no-new-privileges keeps granted capabilities
 
 
 def _filter_admin_caps(cap_add: str | None, chal_id: int | str | None = None) -> list[str]:
@@ -180,9 +181,8 @@ class ContainerManager:
         if self.host_manager.has_contexts():
             return
 
-        # reload contexts only, initialize_connection would tear down the expiration scheduler from a request greenlet and apscheduler cannot join it
         try:
-            self.load_docker_contexts()
+            self.load_docker_contexts()  # scheduler reinitialization cannot join the current greenlet
         except ContainerException:
             raise ContainerUnavailableException("docker is not connected")
 
@@ -213,8 +213,9 @@ class ContainerManager:
 
         from gevent import monkey
 
-        # the apscheduler thread pool executor dies at interpreter shutdown under gevent, GeventExecutor does not
-        scheduler_cls = GeventScheduler if monkey.is_module_patched("threading") else BackgroundScheduler
+        scheduler_cls = (
+            GeventScheduler if monkey.is_module_patched("threading") else BackgroundScheduler
+        )  # GeventExecutor survives gevent shutdown
         self.expiration_scheduler = scheduler_cls()
         self.expiration_scheduler.add_job(
             func=self._maintenance_tick,
@@ -224,9 +225,16 @@ class ContainerManager:
             coalesce=True,
             max_instances=1,
         )
-        # its own job so a dead host connect never delays the expiry tick
-        self.expiration_scheduler.add_job(
+        self.expiration_scheduler.add_job(  # slow host connections must not delay expiration
             func=self._warm_up_tick,
+            trigger="interval",
+            seconds=5,
+            misfire_grace_time=30,
+            coalesce=True,
+            max_instances=1,
+        )
+        self.expiration_scheduler.add_job(
+            func=self._prepare_files_tick,
             trigger="interval",
             seconds=5,
             misfire_grace_time=30,
@@ -239,10 +247,14 @@ class ContainerManager:
             if self.expiration_scheduler.running:
                 self.expiration_scheduler.shutdown(wait=False)
 
-        # initialize_connection can run more than once, the hook reads the current scheduler so one is enough
         if not getattr(self, "_shutdown_hook_registered", False):
             atexit.register(_shutdown_scheduler)
             self._shutdown_hook_registered = True
+
+    def _prepare_files_tick(self) -> None:
+        from .files.prepare import reconcile
+
+        self._run_maintenance_job("file-preparation", 5, lambda: reconcile(self.app))
 
     def _run_maintenance_job(self, name: str, interval: int, operation: Callable[[], None]) -> bool:
         try:
@@ -268,14 +280,12 @@ class ContainerManager:
             return False
 
     def _warm_up_tick(self) -> None:
-        # every worker warms its own connectivity, under the maintenance lock only one would
         try:
-            self.host_manager.warm_up()
+            self.host_manager.warm_up()  # each worker needs its own connection state
         except Exception:
             logger.exception("context warm up failed")
 
     def _maintenance_tick(self) -> None:
-        # every worker refreshes its own catalog, the cross worker lock below is only for the jobs
         self._refresh_catalog()
 
         with self.app.app_context():
@@ -298,7 +308,6 @@ class ContainerManager:
         if time.time() - self._last_catalog_refresh < CATALOG_REFRESH_INTERVAL:
             return
 
-        # stamped before the call so a raising refresh cannot hot loop
         self._last_catalog_refresh = time.time()
         try:
             with self.app.app_context():
@@ -577,7 +586,7 @@ class ContainerManager:
                     svc_env,
                     ip_address=ips.get(svc_name),
                     hostname=svc_name,
-                    **svc_kwargs,  # type: ignore[arg-type]  # mypy cannot narrow dict unpacking
+                    **svc_kwargs,  # type: ignore[arg-type]
                 )
                 companions.append((svc_name, svc_container))
 
@@ -651,14 +660,12 @@ class ContainerManager:
             try:
                 self._kill_expired_containers_inner()
             finally:
-                # flask-sqlalchemy teardown only fires for request contexts so a manual app context leaks the scoped session connection
                 db.session.remove()
 
     def _kill_expired_containers_inner(self) -> None:
         if not self.host_manager.has_contexts():
-            # cheap catalog re-read, initialize_connection tears down the scheduler running this job and apscheduler cannot join the current thread
             try:
-                self.load_docker_contexts()
+                self.load_docker_contexts()  # scheduler reinitialization cannot join the current greenlet
             except ContainerException:
                 return
 
@@ -748,9 +755,8 @@ class ContainerManager:
                     },
                 )
 
-        self._reconcile_orphans()
+        self._reconcile_orphans()  # host outages can leave labeled resources without committed instances
 
-    # a docker or ssh outage between container creation and db commit leaves labeled resources with no logical instance
     RECONCILE_INSTANCE_LABEL = "ctf.instance_id"
     RECONCILE_SAFETY_AGE_SECONDS = 300
 
@@ -781,7 +787,6 @@ class ContainerManager:
                     oldest_by_instance[instance_id] = (created_ts, name)
 
             for instance_id, (created_ts, name) in oldest_by_instance.items():
-                # unknown timestamp reads as age 0 so the orphan is retained
                 age = now - created_ts if created_ts > 0 else 0
                 if age < self.RECONCILE_SAFETY_AGE_SECONDS:
                     continue

@@ -254,6 +254,20 @@
 	{% endif %}
 	{% endwith %}
 
+	<div class="card mb-3" id="file-generation">
+		<div class="card-header"><h3 class="card-title">File generation</h3></div>
+		<div class="card-body">
+			<p id="file-generation-capacity" role="status">Loading file status...</p>
+			<div class="table-responsive">
+				<table class="table table-striped table-sm">
+					<thead><tr><th>Challenge</th><th>Version</th><th>Image</th><th>Queued</th><th>Running</th><th>Cached</th><th>Failed</th><th>Obsolete</th></tr></thead>
+					<tbody id="file-generation-rows"></tbody>
+				</table>
+			</div>
+			<small class="text-muted">Published files prepare in the background for registered players. Downloads take priority. Background preparation pauses at cache capacity. Counts do not establish worker health or image availability.</small>
+		</div>
+	</div>
+
 	<div class="row">
 		<div class="col-md-12">
 			<div class="card">
@@ -465,14 +479,48 @@
 {% endblock %}
 
 {% block scripts %}
-<!-- ctfd core pins echarts 5, we load 6 separately for scatter jitter support on category axes -->
 <script src="https://cdn.jsdelivr.net/npm/echarts@6.0.0/dist/echarts.min.js"
 	integrity="sha384-F07Cpw5v8spSU0H113F33m2NQQ/o6GqPTnTjf45ssG4Q6q58ZwhxBiQtIaqvnSpR"
-	crossorigin="anonymous"></script>
+	crossorigin="anonymous"></script><!-- ctfd core pins echarts 5, we load 6 separately for scatter jitter support on category axes -->
 <script>
 	let autoRefreshInterval = null;
 	let eventSource = null;
 	let countdownInterval = null;
+
+	async function refreshFileGeneration() {
+		const capacity = document.getElementById('file-generation-capacity');
+		const body = document.getElementById('file-generation-rows');
+		try {
+			const response = await fetch({{ url_for('personalized_files.status') | tojson }}, {cache: 'no-store', credentials: 'same-origin'});
+			if (!response.ok || response.redirected) throw new Error('File status unavailable');
+			const result = await response.json();
+			if (!result.success) throw new Error('File status unavailable');
+			const data = result.data;
+			capacity.textContent = `${data.demand_pending} download requests, ${data.background_pending}/${data.max_background_pending} background jobs, ${data.pending}/${data.max_pending} pending jobs, ${data.jobs}/${data.max_jobs} stored jobs, oldest wait ${data.oldest_wait_seconds}s, cached payload ${(data.payload_bytes / 1073741824).toFixed(2)}/${(data.max_bytes / 1073741824).toFixed(1)} GiB.`;
+			const rows = data.challenges.map(challenge => {
+				const row = document.createElement('tr');
+				for (const field of ['name', 'version', 'image', 'queued', 'running', 'ready', 'failed', 'obsolete']) {
+					const cell = document.createElement('td');
+					cell.textContent = field === 'image' ? challenge[field].slice(-16) : challenge[field];
+					if (field === 'image') cell.title = challenge[field];
+					row.append(cell);
+				}
+				return row;
+			});
+			if (!rows.length) {
+				const row = document.createElement('tr');
+				const cell = document.createElement('td');
+				cell.colSpan = 8;
+				cell.textContent = 'No generated files configured.';
+				row.append(cell);
+				rows.push(row);
+			}
+			body.replaceChildren(...rows);
+			if (data.omitted_challenges) capacity.textContent += ` Showing the first 100 of ${data.configured_challenges} challenges.`;
+		} catch {
+			capacity.textContent = 'File generation status is unavailable. Try refreshing the page.';
+		}
+	}
 
 	function formatTimestamp(timestamp) {
 		const date = new Date(timestamp * 1000);
@@ -852,7 +900,10 @@
 	function startAutoRefresh() {
 		stopAutoRefresh();
 		refreshContainers();
-		autoRefreshInterval = setInterval(refreshContainers, 10000);
+		autoRefreshInterval = setInterval(() => {
+			refreshContainers();
+			if (!document.hidden) refreshFileGeneration();
+		}, 10000);
 	}
 
 	function stopAutoRefresh() {
@@ -1361,6 +1412,7 @@
 	}
 
 	document.addEventListener('DOMContentLoaded', function() {
+		refreshFileGeneration();
 		fetch('/containers/api/user_flags')
 			.then(r => r.json())
 			.then(flags => {

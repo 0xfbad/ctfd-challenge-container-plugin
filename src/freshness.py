@@ -24,6 +24,12 @@ def compute_token(secret: str, challenge_id: int | str, xid: int | str, length: 
     return "".join(chars)
 
 
+def compute_seed(secret: str, challenge_id: int | str, xid: int | str, *, team_mode: bool = False) -> str:
+    owner = f"{'team' if team_mode else 'user'}:{xid}"
+    message = b"ctfd-freshness:seed:v1\x00" + f"{challenge_id}:{owner}".encode()
+    return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
+
+
 def render_flag(template: str, token: str) -> str:
     return template.replace(PLACEHOLDER, token)
 

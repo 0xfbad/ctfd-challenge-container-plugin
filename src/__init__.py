@@ -6,7 +6,7 @@ import socket
 
 from flask import Flask
 
-from CTFd.plugins import register_plugin_assets_directory
+from CTFd.plugins import register_plugin_assets_directory, register_plugin_script
 from CTFd.plugins.challenges import CHALLENGE_CLASSES
 
 from . import event_bus
@@ -29,8 +29,7 @@ def _seed_defaults(app: Flask) -> None:
 
     existing = {s.key: s.value for s in ContainerSettingsModel.query.all()}
     for key, value in DEFAULTS.items():
-        # an empty freshness secret means opt out, so never seed the schema default, generate one below instead
-        if key != "freshness_secret" and key not in existing:
+        if key != "freshness_secret" and key not in existing:  # empty secrets disable freshness
             db.session.add(ContainerSettingsModel(key=key, value=str(value)))
 
     if "freshness_secret" not in existing:
@@ -45,8 +44,7 @@ def _seed_local_context(app: Flask) -> None:
     if DockerContextModel.query.count() > 0:
         return
 
-    # fail closed without touching the daemon, the health tick decides reachability
-    if not os.path.exists(LOCAL_SOCKET_PATH):
+    if not os.path.exists(LOCAL_SOCKET_PATH):  # health ticks decide daemon reachability
         return
 
     db.session.add(
@@ -73,6 +71,10 @@ def load(app: Flask) -> None:
     register_plugin_assets_directory(app, base_path=assets_path)
 
     with app.app_context():
+        script = f"/{assets_path}/files.js"
+        if app.config.get("APPLICATION_ROOT") != "/":
+            script = script.lstrip("/")
+        register_plugin_script(script)
         _seed_defaults(app)
         _seed_local_context(app)
 
@@ -85,7 +87,10 @@ def load(app: Flask) -> None:
 
     app.register_blueprint(containers_bp)
 
-    # an overridden template lets the admin config page include this without knowing the plugin folder name
     config_tpl = os.path.join(os.path.dirname(__file__), "templates", "container_config.html")
     with open(config_tpl) as f:
         app.overridden_templates["container_config.html"] = f.read()
+
+    from .files.web import install as install_files
+
+    install_files(app)

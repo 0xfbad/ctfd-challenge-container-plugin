@@ -24,7 +24,7 @@ from ..coordination import (
 from ..docker_host_manager import LOCAL_CONTEXT_NAME
 from ..event_logger import event_logger
 from ..exceptions import ContainerException
-from ..freshness import compute_token
+from ..freshness import compute_seed, compute_token
 from ..messages import (
     AWAITING_CLEANUP,
     CHALLENGE_LOCKED,
@@ -153,7 +153,7 @@ def resolve_expiration(challenge: ContainerChallengeModel) -> int:
 
 def resolve_max_renewals(challenge: ContainerChallengeModel) -> int:
     max_renewals = challenge.max_renewals
-    if max_renewals is None:  # zero disables renewals
+    if max_renewals is None:
         max_renewals = get_setting("default_max_renewals", 2)
 
     return int(max_renewals)
@@ -202,7 +202,7 @@ def get_hostname_for_context(context_name: str | None) -> str:
     if not context.hostname:
         return _request_hostname()
 
-    return context.hostname.split("@")[-1]  # ssh endpoints can include a username
+    return context.hostname.split("@")[-1]
 
 
 def _log_request_failed(challenge: ContainerChallengeModel, uid: int, err: Exception) -> None:
@@ -481,6 +481,7 @@ def create_container(
         token_length = int(get_setting("freshness_token_length", 6) or 6)
         token = compute_token(str(freshness_secret_raw), chal_id, xid, length=token_length)
         extra_env["FRESHNESS_TOKEN"] = token
+        extra_env["FRESHNESS_SEED"] = compute_seed(str(freshness_secret_raw), chal_id, xid, team_mode=is_team)
 
     if challenge.ssh_username:
         extra_env["SSH_USERNAME"] = challenge.ssh_username
