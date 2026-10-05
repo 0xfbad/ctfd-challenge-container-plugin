@@ -298,8 +298,9 @@ class Store:
                     continue
         return total
 
-    def available_space(self):
-        usage = shutil.disk_usage(self.root)
+    def available_space(self, usage=None):
+        if usage is None:
+            usage = shutil.disk_usage(self.root)
         reserve = usage.total // 20  # the handout volume shares a disk with database and logs
         return usage.free - reserve
 
@@ -340,14 +341,38 @@ class Store:
                     jobs.append(job)
             queued = [job for job in jobs if job["state"] == "queued"]
             background_queued = sum(job.get("background", False) for job in queued)
-            available_bytes = self.available_space() if queued else 0
-            return {
-                "counts": {state: sum(job["state"] == state for job in jobs) for state in states},
-                "download_queued": len(queued) - background_queued,
-                "background_queued": background_queued,
-                "storage_blocked": bool(queued)
-                and all(job["recipe"]["max_output_bytes"] > available_bytes for job in queued),
-            }
+
+        cached_files = cached_bytes = 0
+        for job in jobs:
+            if job["state"] != "ready":
+                continue
+            directory = self.root / "artifacts" / job["key"]
+            try:
+                if not stat.S_ISDIR(directory.lstat().st_mode):
+                    continue
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            for filename in job["recipe"]["outputs"]:
+                try:
+                    metadata = (directory / filename).lstat()
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+                if stat.S_ISREG(metadata.st_mode):
+                    cached_files += 1
+                    cached_bytes += metadata.st_size
+
+        usage = shutil.disk_usage(self.root)
+        available_bytes = self.available_space(usage)
+        return {
+            "counts": {state: sum(job["state"] == state for job in jobs) for state in states},
+            "download_queued": len(queued) - background_queued,
+            "background_queued": background_queued,
+            "cached_files": cached_files,
+            "cached_bytes": cached_bytes,
+            "disk_free_bytes": usage.free,
+            "storage_blocked": bool(queued)
+            and all(job["recipe"]["max_output_bytes"] > available_bytes for job in queued),
+        }
 
     def request(
         self,

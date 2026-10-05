@@ -265,6 +265,14 @@
 				</div>
 				{% endfor %}
 			</div>
+			<div class="row text-center border-top mt-2 pt-2">
+				{% for stat, label in [('files', 'Cached files'), ('size', 'Cached size'), ('free', 'Disk free')] %}
+				<div class="col py-2">
+					<h4 id="file-generation-{{ stat }}" class="mb-0"{% if stat == 'free' %} title="Free space on the handout filesystem"{% endif %}>-</h4>
+					<small class="text-muted">{{ label }}</small>
+				</div>
+				{% endfor %}
+			</div>
 			<small id="file-generation-error" class="text-danger" role="status" hidden>File status unavailable</small>
 		</div>
 	</div>
@@ -488,6 +496,16 @@
 	let eventSource = null;
 	let countdownInterval = null;
 
+	function formatFileBytes(bytes) {
+		const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+		let unit = 0;
+		while (bytes >= 1024 && unit < units.length - 1) {
+			bytes /= 1024;
+			unit += 1;
+		}
+		return `${bytes.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+	}
+
 	async function refreshFileGeneration() {
 		const error = document.getElementById('file-generation-error');
 		try {
@@ -496,24 +514,28 @@
 			const result = await response.json();
 			if (!result.success) throw new Error('File status unavailable');
 			const data = result.data;
-			const counts = {
+			const metrics = {
 				download: data.download_queued,
 				background: data.background_queued,
 				running: data.counts.running,
 				ready: data.counts.ready,
-				failed: data.counts.failed
+				failed: data.counts.failed,
+				files: data.cached_files,
+				size: data.cached_bytes,
+				free: data.disk_free_bytes
 			};
 			if (typeof data.storage_blocked !== 'boolean' ||
-				Object.values(counts).some(count => !Number.isSafeInteger(count) || count < 0)) {
+				Object.values(metrics).some(value => !Number.isSafeInteger(value) || value < 0)) {
 				throw new Error('File status unavailable');
 			}
-			for (const [stat, count] of Object.entries(counts)) {
-				document.getElementById(`file-generation-${stat}`).textContent = count;
+			for (const [stat, value] of Object.entries(metrics)) {
+				document.getElementById(`file-generation-${stat}`).textContent =
+					stat === 'size' || stat === 'free' ? formatFileBytes(value) : value;
 			}
 			error.textContent = data.storage_blocked ? 'Low disk space' : 'File status unavailable';
 			error.hidden = !data.storage_blocked;
 		} catch {
-			for (const stat of ['download', 'background', 'running', 'ready', 'failed']) {
+			for (const stat of ['download', 'background', 'running', 'ready', 'failed', 'files', 'size', 'free']) {
 				document.getElementById(`file-generation-${stat}`).textContent = '-';
 			}
 			error.textContent = 'File status unavailable';
