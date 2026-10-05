@@ -6,6 +6,8 @@ from collections import defaultdict
 from threading import Lock
 from typing import TypedDict
 
+from sqlalchemy.orm import sessionmaker
+
 from CTFd.models import db
 
 from .coordination import InstanceCoordinator
@@ -32,6 +34,7 @@ class Orchestrator:
         self.health: dict[str, bool] = {}
         self.weights: dict[str, int] = {}
         self.lock = Lock()
+        self._catalog_lock = Lock()
 
     def _refresh_db_counts(self) -> None:
         contexts = DockerContextModel.query.all()
@@ -50,8 +53,13 @@ class Orchestrator:
     def load_from_db(self) -> None:
         # catalog only, health is owned by the periodic health check so boot does no network io
         # no state filter, draining and retired contexts still need cleanup and down hosts stay retryable
-        contexts = DockerContextModel.query.all()
-        self.host_manager.load_contexts(contexts)
+        with self._catalog_lock:
+            session = sessionmaker(bind=db.engine, expire_on_commit=False)()
+            try:
+                contexts = session.query(DockerContextModel).all()
+                self.host_manager.load_contexts(contexts)
+            finally:
+                session.close()
         self._refresh_db_counts()
         logger.info("loaded %d configured contexts", len(contexts))
 

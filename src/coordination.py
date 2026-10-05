@@ -390,6 +390,7 @@ class InstanceCoordinator:
                 DockerContextModel.id == context.id,
                 DockerContextModel.state == "active",
                 DockerContextModel.health_state == "healthy",
+                DockerContextModel.hostname == context.hostname,
             )
             .update(
                 {DockerContextModel.placement_version: DockerContextModel.placement_version + 1},

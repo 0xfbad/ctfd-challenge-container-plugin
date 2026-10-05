@@ -746,6 +746,19 @@ def _context_docker_resource_counts(context: DockerContextModel) -> tuple[int, i
     )
 
 
+def _endpoint_docker_resource_counts(endpoint: str) -> tuple[int, int]:
+    client = _new_docker_client(endpoint, timeout=_CONTEXT_TEST_TIMEOUT)
+    try:
+        containers = client.containers.list(filters={"label": "ctf.instance_id"}, all=True)
+        networks = client.networks.list(filters={"label": "ctf.instance_id"})
+        return len(containers), len(networks)
+    finally:
+        try:
+            client.close()
+        except Exception:
+            logger.debug("failed to close context resource probe client", exc_info=True)
+
+
 @containers_bp.route("/api/contexts/list", methods=["GET"])
 @admins_only
 def route_api_list_contexts():
@@ -829,12 +842,17 @@ def route_api_add_context():
 
 
 def _endpoint_change_conflict(context: DockerContextModel) -> tuple[Response, int] | None:
+    endpoint = _resolve_endpoint(context.context_name, context.hostname)
     physical_refs, logical_refs = _context_reference_counts(context)
     if physical_refs or logical_refs:
         return jsonify(error="stop and clean all instances before changing a context endpoint"), 409
 
+    db.session.rollback()
     try:
-        docker_containers, docker_networks = _context_docker_resource_counts(context)
+        if not endpoint:
+            return jsonify(error="no endpoint could be resolved for this context"), 503
+
+        docker_containers, docker_networks = _endpoint_docker_resource_counts(endpoint)
     except Exception:
         logger.warning("could not verify Docker resource absence before endpoint update", exc_info=True)
         return jsonify(error="could not verify that the context has no Docker resources"), 503
@@ -865,13 +883,11 @@ def route_api_update_context(context_id):
     try:
         payload = _context_payload(creating=False)
         updates: dict[str, object] = {}
+        original_hostname = context.hostname
+        endpoint_changed = False
         if "hostname" in payload:
             requested_hostname = _optional_ssh_target(payload["hostname"])
-            if requested_hostname != context.hostname:
-                conflict = _endpoint_change_conflict(context)
-                if conflict is not None:
-                    return conflict
-
+            endpoint_changed = requested_hostname != original_hostname
             updates["hostname"] = requested_hostname
 
         if "pub_hostname" in payload:
@@ -880,17 +896,50 @@ def route_api_update_context(context_id):
         if "weight" in payload:
             updates["weight"] = parse_strict_int(payload["weight"], "weight", minimum=1, maximum=1_000)
 
-        requested_state = context.state
         if "state" in payload:
-            requested_state = _context_state(payload["state"])
-        if context.state == "retired_orphaned" and requested_state != "retired_orphaned":
+            updates["state"] = _context_state(payload["state"])
+        if context.state == "retired_orphaned" and updates.get("state", context.state) != "retired_orphaned":
             raise ValidationError("retired contexts cannot be reactivated")
 
-        updates["state"] = requested_state
+        if endpoint_changed:
+            original_state = context.state
+            original_placement_version = context.placement_version
+            if original_state not in ("draining", "disabled"):
+                return jsonify(error="drain or disable the context before changing its endpoint"), 409
+
+            if updates.get("state", original_state) not in ("draining", "disabled"):
+                return jsonify(error="change the endpoint and reactivate the context in separate requests"), 409
+
+            conflict = _endpoint_change_conflict(context)
+            if conflict is not None:
+                return conflict
     except ValidationError as exc:
         return jsonify(error=str(exc)), 400
 
     try:
+        context = DockerContextModel.query.filter_by(id=context_id).populate_existing().with_for_update().first()
+        if context is None:
+            db.session.rollback()
+            return jsonify(error="context not found"), 404
+
+        if "hostname" in updates and context.hostname != original_hostname:
+            db.session.rollback()
+            return jsonify(error="context endpoint changed while this request was running; retry"), 409
+
+        if endpoint_changed:
+            if context.state != original_state or context.placement_version != original_placement_version:
+                db.session.rollback()
+                return jsonify(error="context placement state changed while checking its endpoint; retry"), 409
+
+            physical_refs, logical_refs = _context_reference_counts(context)
+            if physical_refs or logical_refs:
+                db.session.rollback()
+                return jsonify(error="stop and clean all instances before changing a context endpoint"), 409
+
+        if context.state == "retired_orphaned" and updates.get("state", context.state) != "retired_orphaned":
+            db.session.rollback()
+            return jsonify(error="retired contexts cannot be reactivated"), 400
+
         for field, value in updates.items():
             setattr(context, field, value)
         db.session.commit()

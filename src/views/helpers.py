@@ -549,6 +549,12 @@ def create_container(
         return error_body(PLACEMENT_FAILED, "transient"), 503
 
     try:
+        container_manager.load_docker_contexts()
+    except Exception as err:
+        _cleanup_failed_reservation(container_manager, reservation, err, ambiguous_external_io=True)
+        return error_body(sanitize_container_error(err)), 503, {"Retry-After": "300"}
+
+    try:
         entry_volumes, service_volumes = _resolve_runtime_volumes(
             policy, volume_plan, reservation.context_name, container_manager
         )
