@@ -14,6 +14,8 @@ from contextlib import closing, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from requests.exceptions import ReadTimeout
+
 if TYPE_CHECKING or __package__:
     from .store import ArtifactUnavailable, QueueFull, RecipeChanged, Store, StoreBusy, StoreError, remove_if_exists
 else:
@@ -29,6 +31,27 @@ _WRAPPER = (
 
 class GenerationError(StoreError):
     pass
+
+
+def _wait_for_start(container, deadline, cancelled):
+    while True:
+        if cancelled.is_set():
+            raise RecipeChanged("generation is no longer current")
+        if time.monotonic() >= deadline:
+            raise GenerationError("generation timed out")
+        try:
+            container.reload()
+        except ReadTimeout:
+            continue
+        if cancelled.is_set():
+            raise RecipeChanged("generation is no longer current")
+        if time.monotonic() >= deadline:
+            raise GenerationError("generation timed out")
+        if container.attrs.get("State", {}).get("Error") or container.status not in ("created", "running"):
+            raise GenerationError("generator failed to start")
+        if container.status == "running":
+            return
+        time.sleep(0.2)
 
 
 def _docker_chunks(connection, deadline, cancelled=None):
@@ -246,7 +269,11 @@ class DockerGenerator:
         failed = False
         try:
             self.phase = "start"
-            container.start()
+            try:
+                container.start()
+            except ReadTimeout:
+                self.phase = "start-wait"
+                _wait_for_start(container, deadline, cancelled)
             while True:
                 if cancelled.is_set():
                     raise RecipeChanged("generation is no longer current")
