@@ -54,7 +54,7 @@ class Orchestrator:
         # catalog only, health is owned by the periodic health check so boot does no network io
         # no state filter, draining and retired contexts still need cleanup and down hosts stay retryable
         with self._catalog_lock:
-            session = sessionmaker(bind=db.engine, expire_on_commit=False)()
+            session = sessionmaker(bind=db.engine)()
             try:
                 contexts = session.query(DockerContextModel).all()
                 self.host_manager.load_contexts(contexts)
