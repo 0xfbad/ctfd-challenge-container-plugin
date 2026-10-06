@@ -134,6 +134,7 @@ class DockerGenerator:
             client = docker.from_env(timeout=5)
         self.client = client
         self.store = store
+        self.phase = "idle"
 
     @staticmethod
     def container_name(job):
@@ -146,6 +147,7 @@ class DockerGenerator:
         if self.store is not None and not job.get("generation"):
             return
         try:
+            self.phase = "cleanup-lookup"
             container = self.client.containers.get(self.container_name(job))
         except NotFound:
             return
@@ -156,22 +158,27 @@ class DockerGenerator:
             labels["ctfd.personalized.store"] = self.store.namespace
         if any(container.labels.get(name) != value for name, value in labels.items()):
             raise GenerationError("generator container name is already in use")
+        self.phase = "cleanup-remove"
         container.remove(force=True)
 
     def cleanup_all(self, jobs):
         keys = {job["key"] for job in jobs}
         label = f"ctfd.personalized.store={self.store.namespace}" if self.store is not None else "ctfd.personalized.key"
+        self.phase = "cleanup-list"
         for container in self.client.containers.list(all=True, filters={"label": label}):
             scoped = self.store is not None and container.labels.get("ctfd.personalized.store") == self.store.namespace
             if scoped or (self.store is None and container.labels.get("ctfd.personalized.key") in keys):
+                self.phase = "cleanup-remove"
                 container.remove(force=True)
 
     def __call__(self, job, stage):
+        self.phase = "check-current"
         if self.store is not None and not _retry_store(self.store.current, job):
             raise RecipeChanged("generation is no longer current")
         self.cleanup(job)
         recipe = job["recipe"]
         deadline = time.monotonic() + recipe["timeout_seconds"]
+        self.phase = "image"
         image = self.client.images.get(recipe["image"])
         if image.attrs.get("Config", {}).get("Volumes"):
             raise GenerationError("generator images must not declare volumes")
@@ -185,6 +192,7 @@ class DockerGenerator:
             labels["ctfd.personalized.generation"] = job["generation"]
         if self.store is not None:
             labels["ctfd.personalized.store"] = self.store.namespace
+        self.phase = "create"
         container = self.client.containers.create(
             image=image.id,
             entrypoint=["/bin/sh"],
@@ -235,22 +243,27 @@ class DockerGenerator:
 
         watchdog = threading.Thread(target=stop_obsolete_container, daemon=True)
         watchdog.start()
+        failed = False
         try:
+            self.phase = "start"
             container.start()
             while True:
                 if cancelled.is_set():
                     raise RecipeChanged("generation is no longer current")
                 if time.monotonic() >= deadline:
                     raise GenerationError("generation timed out")
+                self.phase = "logs"
                 marker = _EXIT.fullmatch(container.logs(stdout=True, stderr=False, tail=1))
                 if marker:
                     if int(marker.group(1)):
                         raise GenerationError("generator exited unsuccessfully")
                     break
+                self.phase = "reload"
                 container.reload()
                 if container.status != "running":
                     raise GenerationError("generator stopped before completing")
                 time.sleep(0.2)
+            self.phase = "exec-create"
             execution = self.client.api.exec_create(
                 container.id,
                 cmd=["tar", "-C", "/output", "-cf", "-", "."],  # the archive api does not expose this tmpfs
@@ -258,20 +271,42 @@ class DockerGenerator:
                 stderr=True,
                 user="65534:65534",
             )["Id"]
+            self.phase = "exec-start"
             with closing(self.client.api.exec_start(execution, socket=True)) as connection:
+                self.phase = "archive"
                 stream = _TarStream(
                     _docker_chunks(connection, deadline, cancelled), recipe["max_output_bytes"] + 65536, deadline
                 )
                 unpack_outputs(stream, stage, recipe["outputs"], recipe["max_output_bytes"])
                 stream.drain()
+                self.phase = "exec-inspect"
                 if self.client.api.exec_inspect(execution)["ExitCode"] != 0:
                     raise GenerationError("could not read generator output")
+                self.phase = "check-current"
                 if cancelled.is_set() or (self.store is not None and not _retry_store(self.store.current, job)):
                     raise RecipeChanged("generation is no longer current")
+                self.phase = "archive-close"
+        except BaseException:
+            failed = True
+            raise
         finally:
             finished.set()
             watchdog.join(timeout=5)
-            container.remove(force=True)
+            phase = self.phase
+            self.phase = "cleanup-remove"
+            try:
+                container.remove(force=True)
+            except Exception as exc:
+                if not failed:
+                    raise
+                logger.warning(
+                    "artifact cleanup failed for challenge %s (%s) phase=%s",
+                    job["challenge_id"],
+                    type(exc).__name__,
+                    self.phase,
+                )
+            if failed:
+                self.phase = phase
 
 
 def _retry_store(operation, *args, **kwargs):
@@ -314,15 +349,19 @@ def run_once(store, generator=None, *, maintenance=None):
             if job is None:
                 return False
             stage = Path(tempfile.mkdtemp(dir=store.root / "staging", prefix=job["key"] + "-"))
+            phase = "prepare"
             try:
                 remove_if_exists(store.root / "artifacts" / job["key"])
                 if job.get("background", False):
                     _retry_store(store.collect, required_bytes=job["recipe"]["max_output_bytes"], evict=False)
                 else:
                     _retry_store(store.collect, required_bytes=job["recipe"]["max_output_bytes"])
+                phase = "storage"
                 if store.available_space() < job["recipe"]["max_output_bytes"]:
                     raise GenerationError("artifact storage is full")
+                phase = "generation"
                 generator(job, stage)
+                phase = "publish"
                 _retry_store(store.publish, job, stage)
             except Exception as exc:
                 if maintenance is not None:
@@ -330,7 +369,10 @@ def run_once(store, generator=None, *, maintenance=None):
                 message = str(exc) if isinstance(exc, (GenerationError, ArtifactUnavailable)) else "generation failed"
                 _retry_store(store.fail, job, message)
                 logger.warning(
-                    "artifact generation failed for challenge %s (%s)", job["challenge_id"], type(exc).__name__
+                    "artifact generation failed for challenge %s (%s) phase=%s",
+                    job["challenge_id"],
+                    type(exc).__name__,
+                    generator.phase if phase == "generation" and isinstance(generator, DockerGenerator) else phase,
                 )
             finally:
                 shutil.rmtree(stage, ignore_errors=True)
@@ -369,7 +411,11 @@ def main():
                 continue
         except Exception as exc:
             maintenance["next"] = 0
-            logger.error("artifact worker unavailable (%s)", type(exc).__name__)
+            logger.error(
+                "artifact worker unavailable (%s) docker_phase=%s",
+                type(exc).__name__,
+                generator.phase if generator is not None else "connect",
+            )
         time.sleep(1)
 
 

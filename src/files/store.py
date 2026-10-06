@@ -374,6 +374,61 @@ class Store:
             and all(job["recipe"]["max_output_bytes"] > available_bytes for job in queued),
         }
 
+    def retry_failed(self, owner_kind):
+        if owner_kind not in ("user", "team"):
+            raise StoreError("invalid artifact owner mode")
+
+        with self.lock():
+            mode = self._read(self.root / ".owner-mode.json")
+            if mode != {"namespace": self.namespace, "kind": owner_kind}:
+                raise StoreError("artifact owner mode is unavailable or changed")
+
+            jobs = self._jobs()
+            recipes = {}
+            failed = []
+            for job in jobs:
+                if job["state"] != "failed" or job["attempts"] < 3 or job.get("obsolete"):
+                    continue
+                if job.get("error") == "configuration changed" or not job["owner"].startswith(owner_kind + ":"):
+                    continue
+                challenge_id = job["challenge_id"]
+                if challenge_id not in recipes:
+                    recipes[challenge_id] = self._available_recipe(challenge_id)
+                if job["recipe"] == recipes[challenge_id]:
+                    failed.append(job)
+
+            if not failed or (self.max_jobs and len(jobs) > self.max_jobs):
+                return {"retried": 0, "remaining": len(failed)}
+
+            failed.sort(
+                key=lambda job: (
+                    job.get("background", False),
+                    job["created"] if job.get("background", False) else self._request_order(job),
+                    job["key"],
+                )
+            )
+            pending = [job for job in jobs if job["state"] in ("queued", "running")]
+            pending_count = len(pending)
+            reserved = sum(job["recipe"]["max_output_bytes"] for job in pending)
+            cached = self._payload_bytes(jobs)
+            available = self.available_space()
+            retried = 0
+            for job in failed:
+                limit = self.max_pending // 2 if job.get("background", False) else self.max_pending
+                size = job["recipe"]["max_output_bytes"]
+                if pending_count >= limit or reserved + size > available:
+                    continue
+                if self.max_bytes and cached + reserved + size > self.max_bytes:
+                    continue
+
+                job.update(state="queued", attempts=0, next_attempt=0, error=None, updated=time.time())
+                self._write(self._job_path(job["key"]), job)
+                pending_count += 1
+                reserved += size
+                retried += 1
+
+            return {"retried": retried, "remaining": len(failed) - retried}
+
     def request(
         self,
         challenge_id,

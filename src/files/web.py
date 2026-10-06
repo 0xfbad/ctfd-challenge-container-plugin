@@ -273,6 +273,26 @@ def status() -> Response | tuple[Response, int]:
         return jsonify(success=False, error="File generation status is unavailable."), 503
 
 
+@blueprint.route("/admin/retry-failed", methods=["POST"])
+@admins_only
+def retry_failed() -> Response | tuple[Response, int]:
+    user = get_current_user()
+    if user is None or user.banned or user.type != "admin":
+        abort(403)
+    team_mode = utils.is_team_mode()
+    if team_mode is None:
+        return jsonify(success=False, error="The current file owner mode is unavailable."), 503
+    try:
+        data = _store().retry_failed("team" if team_mode else "user")
+        return jsonify(success=True, data=data)
+    except StoreBusy:
+        response = jsonify(success=False, error="The file store is busy. Try again shortly.")
+        response.headers["Retry-After"] = str(_RETRY_SECONDS)
+        return response, 503
+    except (StoreError, OSError):
+        return jsonify(success=False, error="File retries are unavailable. Refresh and try again."), 503
+
+
 @blueprint.route("/admin/<int:challenge_id>", methods=["GET", "PUT", "DELETE"])
 @admins_only
 def configure(challenge_id: int) -> Response | tuple[Response, int]:

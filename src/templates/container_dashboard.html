@@ -255,7 +255,10 @@
 	{% endwith %}
 
 	<div class="card mb-3" id="file-generation">
-		<div class="card-header"><h3 class="card-title">File generation</h3></div>
+		<div class="card-header">
+			<h3 class="card-title">File generation</h3>
+			<button type="button" class="btn btn-outline-secondary btn-sm" id="file-generation-retry" onclick="retryFailedFiles()" disabled>Retry failed files</button>
+		</div>
 		<div class="card-body p-3">
 			<div class="row text-center">
 				{% for stat, label in [('download', 'Download queue'), ('background', 'Background queue'), ('running', 'Building'), ('ready', 'Ready'), ('failed', 'Failed')] %}
@@ -274,6 +277,7 @@
 				{% endfor %}
 			</div>
 			<small id="file-generation-error" class="text-danger" role="status" hidden>File status unavailable</small>
+			<div id="file-generation-retry-message" class="mt-2" role="status" hidden></div>
 		</div>
 	</div>
 
@@ -495,6 +499,7 @@
 	let autoRefreshInterval = null;
 	let eventSource = null;
 	let countdownInterval = null;
+	let fileRetryPending = false;
 
 	function formatFileBytes(bytes) {
 		const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
@@ -508,6 +513,7 @@
 
 	async function refreshFileGeneration() {
 		const error = document.getElementById('file-generation-error');
+		const retry = document.getElementById('file-generation-retry');
 		try {
 			const response = await fetch({{ url_for('personalized_files.status') | tojson }}, {cache: 'no-store', credentials: 'same-origin'});
 			if (!response.ok || response.redirected) throw new Error('File status unavailable');
@@ -538,16 +544,57 @@
 				document.getElementById(`file-generation-${stat}`).textContent =
 					stat === 'size' || stat === 'free' ? formatFileBytes(value) : value;
 			}
+			retry.disabled = fileRetryPending || metrics.failed === 0;
 			error.className = 'text-danger';
 			error.textContent = data.storage_blocked ? 'Low disk space' : 'File status unavailable';
 			error.hidden = !data.storage_blocked;
 		} catch {
+			retry.disabled = true;
 			for (const stat of ['download', 'background', 'running', 'ready', 'failed', 'files', 'size', 'free']) {
 				document.getElementById(`file-generation-${stat}`).textContent = '-';
 			}
 			error.className = 'text-danger';
 			error.textContent = 'File status unavailable';
 			error.hidden = false;
+		}
+	}
+
+	async function retryFailedFiles() {
+		if (fileRetryPending) return;
+		const button = document.getElementById('file-generation-retry');
+		const message = document.getElementById('file-generation-retry-message');
+		let failureMessage = 'File retries are unavailable. Refresh and try again.';
+		fileRetryPending = true;
+		button.disabled = true;
+		message.hidden = true;
+		message.textContent = '';
+		try {
+			const response = await fetch({{ url_for('personalized_files.retry_failed') | tojson }}, {
+				method: 'POST',
+				credentials: 'same-origin',
+				headers: {'CSRF-Token': window.init.csrfNonce, 'Content-Type': 'application/json'},
+				body: '{}'
+			});
+			if (response.redirected) throw new Error('File retries are unavailable. Refresh and try again.');
+			const result = await response.json();
+			if (!response.ok || !result.success) {
+				if (typeof result.error === 'string') failureMessage = result.error;
+				throw new Error(failureMessage);
+			}
+			const data = result.data;
+			if (![data.retried, data.remaining].every(value => Number.isSafeInteger(value) && value >= 0)) {
+				throw new Error('File retries are unavailable. Refresh and try again.');
+			}
+			message.className = 'mt-2 text-muted';
+			message.textContent = `${data.retried} failed file jobs queued for retry.`;
+			if (data.remaining) message.textContent += ` ${data.remaining} still blocked by queue, storage, or catalog limits.`;
+		} catch {
+			message.className = 'mt-2 text-danger';
+			message.textContent = failureMessage;
+		} finally {
+			fileRetryPending = false;
+			message.hidden = false;
+			await refreshFileGeneration();
 		}
 	}
 
