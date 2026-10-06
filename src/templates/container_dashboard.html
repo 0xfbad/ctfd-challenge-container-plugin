@@ -587,7 +587,7 @@
 			}
 			message.className = 'mt-2 text-muted';
 			message.textContent = `${data.retried} failed file jobs queued for retry.`;
-			if (data.remaining) message.textContent += ` ${data.remaining} still blocked by queue, storage, or catalog limits.`;
+			if (data.remaining) message.textContent += ` ${data.remaining} still blocked by queue or storage limits.`;
 		} catch {
 			message.className = 'mt-2 text-danger';
 			message.textContent = failureMessage;

@@ -85,14 +85,7 @@ def validate_recipe(data):
 
 
 class Store:
-    def __init__(self, root, *, max_pending=128, max_jobs=0, max_bytes=None, retention_seconds=None):
-        if max_bytes is None:
-            try:
-                max_bytes = int(os.environ.get("PERSONALIZED_FILES_MAX_BYTES", "0"))
-            except ValueError as error:
-                raise StoreError("invalid file cache byte limit") from error
-        if type(max_bytes) is not int or not 0 <= max_bytes <= 2**63 - 1:
-            raise StoreError("invalid file cache byte limit")
+    def __init__(self, root, *, max_pending=128, max_jobs=0, retention_seconds=None):
         if type(max_jobs) is not int or max_jobs < 0:
             raise StoreError("invalid file catalog limit")
         if type(max_pending) is not int or max_pending < 2:
@@ -102,7 +95,6 @@ class Store:
         self.root = Path(root)
         self.max_pending = max_pending
         self.max_jobs = max_jobs
-        self.max_bytes = max_bytes
         self.retention_seconds = retention_seconds
         self._owner_mode = None
         for name in ("", "recipes", "jobs", "artifacts", "staging"):
@@ -286,18 +278,6 @@ class Store:
         self._owner_mode = self._owner_mode_stamp(kind)
         return jobs
 
-    def _payload_bytes(self, jobs):
-        total = 0
-        for job in jobs:
-            directory = self.root / "artifacts" / job["key"]
-            for path in directory.glob("*"):
-                try:
-                    if path.is_file():
-                        total += path.stat().st_size
-                except FileNotFoundError:
-                    continue
-        return total
-
     def available_space(self, usage=None):
         if usage is None:
             usage = shutil.disk_usage(self.root)
@@ -397,7 +377,7 @@ class Store:
                 if job["recipe"] == recipes[challenge_id]:
                     failed.append(job)
 
-            if not failed or (self.max_jobs and len(jobs) > self.max_jobs):
+            if not failed:
                 return {"retried": 0, "remaining": len(failed)}
 
             failed.sort(
@@ -410,7 +390,6 @@ class Store:
             pending = [job for job in jobs if job["state"] in ("queued", "running")]
             pending_count = len(pending)
             reserved = sum(job["recipe"]["max_output_bytes"] for job in pending)
-            cached = self._payload_bytes(jobs)
             available = self.available_space()
             retried = 0
             for job in failed:
@@ -418,9 +397,6 @@ class Store:
                 size = job["recipe"]["max_output_bytes"]
                 if pending_count >= limit or reserved + size > available:
                     continue
-                if self.max_bytes and cached + reserved + size > self.max_bytes:
-                    continue
-
                 job.update(state="queued", attempts=0, next_attempt=0, error=None, updated=time.time())
                 self._write(self._job_path(job["key"]), job)
                 pending_count += 1
@@ -515,11 +491,6 @@ class Store:
             pending_limit = self.max_pending // 2 if background else self.max_pending
             if catalog_full or len(pending) >= pending_limit:
                 raise QueueFull("artifact queue is full, retry later")
-            if background and self.max_bytes:
-                reserved = sum(item["recipe"]["max_output_bytes"] for item in pending)
-                payload_bytes = self._payload_bytes([item for item in jobs if item["key"] != key])
-                if payload_bytes + reserved + recipe["max_output_bytes"] > self.max_bytes:
-                    raise QueueFull("artifact storage is full")
             now = time.time()
             if job:
                 job.update(state="queued", attempts=0, next_attempt=0, created=now, updated=now, error=None)
@@ -618,22 +589,16 @@ class Store:
             )
             self._write(self._job_path(job["key"]), current)
 
-    def collect(self, *, required_bytes=0, evict=True):
+    def collect(self, *, evict=True):
         with self.lock():
-            self._collect(required_bytes=required_bytes, evict=evict)
+            self._collect(evict=evict)
 
-    def _collect(self, *, required_bytes=0, evict=True):
+    def _collect(self, *, evict=True):
         for directory in (self.root / "recipes", self.root / "jobs"):
             for temporary in directory.glob(".write-*"):
                 temporary.unlink()
         jobs = self._jobs()
         now = time.time()
-        usage = {}
-        if self.max_bytes:
-            for job in jobs:
-                directory = self.root / "artifacts" / job["key"]
-                usage[job["key"]] = sum(path.stat().st_size for path in directory.glob("*") if path.is_file())
-        total = sum(usage.values())
         candidates = sorted(
             (job for job in jobs if job["state"] not in ("queued", "running")), key=lambda job: job["updated"]
         )
@@ -645,18 +610,12 @@ class Store:
             if challenge_id not in recipes:
                 recipes[challenge_id] = self._available_recipe(challenge_id)
             obsolete = recipes[challenge_id] != job["recipe"] or job.get("obsolete")
-            pressure = evict and (
-                (self.max_bytes and total + required_bytes > self.max_bytes)
-                or (self.max_jobs and remaining >= self.max_jobs)
-            )
+            pressure = evict and self.max_jobs and remaining >= self.max_jobs
             if not expired and not obsolete and not pressure:
                 continue
             remove_if_exists(self.root / "artifacts" / job["key"])
             self._job_path(job["key"]).unlink(missing_ok=True)
-            total -= usage.get(job["key"], 0)
             remaining -= 1
-        if self.max_bytes and total + required_bytes > self.max_bytes:
-            raise QueueFull("artifact storage is full")
 
     def claim(self):
         with self.lock(shared=True):
@@ -674,11 +633,6 @@ class Store:
                     job["key"],
                 ),
             )
-            payload_bytes = (
-                self._payload_bytes(jobs)
-                if self.max_bytes and any(job.get("background", False) for job in candidates)
-                else 0
-            )
             available_bytes = self.available_space()
             for job in candidates:
                 if self._available_recipe(job["challenge_id"]) != job["recipe"]:
@@ -687,10 +641,6 @@ class Store:
                     continue
                 if job["recipe"]["max_output_bytes"] > available_bytes:
                     continue
-                if job.get("background", False) and self.max_bytes:
-                    required = payload_bytes - self._payload_bytes([job]) + job["recipe"]["max_output_bytes"]
-                    if required > self.max_bytes:
-                        continue
                 job.update(
                     state="running", attempts=job["attempts"] + 1, updated=time.time(), generation=secrets.token_hex(16)
                 )

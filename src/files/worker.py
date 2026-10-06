@@ -353,9 +353,9 @@ def run_once(store, generator=None, *, maintenance=None):
             try:
                 remove_if_exists(store.root / "artifacts" / job["key"])
                 if job.get("background", False):
-                    _retry_store(store.collect, required_bytes=job["recipe"]["max_output_bytes"], evict=False)
+                    _retry_store(store.collect, evict=False)
                 else:
-                    _retry_store(store.collect, required_bytes=job["recipe"]["max_output_bytes"])
+                    _retry_store(store.collect)
                 phase = "storage"
                 if store.available_space() < job["recipe"]["max_output_bytes"]:
                     raise GenerationError("artifact storage is full")
