@@ -139,9 +139,7 @@ def _resource_kwargs(max_memory_mb: int | None, max_cpu: float | None) -> dict[s
     return kwargs
 
 
-_ALLOWED_CAPS = frozenset(
-    {"NET_ADMIN", "NET_RAW", "SYS_PTRACE", "SYS_NICE"}
-)  # no-new-privileges keeps granted capabilities
+_ALLOWED_CAPS = frozenset({"NET_ADMIN", "NET_RAW", "SYS_PTRACE", "SYS_NICE"})
 
 
 def _filter_admin_caps(cap_add: str | None, chal_id: int | str | None = None) -> list[str]:
@@ -152,10 +150,11 @@ def _filter_admin_caps(cap_add: str | None, chal_id: int | str | None = None) ->
         c = c.strip().upper()
         if not c:
             continue
-        if c in _ALLOWED_CAPS:
-            safe.append(c)
-        else:
+        if c not in _ALLOWED_CAPS:
             logger.warning("dropping disallowed cap %r for challenge %s", c, chal_id)
+            continue
+
+        safe.append(c)
     return safe
 
 
@@ -215,7 +214,7 @@ class ContainerManager:
 
         scheduler_cls = (
             GeventScheduler if monkey.is_module_patched("threading") else BackgroundScheduler
-        )  # GeventExecutor survives gevent shutdown
+        )  # gevent executor survives gevent shutdown
         self.expiration_scheduler = scheduler_cls()
         self.expiration_scheduler.add_job(
             func=self._maintenance_tick,
@@ -281,7 +280,7 @@ class ContainerManager:
 
     def _warm_up_tick(self) -> None:
         try:
-            self.host_manager.warm_up()  # each worker needs its own connection state
+            self.host_manager.warm_up()
         except Exception:
             logger.exception("context warm up failed")
 
@@ -620,9 +619,10 @@ class ContainerManager:
         for image, contexts in sorted(images_by_context.items()):
             if len(contexts) == 1:
                 result.append(image)
-            else:
-                for context in contexts:
-                    result.append(f"{image} ({context})")
+                continue
+
+            for context in contexts:
+                result.append(f"{image} ({context})")
 
         return result
 
@@ -758,7 +758,7 @@ class ContainerManager:
                     },
                 )
 
-        self._reconcile_orphans()  # host outages can leave labeled resources without committed instances
+        self._reconcile_orphans()
 
     RECONCILE_INSTANCE_LABEL = "ctf.instance_id"
     RECONCILE_SAFETY_AGE_SECONDS = 300
@@ -771,27 +771,43 @@ class ContainerManager:
 
         for ctx_name in self.host_manager.get_connected_contexts():
             try:
-                entries: list[ReconcileEntry] = self.host_manager.list_containers_by_label(
+                entries: list[ReconcileEntry] = self.host_manager.list_resources_by_label(
                     ctx_name, self.RECONCILE_INSTANCE_LABEL
                 )
             except Exception as e:
                 logger.warning(f"reconcile: list by label failed on {ctx_name}: {e}")
                 continue
 
-            oldest_by_instance: dict[str, tuple[float, str]] = {}
+            youngest_by_instance: dict[str, tuple[float, str]] = {}
+            invalid_age_ids: set[str] = set()
             for entry in entries:
                 instance_id = str(entry.get("instance_id", ""))
-                name = str(entry.get("name", ""))
                 if not _valid_reservation_identity(instance_id) or instance_id in active_instance_ids:
                     continue
-                created_ts = float(entry.get("created_ts", 0) or 0)
-                current = oldest_by_instance.get(instance_id)
-                if current is None or (created_ts > 0 and created_ts < current[0]):
-                    oldest_by_instance[instance_id] = (created_ts, name)
 
-            for instance_id, (created_ts, name) in oldest_by_instance.items():
-                age = now - created_ts if created_ts > 0 else 0
+                try:
+                    created_ts = float(entry.get("created_ts", 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    invalid_age_ids.add(instance_id)
+                    continue
+
+                if not math.isfinite(created_ts) or created_ts <= 0 or created_ts > now:
+                    invalid_age_ids.add(instance_id)
+                    continue
+
+                current = youngest_by_instance.get(instance_id)
+                if current is None or created_ts > current[0]:
+                    youngest_by_instance[instance_id] = (created_ts, str(entry.get("name", "")))
+
+            for instance_id, (created_ts, name) in youngest_by_instance.items():
+                if instance_id in invalid_age_ids:
+                    continue
+
+                age = now - created_ts
                 if age < self.RECONCILE_SAFETY_AGE_SECONDS:
+                    continue
+
+                if ContainerInstanceModel.query.filter_by(id=instance_id).first() is not None:
                     continue
 
                 logger.warning(

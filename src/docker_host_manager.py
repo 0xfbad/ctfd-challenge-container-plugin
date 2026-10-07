@@ -63,7 +63,7 @@ def _install_bounded_ssh_adapter() -> None:
         except (ImportError, AttributeError):
             return
 
-        if getattr(original_adapter, "_ctfd_bounded_connect", False):  # ctfd-remote-desktop shares this adapter
+        if getattr(original_adapter, "_ctfd_bounded_connect", False):  # another plugin can install this adapter
             _SSH_ADAPTER_PATCHED = True
             return
 
@@ -85,9 +85,7 @@ def _ssh_timeout_local() -> threading.local:
     try:
         from docker.api import client as api_client
 
-        return getattr(
-            api_client.SSHHTTPAdapter, "_ctfd_ssh_connect_timeout", _SSH_CONNECT_TIMEOUT
-        )  # the installed adapter may belong to another plugin
+        return getattr(api_client.SSHHTTPAdapter, "_ctfd_ssh_connect_timeout", _SSH_CONNECT_TIMEOUT)
     except (ImportError, AttributeError):
         return _SSH_CONNECT_TIMEOUT
 
@@ -129,7 +127,7 @@ def _confirm_removal_in_progress(container: Container, error: docker.errors.APIE
 
 def _run_with_creation_timeout(client: DockerClient, *args, **kwargs) -> Container:
     previous_timeout = client.api.timeout
-    client.api.timeout = CREATE_CLIENT_TIMEOUT  # the operation exclusively owns this client
+    client.api.timeout = CREATE_CLIENT_TIMEOUT
     try:
         return client.containers.run(*args, **kwargs)
     except RequestTimeout as error:
@@ -188,7 +186,7 @@ def _scan_context_meta(context_name: str | None = None) -> _ContextMeta | list[_
         return None if context_name else []
 
     results = []
-    for entry in os.listdir(contexts_dir):  # docker uses hashed directory names
+    for entry in os.listdir(contexts_dir):
         meta_path = os.path.join(contexts_dir, entry, "meta.json")
         if not os.path.isfile(meta_path):
             continue
@@ -360,21 +358,23 @@ class DockerHostManager:
 
         with self._lock:
             client = self._clients.get(key)
-            if client is None:
-                idle = self._idle_clients.get(idle_key, [])
-                if idle:
-                    _, client = idle.pop()
-                else:
-                    url = self._context_configs.get(context_name)
-                    if not url:
-                        raise Exception(f"no client for context '{context_name}'")
-                    try:
-                        client = _new_docker_client(url)
-                    except Exception:
-                        self._mark_connect_failed(context_name)
-                        raise
-                self._mark_connected(context_name)
-                self._clients[key] = client
+            if client is not None:
+                return client
+
+            idle = self._idle_clients.get(idle_key, [])
+            if idle:
+                _, client = idle.pop()
+            else:
+                url = self._context_configs.get(context_name)
+                if not url:
+                    raise Exception(f"no client for context '{context_name}'")
+                try:
+                    client = _new_docker_client(url)
+                except Exception:
+                    self._mark_connect_failed(context_name)
+                    raise
+            self._mark_connected(context_name)
+            self._clients[key] = client
 
         return client
 
@@ -523,7 +523,7 @@ class DockerHostManager:
 
                 containers = client.containers.list(
                     filters={"status": "running"}, sparse=True
-                )  # per container inspection can exhaust ssh MaxSessions
+                )  # per container inspection can exhaust ssh sessions
                 return {c.id for c in containers}
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
                 self._clear_client(context_name)
@@ -689,16 +689,39 @@ class DockerHostManager:
 
             except Exception:
                 self._clear_client(context_name)
-                return []  # host failures must not stop orphan reconciliation
+                return []
 
         return self._call(context_name, _do)
 
     def list_containers_by_label(self, context_name: str, label_key: str) -> list[ReconcileEntry]:
         return self._list_containers(context_name, {"label": label_key})
 
+    def list_resources_by_label(self, context_name: str, label_key: str) -> list[ReconcileEntry]:
+        def _do() -> list[ReconcileEntry]:
+            client = self._get_client(context_name)
+            filters = {"label": label_key}
+            containers = client.containers.list(all=True, filters=filters)
+            networks = client.networks.list(filters=filters)
+            results: list[ReconcileEntry] = []
+            for resources, top_level_labels in ((containers, False), (networks, True)):
+                for resource in resources:
+                    attrs = resource.attrs or {}
+                    labels = attrs.get("Labels") if top_level_labels else attrs.get("Config", {}).get("Labels")
+                    results.append(
+                        {
+                            "name": resource.name or "",
+                            "id": resource.id or "",
+                            "instance_id": str((labels or {}).get("ctf.instance_id", "")),
+                            "created_ts": self._parse_container_created(attrs.get("Created", "")),
+                        }
+                    )
+            return results
+
+        return self._call_with_client_op(context_name, _do)
+
     def kill_stack(self, context_name: str, stack_id: str) -> int:
         with self._lock:
-            if context_name not in self._context_configs:  # failed cleanup must retain database reservations
+            if context_name not in self._context_configs:
                 raise ContainerUnavailableException(f"docker context '{context_name}' is not configured")
 
         def _do():
