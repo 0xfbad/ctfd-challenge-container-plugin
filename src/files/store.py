@@ -26,6 +26,18 @@ class QueueFull(StoreError):
     pass
 
 
+class QueueCapacityFull(QueueFull):
+    def __init__(self, jobs=None):
+        super().__init__("artifact queue is full, retry later")
+        self.existing_owners = None
+        if jobs is None:
+            return
+        try:
+            self.existing_owners = frozenset((job["challenge_id"], job["owner"]) for job in jobs)
+        except (KeyError, TypeError):
+            pass
+
+
 class RecipeChanged(StoreError):
     pass
 
@@ -490,7 +502,7 @@ class Store:
             pending = [item for item in jobs if item["state"] in ("queued", "running")]
             pending_limit = self.max_pending // 2 if background else self.max_pending
             if catalog_full or len(pending) >= pending_limit:
-                raise QueueFull("artifact queue is full, retry later")
+                raise QueueCapacityFull(jobs if background else None)
             now = time.time()
             if job:
                 job.update(state="queued", attempts=0, next_attempt=0, created=now, updated=now, error=None)

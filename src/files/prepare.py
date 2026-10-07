@@ -9,7 +9,7 @@ from CTFd.utils import get_config
 from CTFd.utils.dates import ctf_ended
 
 from .. import utils
-from .store import StoreBusy, StoreError, validate_recipe
+from .store import QueueCapacityFull, StoreBusy, StoreError, validate_recipe
 from .web import _owner_identity, _store, _templates
 
 
@@ -79,6 +79,7 @@ def _prepare_batch(store, team_mode, secret, length, batch_size):
     owner_id = cursor[1] if challenges[index] == cursor[0] else 0
     start = index
     examined = 0
+    existing_owners = None
     while examined < batch_size:
         challenge_id = challenges[index]
         try:
@@ -115,6 +116,8 @@ def _prepare_batch(store, team_mode, secret, length, batch_size):
             if not current:
                 store._write(path, cursor)
                 return
+            if existing_owners is not None and (challenge_id, owner) not in existing_owners:
+                continue
             try:
                 store.request(
                     challenge_id,
@@ -128,6 +131,8 @@ def _prepare_batch(store, team_mode, secret, length, batch_size):
             except StoreBusy:
                 store._write(path, previous_cursor)
                 return
+            except QueueCapacityFull as error:
+                existing_owners = error.existing_owners
             except StoreError:
                 continue
         if examined == batch_size:
