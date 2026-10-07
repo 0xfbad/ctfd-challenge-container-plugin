@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import string
 import threading
 import time
 
@@ -126,7 +127,9 @@ class ContainerChallenge(BaseChallenge):
     def _handle_ssh_password(cls, data: dict[str, str | None], existing_password: str | None = None) -> None:
         mode = data.pop("ssh_password_mode", None)
         if mode == "auto":
-            data["ssh_password"] = existing_password or secrets.token_urlsafe(8)
+            data["ssh_password"] = existing_password or "".join(
+                secrets.choice(string.ascii_letters + string.digits) for _ in range(8)
+            )
         elif mode == "none":
             data["ssh_password"] = None
 
