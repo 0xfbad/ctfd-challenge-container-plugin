@@ -176,6 +176,13 @@ class Store:
     def get_recipe(self, challenge_id):
         return self._read(self._recipe_path(challenge_id))
 
+    def recipe_ids(self):
+        return [
+            int(path.stem)
+            for path in (self.root / "recipes").glob("*.json")
+            if path.stem.isdecimal() and int(path.stem) > 0
+        ]
+
     def _available_recipe(self, challenge_id):
         try:
             recipe = self.get_recipe(challenge_id)

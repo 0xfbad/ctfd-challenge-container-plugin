@@ -10,7 +10,7 @@ from CTFd.utils.dates import ctf_ended
 
 from .. import utils
 from .store import QueueCapacityFull, StoreBusy, StoreError, validate_recipe
-from .web import _owner_identity, _store, _templates
+from .web import _owner_identity, _store, _store_io, _templates
 
 
 def reconcile(app: Flask, *, batch_size: int = 64) -> None:
@@ -35,12 +35,8 @@ def reconcile(app: Flask, *, batch_size: int = 64) -> None:
 
 
 def _prepare_batch(store, team_mode, secret, length, batch_size):
-    observed_order = store.foreground_order()
-    recipe_ids = [
-        int(path.stem)
-        for path in (store.root / "recipes").glob("*.json")
-        if path.stem.isdecimal() and int(path.stem) > 0
-    ]
+    observed_order = _store_io(store.foreground_order)
+    recipe_ids = _store_io(store.recipe_ids)
     if not recipe_ids:
         return
     existing = {
@@ -48,7 +44,7 @@ def _prepare_batch(store, team_mode, secret, length, batch_size):
     }
     missing = sorted(set(recipe_ids) - existing)
     if missing and batch_size > 0:
-        store.delete_recipe(missing[0])
+        _store_io(store.delete_recipe, missing[0])
     challenges = [
         value
         for (value,) in Challenges.query.with_entities(Challenges.id)
@@ -68,7 +64,7 @@ def _prepare_batch(store, team_mode, secret, length, batch_size):
 
     path = store.root / ".preparation.json"
     try:
-        cursor = store._read(path) or [0, 0]
+        cursor = _store_io(store._read, path) or [0, 0]
     except StoreError:
         cursor = [0, 0]
     if not isinstance(cursor, list) or len(cursor) != 2 or any(type(value) is not int or value < 0 for value in cursor):
@@ -83,7 +79,7 @@ def _prepare_batch(store, team_mode, secret, length, batch_size):
     while examined < batch_size:
         challenge_id = challenges[index]
         try:
-            recipe = validate_recipe(store.get_recipe(challenge_id))
+            recipe = validate_recipe(_store_io(store.get_recipe, challenge_id))
             templates = _templates(challenge_id)
         except StoreError:
             templates = None
@@ -114,12 +110,13 @@ def _prepare_batch(store, team_mode, secret, length, batch_size):
             except StoreError:
                 current = False
             if not current:
-                store._write(path, cursor)
+                _store_io(store._write, path, cursor)
                 return
             if existing_owners is not None and (challenge_id, owner) not in existing_owners:
                 continue
             try:
-                store.request(
+                _store_io(
+                    store.request,
                     challenge_id,
                     owner,
                     fingerprint,
@@ -129,7 +126,7 @@ def _prepare_batch(store, team_mode, secret, length, batch_size):
                     observed_order=observed_order,
                 )
             except StoreBusy:
-                store._write(path, previous_cursor)
+                _store_io(store._write, path, previous_cursor)
                 return
             except QueueCapacityFull as error:
                 existing_owners = error.existing_owners
@@ -142,4 +139,4 @@ def _prepare_batch(store, team_mode, secret, length, batch_size):
         cursor = [challenges[index], 0]
         if index == start:
             break
-    store._write(path, cursor)
+    _store_io(store._write, path, cursor)

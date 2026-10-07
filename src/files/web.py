@@ -20,6 +20,7 @@ from flask import (
     send_file,
     url_for,
 )
+from gevent import get_hub, monkey
 from werkzeug.exceptions import HTTPException
 
 from CTFd.models import Challenges, Flags, Solves, Users
@@ -64,9 +65,41 @@ _STATUS_PAGE = """{% extends "base.html" %}
 def _store() -> Store:
     store = current_app.extensions["personalized_files_store"]
     if store is None:
-        store = Store(current_app.config["PERSONALIZED_FILES_ROOT"])
+        store = _store_io(Store, current_app.config["PERSONALIZED_FILES_ROOT"])
         current_app.extensions["personalized_files_store"] = store
     return store
+
+
+def _store_io(operation, *args, discard=None, **kwargs):
+    if not monkey.is_module_patched("threading"):
+        return operation(*args, **kwargs)
+
+    def run():
+        try:
+            return operation(*args, **kwargs), None
+        except BaseException as error:
+            return None, error
+
+    task = get_hub().threadpool.spawn(run)
+    interrupted = None
+    while not task.ready():  # accepted disk work must finish before caller locks can be released
+        try:
+            task.wait()
+        except BaseException as error:
+            if interrupted is None:
+                interrupted = error
+    if interrupted is not None:
+        try:
+            if task.successful() and discard is not None:
+                value, failure = task.get()
+                if failure is None:
+                    discard(value)
+        finally:
+            raise interrupted
+    value, failure = task.get()
+    if failure is not None:
+        raise failure
+    return value
 
 
 def _authorize_download(challenge_id: int) -> tuple[Users, bool]:
@@ -157,7 +190,7 @@ def _owner_identity(
 def challenge_links(challenge: Challenges) -> list[str]:
     try:
         store = _store()
-        recipe = store.get_recipe(challenge.id)
+        recipe = _store_io(store.get_recipe, challenge.id)
         if recipe is None:
             return []
         validate_recipe(recipe)
@@ -168,10 +201,16 @@ def challenge_links(challenge: Challenges) -> list[str]:
     if user is not None and user.type != "admin":
         try:
             user, team_mode = _authorize_download(challenge.id)
-            observed_order = store._demand_order()
+            observed_order = _store_io(store._demand_order)
             owner, fingerprint, environment = _identity(challenge.id, user, team_mode)
-            store.request(
-                challenge.id, owner, fingerprint, environment, expected_recipe=recipe, observed_order=observed_order
+            _store_io(
+                store.request,
+                challenge.id,
+                owner,
+                fingerprint,
+                environment,
+                expected_recipe=recipe,
+                observed_order=observed_order,
             )
         except (StoreError, OSError, HTTPException):
             current_app.logger.debug("File priority deferred for challenge %s", challenge.id)
@@ -209,23 +248,34 @@ def download(challenge_id: int, filename: str) -> Response:
     user, team_mode = _authorize_download(challenge_id)
     try:
         store = _store()
-        recipe = store.get_recipe(challenge_id)
+        recipe = _store_io(store.get_recipe, challenge_id)
         if recipe is None:
             abort(404)
         validate_recipe(recipe)
         if filename not in recipe["outputs"]:
             abort(404)
-        observed_order = store._demand_order()
+        observed_order = _store_io(store._demand_order)
         owner, fingerprint, environment = _identity(challenge_id, user, team_mode)
-        job = store.request(
-            challenge_id, owner, fingerprint, environment, expected_recipe=recipe, observed_order=observed_order
+        job = _store_io(
+            store.request,
+            challenge_id,
+            owner,
+            fingerprint,
+            environment,
+            expected_recipe=recipe,
+            observed_order=observed_order,
         )
         if job["state"] == "failed":
             return _status_response("failed", 503, "Your file could not be generated. Please contact an organizer.")
         if job["state"] != "ready":
             message = _GENERATING_MESSAGE if job["state"] == "running" else _WAITING_MESSAGE
             return _status_response(job["state"], 202, message, pending=True)
-        handle = store.open_file(job, filename)
+        handle = _store_io(
+            store.open_file,
+            job,
+            filename,
+            discard=lambda handle: handle.close() if handle is not None else None,
+        )
         if handle is None:
             return _status_response("queued", 202, _WAITING_MESSAGE, pending=True)
         if request.accept_mimetypes.best == "application/json":
@@ -263,7 +313,7 @@ def status() -> Response | tuple[Response, int]:
     if user is None or user.banned or user.type != "admin":
         abort(403)
     try:
-        return jsonify(success=True, data=_store().summary())
+        return jsonify(success=True, data=_store_io(_store().summary))
     except StoreBusy:
         response = jsonify(success=False, state="busy")
         response.status_code = 202
@@ -283,7 +333,7 @@ def retry_failed() -> Response | tuple[Response, int]:
     if team_mode is None:
         return jsonify(success=False, error="The current file owner mode is unavailable."), 503
     try:
-        data = _store().retry_failed("team" if team_mode else "user")
+        data = _store_io(_store().retry_failed, "team" if team_mode else "user")
         return jsonify(success=True, data=data)
     except StoreBusy:
         response = jsonify(success=False, error="The file store is busy. Try again shortly.")
@@ -304,13 +354,13 @@ def configure(challenge_id: int) -> Response | tuple[Response, int]:
     try:
         store = _store()
         if request.method == "DELETE":
-            store.delete_recipe(challenge_id)
+            _store_io(store.delete_recipe, challenge_id)
             return jsonify(success=True, recipe=None)
         if request.method == "PUT":
             _templates(challenge_id)
-            recipe = store.set_recipe(challenge_id, request.get_json(silent=True))
+            recipe = _store_io(store.set_recipe, challenge_id, request.get_json(silent=True))
         else:
-            recipe = store.get_recipe(challenge_id)
+            recipe = _store_io(store.get_recipe, challenge_id)
         return jsonify(success=True, recipe=recipe)
     except InvalidRecipe as error:
         return jsonify(success=False, error=str(error)), 400
