@@ -48,6 +48,7 @@ function _endContainerView(view) {
 }
 
 function _fetchContainer(view, path, timeout, accept, failed) {
+    if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
     if (view.pending) view.pending.abort();
     var controller = new AbortController();
     view.pending = controller;
@@ -98,28 +99,12 @@ function _startSync(challengeId) {
 
 function _syncNow() {
     var view = _containerView;
-    if (!_activeChalId || !_isCurrentContainerView(view, _activeChalId)) return;
+    if (!_activeChalId || !_isCurrentContainerView(view, _activeChalId) || view.pending) return;
     var expiryInterval = _expiryInterval;
-    fetch("/containers/api/view_info", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "application/json", "CSRF-Token": init.csrfNonce },
-        body: JSON.stringify({ chal_id: _activeChalId }),
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-        if (!_isCurrentContainerView(view) || expiryInterval !== _expiryInterval) return;
-        if (data.status === "instance not started") {
-            _stopSync();
-            if (_expiryInterval) { clearInterval(_expiryInterval); _expiryInterval = null; }
-            resetAlert();
-            showStart();
-        } else if (data.expires && data.expires !== _activeExpiresAt) {
-            _activeExpiresAt = data.expires;
-            startTimer(data.expires);
-            if (data.max_renewals != null) updateRenewButton(data.renewals_used || 0, data.max_renewals);
-        }
-    })
-    .catch(function() {});
+    _fetchContainer(view, "/containers/api/view_info", 5000, function(payload) {
+        if (expiryInterval !== _expiryInterval) return;
+        _applyInstanceStatus(view, payload);
+    }, function() {});
 }
 
 function _stopSync() {
@@ -204,9 +189,8 @@ function showConnection(data, container, challengeId) {
     container.innerHTML = '';
     container.style.display = 'block';
 
-    var renewBtn = document.getElementById("extend-chal");
-    if (renewBtn) renewBtn.innerHTML = '<i class="fas fa-redo"></i> Renew <span id="renewals-counter"></span>';
-    if (data.max_renewals != null) updateRenewButton(data.renewals_used || 0, data.max_renewals);
+    container.classList.remove('alert-danger');
+    _resetInstanceActions(data);
 
     var hintText;
     if (data.connect === "web") {
@@ -278,7 +262,7 @@ function view_container_info(challengeId) {
         } else if (data.status === "host_unavailable") {
             showConnection(data, info, challengeId);
             var warn = document.createElement('div');
-            warn.className = 'connection-hint';
+            warn.className = 'connection-hint host-unavailable-warning';
             warn.style.color = '#b58105';
             warn.textContent = data.message || 'host temporarily unreachable';
             info.append(warn);
@@ -506,83 +490,130 @@ function container_request(challengeId) {
     _doContainerRequest(challengeId, false, Date.now() + 30000);
 }
 
+function _resetInstanceActions(data) {
+    var renew = document.getElementById("extend-chal");
+    renew.innerHTML = '<i class="fas fa-redo"></i> Renew <span id="renewals-counter"></span>';
+    renew.disabled = true;
+    if (data && data.max_renewals != null) updateRenewButton(data.renewals_used || 0, data.max_renewals);
+    var stop = document.getElementById("terminate-chal");
+    stop.innerHTML = '<i class="fas fa-stop"></i> Stop';
+    stop.disabled = false;
+}
+
+function _instanceAbsent() {
+    if (_expiryInterval) { clearInterval(_expiryInterval); _expiryInterval = null; }
+    _stopSync();
+    _resetInstanceActions();
+    resetAlert();
+    showStart();
+}
+
+function _validRenewalCounts(data) {
+    return Number.isInteger(data.renewals_used) && data.renewals_used >= 0 &&
+        Number.isInteger(data.max_renewals) && data.max_renewals >= 0;
+}
+
+function _applyInstanceStatus(view, payload) {
+    var data = payload.data;
+    if (payload.status < 200 || payload.status >= 300 || !data || typeof data !== "object" ||
+        Array.isArray(data) || data.error) return false;
+    if (data.status === "instance not started" && !data.message) {
+        _instanceAbsent();
+        return true;
+    }
+    if (!_validConnection(data) || !_validRenewalCounts(data) ||
+        (data.status !== "already_running" && data.status !== "host_unavailable") ||
+        (data.message && data.status !== "host_unavailable")) return false;
+    if (view.info.classList.contains('alert-danger') || view.info.style.display !== 'block' ||
+        _activeChalId !== view.challengeId) {
+        showConnection(data, view.info, view.challengeId);
+    } else {
+        _resetInstanceActions(data);
+        if (data.expires !== _activeExpiresAt) startTimer(data.expires);
+    }
+    var warning = view.info.querySelector('.host-unavailable-warning');
+    if (data.status === "host_unavailable") {
+        if (!warning) {
+            warning = document.createElement('div');
+            warning.className = 'connection-hint host-unavailable-warning';
+            warning.style.color = '#b58105';
+            view.info.append(warning);
+        }
+        warning.textContent = data.message || 'host temporarily unreachable';
+    } else if (warning) {
+        view.info.removeChild(warning);
+    }
+    return true;
+}
+
+function _mutationUnknown(view, message) {
+    _resetInstanceActions();
+    document.getElementById("terminate-chal").disabled = true;
+    view.info.textContent = (message ? message + " " : "") +
+        "Could not confirm the action. Reopen this challenge to check.";
+    view.info.classList.add('alert-danger');
+    view.info.style.display = 'block';
+}
+
+function _reconcileMutation(view, message) {
+    document.getElementById("extend-chal").disabled = true;
+    document.getElementById("terminate-chal").disabled = true;
+    _fetchContainer(view, "/containers/api/view_info", 5000, function(payload) {
+        if (!_applyInstanceStatus(view, payload)) {
+            _mutationUnknown(view, message);
+            return;
+        }
+        if (message) {
+            var error = document.createElement('div');
+            error.textContent = message;
+            view.info.append(error);
+            view.info.classList.add('alert-danger');
+            view.info.style.display = 'block';
+        }
+    }, function() { _mutationUnknown(view, message); });
+}
+
 function container_renew(challengeId) {
     var view = _containerView;
     if (!_isCurrentContainerView(view, challengeId)) return;
     var btn = document.getElementById("extend-chal");
-
+    if (btn.disabled) return;
     btn.disabled = true;
     btn.innerHTML = '<span class="loading-spinner"></span>';
 
-    fetch("/containers/api/renew", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "application/json", "CSRF-Token": init.csrfNonce },
-        body: JSON.stringify({ chal_id: challengeId }),
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-        if (!_isCurrentContainerView(view)) return;
-        btn.innerHTML = '<i class="fas fa-redo"></i> Renew <span id="renewals-counter"></span>';
-        if (data.error || data.message) {
-            btn.disabled = false;
-            var info = document.getElementById("deployment-info");
-            info.textContent = data.error || data.message;
-            info.classList.add('alert-danger');
-            info.style.display = 'block';
+    _fetchContainer(view, "/containers/api/renew", 10000, function(payload) {
+        var data = payload.data;
+        if (payload.status >= 200 && payload.status < 300 && data && !Array.isArray(data) &&
+            !data.error && !data.message && data.status === "success" && data.success === "container renewed" &&
+            _validConnection(data) && _validRenewalCounts(data)) {
+            showConnection(data, view.info, challengeId);
         } else {
-            startTimer(data.expires);
-            if (data.max_renewals != null) updateRenewButton(data.renewals_used || 0, data.max_renewals);
+            var message = data && (data.error || data.message);
+            _reconcileMutation(view, typeof message === "string" ? message :
+                (payload.status === 403 || payload.status === 429 ? "Request was denied." : null));
         }
-    })
-    .catch(function(e) {
-        if (!_isCurrentContainerView(view)) return;
-        console.error("Fetch error:", e);
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-redo"></i> Renew <span id="renewals-counter"></span>';
-    });
+    }, function() { _reconcileMutation(view); });
 }
 
 function container_stop(challengeId) {
     var view = _containerView;
     if (!_isCurrentContainerView(view, challengeId)) return;
-    var info = resetAlert();
     var btn = document.getElementById("terminate-chal");
-    var extBtn = document.getElementById("extend-chal");
-
+    if (btn.disabled) return;
+    resetAlert();
     btn.disabled = true;
-    extBtn.disabled = true;
+    document.getElementById("extend-chal").disabled = true;
     btn.innerHTML = '<span class="loading-spinner"></span>';
 
-    fetch("/containers/api/stop", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "application/json", "CSRF-Token": init.csrfNonce },
-        body: JSON.stringify({ chal_id: challengeId }),
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-        if (!_isCurrentContainerView(view)) return;
-        btn.disabled = false;
-        extBtn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-stop"></i> Stop';
-        extBtn.innerHTML = '<i class="fas fa-redo"></i> Renew <span id="renewals-counter"></span>';
-
-        if (data.error || data.message) {
-            info.textContent = data.error || data.message;
-            info.classList.add('alert-danger');
-            info.style.display = 'block';
+    _fetchContainer(view, "/containers/api/stop", 10000, function(payload) {
+        var data = payload.data;
+        if (payload.status >= 200 && payload.status < 300 && data && !Array.isArray(data) &&
+            !data.error && !data.message && data.success === "container killed") {
+            _instanceAbsent();
         } else {
-            info.style.display = 'none';
-            if (_expiryInterval) { clearInterval(_expiryInterval); _expiryInterval = null; }
-            _stopSync();
-            showStart();
+            var message = data && (data.error || data.message);
+            _reconcileMutation(view, typeof message === "string" ? message :
+                (payload.status === 403 || payload.status === 429 ? "Request was denied." : null));
         }
-    })
-    .catch(function(e) {
-        if (!_isCurrentContainerView(view)) return;
-        console.error("Fetch error:", e);
-        btn.disabled = false;
-        extBtn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-stop"></i> Stop';
-        extBtn.innerHTML = '<i class="fas fa-redo"></i> Renew <span id="renewals-counter"></span>';
-    });
+    }, function() { _reconcileMutation(view); });
 }
