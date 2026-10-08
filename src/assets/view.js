@@ -503,7 +503,7 @@ function makeCopyField(label, value) {
 }
 
 function container_request(challengeId) {
-    _doContainerRequest(challengeId, false, Date.now() + 25000);
+    _doContainerRequest(challengeId, false, Date.now() + 30000);
 }
 
 function container_renew(challengeId) {
