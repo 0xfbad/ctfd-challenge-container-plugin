@@ -427,7 +427,8 @@ function _doContainerRequest(challengeId, isRetry, retryDeadline) {
             var seconds = parseInt(payload.retryAfter, 10);
             var capacityWait = payload.status === 429 && kind === "transient" && seconds >= 1;
             if (!(seconds >= 1)) seconds = 2;
-            var delay = Math.min(seconds, 30) * 1000 + Math.random() * 1000;
+            var delay = Math.min(seconds, 30) * 1000;
+            delay += Math.random() * (capacityWait ? delay : 1000);
             var canRetry = Date.now() + delay < retryDeadline && (capacityWait || !isRetry);
             if (canRetry && kind === "transient" && seconds <= 30) { // cleanup waits must show the error without an automatic retry
                 btn.innerHTML = '<span class="loading-spinner"></span> Retrying...';
