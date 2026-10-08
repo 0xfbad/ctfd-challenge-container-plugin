@@ -1,5 +1,3 @@
-"""normalizes challenge and stack config from html form strings or json values, before any orm write or docker io"""
-
 from __future__ import annotations
 
 import ipaddress
@@ -183,9 +181,13 @@ def normalize_network(value: object, service_names: set[str]) -> str | None:
     if _empty(value):
         return None
     config = parse_json_object(value, "network_json")
-    unknown = set(config) - {"subnet", "ips"}
+    unknown = set(config) - {"subnet", "ips", "hostname"}
     if unknown:
         raise ValidationError(f"network_json has unsupported fields: {', '.join(sorted(unknown))}")
+
+    hostname = _string(config.get("hostname"), "network_json.hostname", maximum=64)
+    if hostname is not None and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}", hostname):
+        raise ValidationError("network_json.hostname must be a valid container hostname")
 
     subnet_value = config.get("subnet")
     subnet = None
@@ -226,6 +228,8 @@ def normalize_network(value: object, service_names: set[str]) -> str | None:
         normalized_ips[service_name] = str(address)
 
     normalized: dict[str, object] = {}
+    if hostname is not None:
+        normalized["hostname"] = hostname
     if subnet is not None:
         normalized["subnet"] = str(subnet)
     if normalized_ips:
@@ -236,7 +240,6 @@ def normalize_network(value: object, service_names: set[str]) -> str | None:
 def normalize_challenge_fields(
     data: Mapping[str, object], *, existing_service_names: set[str] | None = None
 ) -> dict[str, object]:
-    """normalizes only the fields present in the request, absent fields keep their stored values"""
     result = dict(data)
     if "image" in result:
         result["image"] = _string(result["image"], "image", required=True, maximum=MAX_IMAGE)
@@ -278,7 +281,6 @@ def normalize_challenge_fields(
         services_json, services = normalize_services(result["services_json"])
         result["services_json"] = services_json
     if "network_json" in result:
-        # on a network only update the caller supplied names keep unknown static ip keys from slipping through
         service_names = set(services) if "services_json" in result else set(existing_service_names or ())
         result["network_json"] = normalize_network(result["network_json"], service_names)
     return result

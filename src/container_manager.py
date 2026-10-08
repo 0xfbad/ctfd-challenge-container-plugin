@@ -387,6 +387,7 @@ class ContainerManager:
         provision_token: str,
         *,
         extra_env: dict[str, str] | None = None,
+        network_json: str | None = None,
         ctype: str | None = None,
         cap_add: str | None = None,
         resolved_volumes: dict[str, dict[str, str]] | None = None,
@@ -418,7 +419,9 @@ class ContainerManager:
         ts = int(time.time())
         name = container_name(user_id, chal_id, ts, nonce=instance_id)
         kwargs["name"] = name
-        kwargs["hostname"] = name
+        network_cfg: dict[str, str | dict[str, str]] = json.loads(network_json) if network_json else {}
+        hostname = network_cfg.get("hostname")
+        kwargs["hostname"] = hostname if isinstance(hostname, str) and hostname else name
 
         caps = _build_caps(ctype, cap_add, chal_id)
         if caps:
@@ -486,6 +489,7 @@ class ContainerManager:
 
         services: dict[str, dict[str, str | dict[str, str]]] = json.loads(services_json) if services_json else {}
         network_cfg: dict[str, str | dict[str, str]] = json.loads(network_json) if network_json else {}
+        entry_hostname = network_cfg.get("hostname")
 
         stack_id = uuid.uuid4().hex
         ts = int(time.time())
@@ -530,7 +534,7 @@ class ContainerManager:
                 base_env,
                 ip_address=ips.get("entry"),
                 publish_port=True,
-                hostname=base_name,
+                hostname=entry_hostname if isinstance(entry_hostname, str) and entry_hostname else base_name,
                 internal_port=port,
                 **entry_kwargs,
             )

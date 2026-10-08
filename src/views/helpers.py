@@ -9,7 +9,7 @@ from flask import current_app, g, request
 
 from CTFd.utils.user import is_admin
 
-from ..challenge_config import normalize_services
+from ..challenge_config import normalize_network, normalize_services
 from ..container_manager import ContainerManager
 from ..coordination import (
     ContextUnavailable,
@@ -493,7 +493,11 @@ def create_container(
 
     try:
         _, services = normalize_services(challenge.services_json)
+        network_json = normalize_network(challenge.network_json, set(services))
         policy, volume_plan, eligible_contexts = _runtime_volume_plan(challenge, container_manager)
+    except ValidationError as err:
+        _log_request_failed(challenge, uid, err)
+        return error_body(sanitize_container_error(err), "permanent"), 400
     except ContainerException as err:
         _log_request_failed(challenge, uid, err)
         return error_body(sanitize_container_error(err)), 400
@@ -600,7 +604,7 @@ def create_container(
                 challenge.port,
                 challenge.command,
                 challenge.services_json,
-                challenge.network_json,
+                network_json,
                 effective_memory_mb,
                 effective_cpu,
                 reservation.context_name,
@@ -642,6 +646,7 @@ def create_container(
                 reservation.instance_id,
                 reservation.provision_token,
                 extra_env=extra_env_or_none,
+                network_json=network_json,
                 ctype=challenge.ctype,
                 cap_add=challenge.cap_add,
                 resolved_volumes=entry_volumes,
