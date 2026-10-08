@@ -37,6 +37,7 @@ function _isCurrentContainerView(view, challengeId) {
 function _endContainerView(view) {
     if (!view || view !== _containerView) return;
     _containerView = null;
+    if (view.pending) view.pending.abort();
     if (view.modal) view.modal.removeEventListener("hide.bs.modal", view.onHide);
     if (view.jqueryModal) view.jqueryModal.off("hide.bs.modal", view.onHide);
     _stopSync();
@@ -44,6 +45,49 @@ function _endContainerView(view) {
     if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
     _requestInFlight = false;
     _retryPending = false;
+}
+
+function _fetchContainer(view, path, timeout, accept, failed) {
+    if (view.pending) view.pending.abort();
+    var controller = new AbortController();
+    view.pending = controller;
+    if (timeout != null) {
+        _retryTimer = setTimeout(function() { controller.abort(); }, timeout);
+    }
+    function current() {
+        return _isCurrentContainerView(view) && view.pending === controller;
+    }
+    function clearDeadline() {
+        if (_retryTimer) clearTimeout(_retryTimer);
+        _retryTimer = null;
+    }
+    fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json", "CSRF-Token": init.csrfNonce },
+        body: JSON.stringify({ chal_id: view.challengeId }),
+        signal: controller.signal,
+    })
+    .then(function(response) {
+        return response.json().catch(function(error) {
+            if (response.status === 403 || response.status === 429) return null;
+            throw error;
+        }).then(function(data) {
+            return { data: data, status: response.status, retryAfter: response.headers.get("Retry-After") };
+        });
+    })
+    .then(function(payload) {
+        if (!current()) return;
+        clearDeadline();
+        accept(payload);
+    })
+    .catch(function(error) {
+        if (!current()) return;
+        clearDeadline();
+        failed(error);
+    })
+    .finally(function() {
+        if (view.pending === controller) view.pending = null;
+    });
 }
 
 function _startSync(challengeId) {
@@ -55,6 +99,7 @@ function _startSync(challengeId) {
 function _syncNow() {
     var view = _containerView;
     if (!_activeChalId || !_isCurrentContainerView(view, _activeChalId)) return;
+    var expiryInterval = _expiryInterval;
     fetch("/containers/api/view_info", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "application/json", "CSRF-Token": init.csrfNonce },
@@ -62,7 +107,7 @@ function _syncNow() {
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
-        if (!_isCurrentContainerView(view)) return;
+        if (!_isCurrentContainerView(view) || expiryInterval !== _expiryInterval) return;
         if (data.status === "instance not started") {
             _stopSync();
             if (_expiryInterval) { clearInterval(_expiryInterval); _expiryInterval = null; }
@@ -210,14 +255,9 @@ function view_container_info(challengeId) {
         }
     }
 
-    fetch("/containers/api/view_info", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "application/json", "CSRF-Token": init.csrfNonce },
-        body: JSON.stringify({ chal_id: challengeId }),
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-        if (!_isCurrentContainerView(view)) return;
+    _fetchContainer(view, "/containers/api/view_info", null, function(payload) {
+        var data = payload.data;
+        if (!data || typeof data !== "object") throw new Error("invalid instance status");
         if (data.status === "misconfigured") {
             info.style.display = 'block';
             var banner = document.createElement('div');
@@ -252,12 +292,11 @@ function view_container_info(challengeId) {
                 info.style.display = 'block';
             }
         }
-    })
-    .catch(function(e) { console.error("Fetch error:", e); });
+    }, function(error) { console.error("Fetch error:", error); });
 }
 
 var _requestInFlight = false;
-var _retryPending = false; // request cleanup clears _requestInFlight before the retry timer fires
+var _retryPending = false;
 
 function _isPermanentError(msg) {
     if (!msg) return false;
@@ -303,6 +342,63 @@ function _resetStartButton(btn) {
     btn.innerHTML = '<i class="fas fa-play"></i> Start Instance';
 }
 
+function _creationUnknown(view) {
+    if (!_isCurrentContainerView(view)) return;
+    view.info.textContent = "Could not confirm the instance. Reopen this challenge to check.";
+    view.info.classList.add("alert-danger");
+    view.info.style.display = "block";
+    _requestInFlight = false;
+    _resetStartButton(document.getElementById("create-chal").querySelector("button"));
+}
+
+function _validConnection(data) {
+    return data && typeof data.hostname === "string" && data.hostname &&
+        ["web", "ssh", "tcp"].indexOf(data.connect) !== -1 &&
+        Number.isInteger(data.port) && data.port > 0 && data.port <= 65535 &&
+        Number.isFinite(data.expires) && data.expires > 0;
+}
+
+function _reconcileContainer(view, deadline) {
+    if (!_isCurrentContainerView(view)) return;
+    var remaining = deadline - Date.now();
+    if (remaining <= 0) {
+        _creationUnknown(view);
+        return;
+    }
+    function retry() {
+        var delay = Math.min(2000, deadline - Date.now());
+        _retryTimer = setTimeout(function() {
+            _retryTimer = null;
+            _reconcileContainer(view, deadline);
+        }, Math.max(0, delay));
+    }
+    _fetchContainer(view, "/containers/api/view_info", Math.min(5000, remaining), function(payload) {
+        var data = payload.data;
+        var message = data && (data.error || data.message);
+        var kind = _errorKind(data, message);
+        if (payload.status === 403 || payload.status === 429 || data && data.status === "misconfigured" ||
+            message && (kind === "user" || kind === "permanent")) {
+            if (kind === "permanent" || data && data.status === "misconfigured") {
+                _showServerError(view.info);
+            } else {
+                view.info.textContent = message || "Could not check the instance. Reopen this challenge to check.";
+                view.info.classList.add("alert-danger");
+                view.info.style.display = "block";
+            }
+            _requestInFlight = false;
+            _resetStartButton(document.getElementById("create-chal").querySelector("button"));
+            return;
+        }
+        if (_validConnection(data) && (data.status === "already_running" || data.status === "host_unavailable")) {
+            showConnection(data, view.info, view.challengeId);
+            _requestInFlight = false;
+            _resetStartButton(document.getElementById("create-chal").querySelector("button"));
+            return;
+        }
+        retry();
+    }, retry);
+}
+
 function _doContainerRequest(challengeId, isRetry, retryDeadline) {
     var view = _containerView;
     if (!_isCurrentContainerView(view, challengeId)) return;
@@ -314,25 +410,25 @@ function _doContainerRequest(challengeId, isRetry, retryDeadline) {
     btn.disabled = true;
     btn.innerHTML = '<span class="loading-spinner"></span> ' + (isRetry ? 'Retrying...' : 'Starting...');
 
-    fetch("/containers/api/request", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "application/json", "CSRF-Token": init.csrfNonce },
-        body: JSON.stringify({ chal_id: challengeId }),
-    })
-    .then(function(r) {
-        return r.json().then(function(d) { return { data: d, status: r.status, retryAfter: r.headers.get("Retry-After") }; });
-    })
-    .then(function(payload) {
-        if (!_isCurrentContainerView(view)) return;
+    _fetchContainer(view, "/containers/api/request", Math.max(0, Math.min(10000, retryDeadline - Date.now())), function(payload) {
         var data = payload.data;
+        if (payload.status === 403 || (payload.status === 429 && !data)) {
+            info.textContent = data && (data.error || data.message) || "Start request was denied. Try again later.";
+            info.classList.add("alert-danger");
+            info.style.display = "block";
+            _requestInFlight = false;
+            _resetStartButton(btn);
+            return;
+        }
+        if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("invalid start response");
         if (data.error || data.message) {
             var errMsg = data.error || data.message;
             var kind = _errorKind(data, errMsg);
             var seconds = parseInt(payload.retryAfter, 10);
             var capacityWait = payload.status === 429 && kind === "transient" && seconds >= 1;
             if (!(seconds >= 1)) seconds = 2;
-            var delay = Math.min(seconds, 30) * 1000 * (0.8 + Math.random() * 0.4);
-            var canRetry = capacityWait ? Date.now() + delay < retryDeadline : !isRetry;
+            var delay = Math.min(seconds, 30) * 1000 + Math.random() * 1000;
+            var canRetry = Date.now() + delay < retryDeadline && (capacityWait || !isRetry);
             if (canRetry && kind === "transient" && seconds <= 30) { // cleanup waits must show the error without an automatic retry
                 btn.innerHTML = '<span class="loading-spinner"></span> Retrying...';
                 _requestInFlight = false;
@@ -341,7 +437,7 @@ function _doContainerRequest(challengeId, isRetry, retryDeadline) {
                     if (!_isCurrentContainerView(view)) return;
                     _retryTimer = null;
                     _retryPending = false;
-                    if (capacityWait && Date.now() >= retryDeadline) {
+                    if (Date.now() >= retryDeadline) {
                         info.textContent = errMsg;
                         info.classList.add('alert-danger');
                         info.style.display = 'block';
@@ -360,16 +456,12 @@ function _doContainerRequest(challengeId, isRetry, retryDeadline) {
                 info.style.display = 'block';
             }
         } else {
+            if (!_validConnection(data)) throw new Error("invalid connection response");
             showConnection(data, info, challengeId);
         }
+        _requestInFlight = false;
         _resetStartButton(btn);
-    })
-    .catch(function(e) {
-        if (!_isCurrentContainerView(view)) return;
-        console.error("Fetch error:", e);
-        _resetStartButton(btn);
-    })
-    .finally(function() { if (_isCurrentContainerView(view)) _requestInFlight = false; });
+    }, function() { _reconcileContainer(view, retryDeadline); });
 }
 
 function makeCopyField(label, value) {
