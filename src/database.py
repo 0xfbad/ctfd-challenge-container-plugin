@@ -14,24 +14,42 @@ def _lock_identity(database_url: str) -> tuple[str, int]:
         raise RuntimeError("challenge containers database URL must select a database")
 
     digest = hashlib.sha256(database_name.encode("utf-8")).digest()
-    # mariadb caps lock names at 64 chars
-    return f"{_SCHEMA_BOOTSTRAP_LOCK_PREFIX}{digest.hex()[:24]}", int.from_bytes(digest[:8], "big", signed=True)
+    return (
+        f"{_SCHEMA_BOOTSTRAP_LOCK_PREFIX}{digest.hex()[:24]}",  # mariadb caps lock names at 64 chars
+        int.from_bytes(digest[:8], "big", signed=True),
+    )
 
 
-def _create_all(app: Any) -> None:
+def _add_instance_password_column(connection: Any) -> None:
+    from sqlalchemy import inspect, text
+
+    columns = inspect(connection).get_columns("container_instances")
+    if any(column["name"] == "ssh_password" for column in columns):
+        return
+
+    connection.execute(text("ALTER TABLE container_instances ADD COLUMN ssh_password VARCHAR(8) NULL"))
+
+
+def _create_all(app: Any, connection: Any = None) -> None:
     app.db.create_all()
-    # mysql invalidates open transaction metadata after ddl, so drop the scoped session before seeding
-    app.db.session.remove()
+    try:
+        if not isinstance(app.config.get("SQLALCHEMY_DATABASE_URI"), str):
+            return
+
+        if connection is not None:
+            _add_instance_password_column(connection)
+            return
+
+        with app.db.engine.begin() as connection:
+            _add_instance_password_column(connection)
+    finally:
+        app.db.session.remove()  # mysql invalidates open transaction metadata after ddl
 
 
 def prepare_database(app: Any) -> None:
-    """create the schema for a fresh deployment, existing tables are never mutated
-
-    workers without preload build the app at once, so the ddl runs under a database lock
-    """
     database_url = app.config.get("SQLALCHEMY_DATABASE_URI")
     if not isinstance(database_url, str):
-        _create_all(app)  # test app doubles set no SQLALCHEMY_DATABASE_URI, production always does
+        _create_all(app)  # test app doubles omit the database url
         return
 
     dialect = app.db.engine.dialect.name
@@ -54,7 +72,7 @@ def prepare_database(app: Any) -> None:
                 raise RuntimeError("timed out waiting for the challenge containers schema bootstrap lock")
 
         try:
-            _create_all(app)
+            _create_all(app, connection)  # workers without preload must serialize schema changes
         finally:
             try:
                 if dialect == "postgresql":
@@ -62,8 +80,7 @@ def prepare_database(app: Any) -> None:
                 else:
                     released = connection.execute(text("SELECT RELEASE_LOCK(:name)"), {"name": lock_name}).scalar()
             except BaseException:
-                # a failed release may still hold the lock, invalidate discards the connection
-                connection.invalidate()
+                connection.invalidate()  # a failed release may still hold the lock
                 raise
 
             if not released:

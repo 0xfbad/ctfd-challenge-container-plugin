@@ -67,15 +67,21 @@ from ..utils import (
     validate_settings_patch,
 )
 from . import containers_bp
-from .helpers import cleanup_instance, get_hostname_for_context, kill_container, request_json, resolve_expiration
+from .helpers import (
+    cleanup_instance,
+    get_hostname_for_context,
+    kill_container,
+    request_json,
+    resolve_expiration,
+    resolve_ssh_password,
+)
 
 logger = logging.getLogger(__name__)
 
 _MAX_ANALYTICS_ROWS = 50000
 _MAX_SSE_CONNECTIONS = 10
-_CONTEXT_TEST_TIMEOUT = 5  # seconds, this ping runs synchronously inside an admin request
-# the settings value column is TEXT, an oversized write fails under mysql strict mode
-_MAX_IMAGE_CACHE_BYTES = 60_000
+_CONTEXT_TEST_TIMEOUT = 5  # this ping blocks the admin request
+_MAX_IMAGE_CACHE_BYTES = 60_000  # oversized settings writes fail under mysql strict mode
 _sse_connection_count = 0
 _sse_connection_lock = threading.Lock()
 
@@ -278,7 +284,7 @@ def route_get_running_containers():
                 hostname=hostname,
                 connect_type=container.challenge.ctype,
                 ssh_username=container.challenge.ssh_username,
-                ssh_password=container.challenge.ssh_password,
+                ssh_password=resolve_ssh_password(container.challenge, container.instance.ssh_password),
                 docker_context=container.docker_context or "local",
                 stack_id=container.stack_id,
                 companion_count=ContainerInfoModel.query.filter_by(stack_id=container.stack_id, is_entry=False).count()
@@ -429,7 +435,6 @@ def route_get_flag_sharing():
 
 @contextmanager
 def _sse_connection_slot() -> Iterator[bool]:
-    """claimed from inside the generator, a client that aborts before the first chunk never starts it"""
     global _sse_connection_count
 
     with _sse_connection_lock:
@@ -452,7 +457,7 @@ def route_events_stream():
             return jsonify(error="too many event stream connections"), 429
 
     def event_stream():
-        with _sse_connection_slot() as claimed:
+        with _sse_connection_slot() as claimed:  # aborted clients must not claim slots before this generator starts
             if not claimed:
                 return
 
@@ -666,7 +671,6 @@ def route_get_contexts():
 
 
 def _probe_context(container_manager, context_name: str) -> None:
-    """one bounded probe on an explicit admin action so a freshly touched context reports health immediately"""
     orchestrator = container_manager.orchestrator
     if container_manager.host_manager.ping(context_name):
         orchestrator.mark_healthy(context_name)
@@ -1380,8 +1384,9 @@ def _request_tz() -> tzinfo:
 
 
 def _history_rows_since(cutoff: float) -> list[ContainerHistoryModel]:
-    # entry filter runs before the row limit so companion rows cannot crowd out real launches
-    query = ContainerHistoryModel.query.filter(ContainerHistoryModel.is_entry.is_(True))
+    query = ContainerHistoryModel.query.filter(
+        ContainerHistoryModel.is_entry.is_(True)
+    )  # companions must not crowd out launches before the limit
     if cutoff > 0:
         query = query.filter(ContainerHistoryModel.created_at >= cutoff)
     return query.order_by(ContainerHistoryModel.created_at.desc()).limit(_MAX_ANALYTICS_ROWS).all()
@@ -1624,7 +1629,6 @@ def route_analytics_heatmap():
     excluded = _excluded_user_ids()
     rows = ContainerHistoryModel.query.filter(ContainerHistoryModel.created_at >= cutoff).all()
 
-    # weekday returns 0 for monday so columns stay mon first
     matrix = [[0] * 7 for _ in range(24)]
     for r in rows:
         if not r.created_at or r.user_id in excluded:
@@ -1632,11 +1636,10 @@ def route_analytics_heatmap():
         dt = datetime.fromtimestamp(r.created_at, tz=tz)
         matrix[dt.hour][dt.weekday()] += 1
 
-    # echarts heatmap series takes day, hour, value triples
     data = []
     for hour in range(24):
         for day in range(7):
             if matrix[hour][day] > 0:
-                data.append([day, hour, matrix[hour][day]])
+                data.append([day, hour, matrix[hour][day]])  # echarts requires day hour value triples
 
     return jsonify({"data": data, "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]})

@@ -159,6 +159,10 @@ def resolve_max_renewals(challenge: ContainerChallengeModel) -> int:
     return int(max_renewals)
 
 
+def resolve_ssh_password(challenge: ContainerChallengeModel, password: str | None) -> str | None:
+    return password if password is not None else challenge.ssh_password
+
+
 def build_connection_response(
     status: str,
     challenge: ContainerChallengeModel,
@@ -179,7 +183,8 @@ def build_connection_response(
     }
     if challenge.ctype == "ssh":
         response["ssh_username"] = challenge.ssh_username
-        response["ssh_password"] = challenge.ssh_password
+        instance = container if isinstance(container, FinalizedInstance) else container.instance
+        response["ssh_password"] = resolve_ssh_password(challenge, instance.ssh_password)
 
     return response
 
@@ -485,10 +490,6 @@ def create_container(
 
     if challenge.ssh_username:
         extra_env["SSH_USERNAME"] = challenge.ssh_username
-    if challenge.ssh_password:
-        extra_env["SSH_PASSWORD"] = challenge.ssh_password
-
-    extra_env_or_none: dict[str, str] | None = extra_env or None
 
     try:
         _, services = normalize_services(challenge.services_json)
@@ -523,6 +524,7 @@ def create_container(
             expires=expires,
             preferred_context_name=challenge.docker_context,
             eligible_context_names=eligible_contexts,
+            generate_ssh_password=challenge.ctype == "ssh" and bool(challenge.ssh_password),
         )
     except InstanceQuotaExceeded:
         maximum = int(get_setting("max_containers_per_user", 4) or 4)
@@ -543,6 +545,11 @@ def create_container(
         if reservation.state == "provisioning":
             return error_body(REQUEST_IN_PROGRESS, "transient"), 429, {"Retry-After": "5"}
         return error_body(CLEANUP_IN_PROGRESS, "transient"), 503, {"Retry-After": "300"}
+
+    password = resolve_ssh_password(challenge, reservation.ssh_password)
+    if password:
+        extra_env["SSH_PASSWORD"] = password
+    extra_env_or_none: dict[str, str] | None = extra_env or None
 
     if not reservation.context_name:
         _cleanup_failed_reservation(container_manager, reservation, "reservation has no docker context")

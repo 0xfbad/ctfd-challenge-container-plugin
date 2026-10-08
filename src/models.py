@@ -78,8 +78,7 @@ class ContainerMaintenanceModel(db.Model):
 class ContainerHistoryModel(db.Model):
     __tablename__ = "container_history"
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    # not a foreign key, instances are active only while history outlives them
-    instance_id = db.Column(db.String(32), nullable=False, index=True)
+    instance_id = db.Column(db.String(32), nullable=False, index=True)  # history must survive instance deletion
     container_id = db.Column(db.String(512), nullable=False)
     challenge_id = db.Column(db.Integer, db.ForeignKey("challenges.id", ondelete="SET NULL"), nullable=True)
     user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
@@ -100,8 +99,9 @@ class DockerContextModel(db.Model):
     hostname = db.Column(db.String(512), nullable=True)
     pub_hostname = db.Column(db.String(512), nullable=False)
     weight = db.Column(db.Integer, nullable=False, default=1, server_default="1")
-    # only active admits new placement, the other states keep the endpoint for cleanup
-    state = db.Column(db.String(24), nullable=False, default="active", server_default="active")
+    state = db.Column(
+        db.String(24), nullable=False, default="active", server_default="active"
+    )  # other states retain cleanup endpoints
     placement_version = db.Column(db.Integer, nullable=False, default=0, server_default="0")
     health_state = db.Column(db.String(16), nullable=False, default="unknown", server_default="unknown")
     health_checked_at = db.Column(db.Float(precision=53), nullable=True)
@@ -121,11 +121,6 @@ class DockerContextModel(db.Model):
 
 
 class ContainerInstanceModel(db.Model):
-    """one active logical challenge instance, physical members live in container_info
-
-    deleted only after docker cleanup is confirmed, so these uniqueness constraints are the cross worker quota boundary
-    """
-
     __tablename__ = "container_instances"
     __table_args__ = (
         db.UniqueConstraint("owner_key", "challenge_id", name="uq_container_instance_owner_challenge"),
@@ -142,7 +137,7 @@ class ContainerInstanceModel(db.Model):
     )
 
     id = db.Column(db.String(32), primary_key=True)
-    # normalized server identity, values look like user:12 or team:7
+    ssh_password = db.Column(db.String(8), nullable=True)  # null preserves the configured legacy credential
     owner_key = db.Column(db.String(32), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     team_id = db.Column(db.Integer, db.ForeignKey("teams.id", ondelete="SET NULL"), nullable=True)
@@ -150,21 +145,19 @@ class ContainerInstanceModel(db.Model):
     quota_slot = db.Column(db.Integer, nullable=False)
     state = db.Column(db.String(24), nullable=False, default="provisioning", server_default="provisioning")
     state_version = db.Column(db.Integer, nullable=False, default=0, server_default="0")
-    # the id rather than the name so RESTRICT blocks context deletion while instances are live
     docker_context_id = db.Column(
         db.Integer,
-        db.ForeignKey("docker_contexts.id", ondelete="RESTRICT"),
+        db.ForeignKey("docker_contexts.id", ondelete="RESTRICT"),  # live instances must retain their cleanup endpoint
         nullable=False,
         index=True,
     )
-    # non null only while provisioning is in flight, clearing it frees the per context create slot
-    create_slot = db.Column(db.Integer, nullable=True)
+    create_slot = db.Column(db.Integer, nullable=True)  # clearing this releases admission while quota remains owned
     placement_units = db.Column(db.Integer, nullable=False, default=1, server_default="1")
     stack_id = db.Column(db.String(64), nullable=True, unique=True)
     entry_container_id = db.Column(db.String(512), nullable=True, unique=True)
-    # immutable fencing identity stamped on every docker object of one provisioning attempt
-    provision_token = db.Column(db.String(32), nullable=False, unique=True)
-    # mutable ownership token for stop, expiry, and reconcile operations
+    provision_token = db.Column(
+        db.String(32), nullable=False, unique=True
+    )  # all docker members share this immutable identity
     operation_token = db.Column(db.String(32), nullable=True)
     provision_deadline = db.Column(db.Float(precision=53), nullable=True)
     created_at = db.Column(db.Float(precision=53), nullable=False, default=time.time)
@@ -196,12 +189,10 @@ class ContainerFlagShareModel(db.Model):
     challenge_xid = db.Column(db.String(32), nullable=False)
     submitter_user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     submitter_team_id = db.Column(db.Integer, db.ForeignKey("teams.id", ondelete="SET NULL"), nullable=True)
-    # immutable submitting user identity, always user:<Users.id>
     submitter_user_xid = db.Column(db.String(32), nullable=False)
     owner_user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     owner_team_id = db.Column(db.Integer, db.ForeignKey("teams.id", ondelete="SET NULL"), nullable=True)
-    # keyed hmac sha256 so the low entropy token is never stored in a queryable form
-    submitted_token_digest = db.Column(db.String(64), nullable=False)
+    submitted_token_digest = db.Column(db.String(64), nullable=False)  # raw low entropy tokens must not be queryable
     ip = db.Column(db.String(46), nullable=True)
     timestamp = db.Column(db.Float(precision=53), index=True)
 
