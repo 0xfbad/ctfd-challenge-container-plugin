@@ -700,7 +700,7 @@ class DockerHostManager:
         def _do() -> list[ReconcileEntry]:
             client = self._get_client(context_name)
             filters = {"label": label_key}
-            containers = client.containers.list(all=True, filters=filters)
+            containers = client.containers.list(all=True, filters=filters, ignore_removed=True)
             networks = client.networks.list(filters=filters)
             results: list[ReconcileEntry] = []
             for resources, top_level_labels in ((containers, False), (networks, True)):
