@@ -247,7 +247,9 @@ class NetworkOrphanChecks(unittest.TestCase):
         with factory as constructor:
             result = host.list_resources_by_label("local", "ctf.instance_id")
         constructor.assert_called_once()
-        client.containers.list.assert_called_once_with(all=True, filters={"label": "ctf.instance_id"})
+        client.containers.list.assert_called_once_with(
+            all=True, filters={"label": "ctf.instance_id"}, ignore_removed=True
+        )
         client.networks.list.assert_called_once_with(filters={"label": "ctf.instance_id"})
         assert [value["instance_id"] for value in result] == [INSTANCE_ID, INSTANCE_ID]
         assert [value["id"] for value in result] == ["container-id", "network-id"]
