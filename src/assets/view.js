@@ -450,6 +450,7 @@ function _doContainerRequest(challengeId, isRetry, retryDeadline) {
 }
 
 function makeCopyField(label, value) {
+    var view = _containerView;
     var wrapper = document.createElement('div');
     wrapper.style.marginBottom = '4px';
 
@@ -465,24 +466,89 @@ function makeCopyField(label, value) {
 
     var code = document.createElement('code');
     code.textContent = value;
+    code.tabIndex = 0;
     row.append(code);
 
+    var status = document.createElement('div');
+    status.className = 'connection-hint';
+    status.setAttribute('role', 'status');
+    status.hidden = true;
+
     var btn = document.createElement('button');
+    btn.type = 'button';
     btn.className = 'copy-btn';
     btn.innerHTML = '<i class="fas fa-copy"></i>';
     btn.title = 'Copy';
+    btn.setAttribute('aria-label', 'Copy ' + (label || 'connection command'));
+    var resetTimer = null;
+
     btn.onclick = function() {
-        navigator.clipboard.writeText(value).then(function() {
+        if (btn.disabled) return;
+        btn.disabled = true;
+        if (view) view.copyField = code;
+        if (resetTimer) clearTimeout(resetTimer);
+        btn.innerHTML = '<i class="fas fa-copy"></i>';
+        btn.classList.remove('copied');
+        btn.title = 'Copy';
+        status.hidden = true;
+        status.textContent = '';
+
+        function current() {
+            return code.isConnected && (!view || _isCurrentContainerView(view));
+        }
+
+        function currentCopy() {
+            return current() && (!view || view.copyField === code);
+        }
+
+        function copied() {
+            btn.disabled = false;
+            if (!currentCopy()) return;
             btn.innerHTML = '<i class="fas fa-check"></i>';
             btn.classList.add('copied');
-            setTimeout(function() {
+            btn.title = 'Copied';
+            status.hidden = true;
+            resetTimer = setTimeout(function() {
+                if (!current()) return;
                 btn.innerHTML = '<i class="fas fa-copy"></i>';
                 btn.classList.remove('copied');
+                btn.title = 'Copy';
             }, 1500);
-        });
+        }
+
+        function fallback() {
+            if (!currentCopy()) {
+                btn.disabled = false;
+                return;
+            }
+            var success = false;
+            try {
+                code.focus();
+                var range = document.createRange();
+                range.selectNodeContents(code);
+                var selection = window.getSelection();
+                selection.removeAllRanges();
+                selection.addRange(range);
+                success = document.execCommand('copy');
+            } catch (error) {}
+
+            btn.disabled = false;
+            if (success) {
+                copied();
+                return;
+            }
+            status.textContent = 'Press Ctrl+C to copy';
+            status.hidden = false;
+        }
+
+        try {
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                Promise.resolve(navigator.clipboard.writeText(value)).then(copied, fallback);
+            } else fallback();
+        } catch (error) { fallback(); }
     };
     row.append(btn);
-    wrapper.append(row);
+    wrapper.append(row, status);
     return wrapper;
 }
 
