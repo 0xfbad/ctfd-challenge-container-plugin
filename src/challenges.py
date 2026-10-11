@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import logging
 import os
 import secrets
@@ -15,7 +16,7 @@ from CTFd.exceptions.challenges import (
     ChallengeCreateException,
     ChallengeUpdateException,
 )
-from CTFd.models import Teams, Users, db
+from CTFd.models import Solves, Teams, Users, db
 from CTFd.plugins.challenges import BaseChallenge, calculate_value
 from CTFd.plugins.challenges.decay import DECAY_FUNCTIONS
 from CTFd.utils.user import get_current_user, get_ip, is_admin
@@ -69,8 +70,7 @@ def _find_token_owner(
         token_map[token] = (entity.id, getattr(entity, "name", f"id={entity.id}"))
 
     with _token_map_lock:
-        # count the snapshot not the live table, a racing signup then leaves a mismatch that invalidates the cache
-        _token_map_cache[cache_key] = (len(entities), token_map)
+        _token_map_cache[cache_key] = (len(entities), token_map)  # racing signups must invalidate this snapshot
 
     match = token_map.get(submitted_token)
     if match and match[0] != exclude_xid:
@@ -95,11 +95,19 @@ def _shorten_after_solve(challenge_id: int, xid: int, team_mode: bool) -> int | 
     if not container:
         return None
 
-    now = int(time.time())
-    solve_time = now - container.timestamp if container.timestamp else None
+    solve = (
+        Solves.query.filter_by(challenge_id=challenge_id, **owner_filter(xid, team_mode))
+        .order_by(Solves.date.asc())
+        .first()
+    )
+    if solve is None or solve.date is None:
+        return None
 
-    target_expires = now + expiry_seconds
-    update = InstanceCoordinator.shorten_after_solve(container.instance_id, target_expires, solved_at=now)
+    solved_at = calendar.timegm(solve.date.utctimetuple()) + solve.date.microsecond / 1_000_000
+    solve_time = int(solved_at) - container.timestamp if container.timestamp else None
+
+    target_expires = int(solved_at) + expiry_seconds
+    update = InstanceCoordinator.shorten_after_solve(container.instance_id, target_expires, solved_at=solved_at)
     if update is None:
         return None
 
@@ -370,8 +378,7 @@ class ContainerChallenge(BaseChallenge):
                 db.session.add(share_row)
                 db.session.commit()
             except IntegrityError:
-                # duplicate submit of the same token, the first row stays the record
-                db.session.rollback()
+                db.session.rollback()  # duplicate submits retain the first record
 
             return False, FLAG_NOT_YOURS
 

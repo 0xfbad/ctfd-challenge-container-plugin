@@ -224,9 +224,7 @@ class InstanceCoordinator:
                 session.rollback()  # the next pass distinguishes a competing owner from quota exhaustion
             except OperationalError as error:
                 session.rollback()
-                if (
-                    "locked" not in str(error).lower() or busy_attempt >= self.SQLITE_BUSY_RETRIES
-                ):  # sqlite writer conflicts need bounded retries
+                if "locked" not in str(error).lower() or busy_attempt >= self.SQLITE_BUSY_RETRIES:
                     raise
                 busy_attempt += 1
                 time.sleep(random.uniform(0.005, 0.025) * busy_attempt)
@@ -718,6 +716,7 @@ class InstanceCoordinator:
                     ContainerInstanceModel.id == instance_id,
                     ContainerInstanceModel.state == "running",
                     ContainerInstanceModel.solved_at.is_(None),
+                    ContainerInstanceModel.created_at <= solved_at,
                 )
                 .update(
                     {
@@ -845,6 +844,9 @@ class InstanceCoordinator:
                 continue
 
             solved_at = calendar.timegm(solve.date.utctimetuple()) + solve.date.microsecond / 1_000_000
+            if solved_at < instance.created_at:
+                continue
+
             target_expires = int(solved_at) + shorten_seconds
             if InstanceCoordinator.shorten_after_solve(instance.id, target_expires, solved_at=solved_at):
                 reconciled += 1
