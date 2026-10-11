@@ -56,6 +56,7 @@ def preparation(store, *, eligible=range(1, 351), batch_size=64, change=None):
         "Teams": MagicMock(),
         "db": database,
         "get_config": lambda name: False,
+        "ctf_ended": lambda: False,
         "utils": SimpleNamespace(get_setting=settings.get, is_team_mode=lambda: change == "mode" and changed[0]),
         "_templates": lambda challenge_id: ["edited-template" if change == "templates" and changed[0] else "fixture"],
         "_store_io": lambda operation, *args, **kwargs: operation(*args, **kwargs),

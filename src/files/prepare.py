@@ -18,8 +18,6 @@ def reconcile(app: Flask, *, batch_size: int = 64) -> None:
         try:
             if "personalized_files_store" not in app.extensions:
                 return
-            if get_config("challenge_visibility") == "admins" or ctf_ended():
-                return
             team_mode = utils.is_team_mode()
             secret = utils.get_setting("freshness_secret")
             if team_mode is None or not secret:
@@ -55,9 +53,11 @@ def _prepare_batch(store, team_mode, secret, length, batch_size):
         return
 
     column = Users.team_id if team_mode else Users.id
-    owners = Users.query.with_entities(column).filter(Users.type == "user", Users.banned.is_(False))
+    owners = Users.query.with_entities(column).filter(Users.type.in_(("user", "admin")), Users.banned.is_(False))
     if get_config("verify_emails"):
-        owners = owners.filter(Users.verified.is_(True))
+        owners = owners.filter((Users.type == "admin") | Users.verified.is_(True))
+    if get_config("challenge_visibility") == "admins" or ctf_ended():
+        owners = owners.filter(Users.type == "admin")
     if team_mode:
         owners = owners.join(Teams, Teams.id == Users.team_id).filter(Teams.banned.is_(False))
     owners = owners.distinct()
