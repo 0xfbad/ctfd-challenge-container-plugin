@@ -17,6 +17,8 @@ Managed live through `/admin/config` under the Challenge Containers section, no 
 
 ## Development
 
+Tests in `tests/` are local-only.
+
 ```
 python -m pytest tests
 ```
