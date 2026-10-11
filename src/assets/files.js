@@ -57,25 +57,8 @@
 
     const original = Array.from(button.childNodes);
     notices.get(button)?.remove();
-    const notice = document.createElement("div");
-    notice.className = "alert alert-info mt-3";
-    notice.setAttribute("role", "status");
-    notice.setAttribute("aria-live", "polite");
-    const spinner = document.createElement("span");
-    spinner.className = "spinner-border spinner-border-sm mr-2 me-2";
-    spinner.setAttribute("aria-hidden", "true");
-    const message = document.createElement("span");
-    message.textContent = "Preparing your file for download...";
-    notice.append(spinner, message);
-    notices.set(button, notice);
-    button.closest(".challenge-files").append(notice);
-    const icon = button.querySelector("i.fa-download");
-    if (icon) {
-      const buttonSpinner = document.createElement("span");
-      buttonSpinner.className = "spinner-border spinner-border-sm";
-      buttonSpinner.setAttribute("aria-hidden", "true");
-      icon.replaceWith(buttonSpinner);
-    }
+    let notice;
+    let message;
     button.classList.add("disabled");
     button.setAttribute("aria-disabled", "true");
     button.setAttribute("aria-busy", "true");
@@ -101,7 +84,7 @@
           clearTimeout(timeout);
         }
         if (!open()) break;
-        if (response.ok && data.state === "ready") {
+        if (response.status === 200 && data?.state === "ready") {
           let frame = downloads.get(url.href);
           if (!frame) {
             frame = document.createElement("iframe");
@@ -110,22 +93,52 @@
             document.body.append(frame);
           }
           frame.src = url.href;
-          notice.remove();
+          notice?.remove();
           break;
         }
-        if (!(response.status === 202 || (response.status === 503 && data.state === "busy"))) {
-          throw new Error(data.message || "Your file is unavailable. Please contact an organizer.");
+        if (!(
+          (response.status === 202 && ["queued", "running"].includes(data?.state)) ||
+          (response.status === 503 && data?.state === "busy")
+        )) {
+          throw new Error(data?.message || "Your file is unavailable. Please contact an organizer.");
+        }
+        if (!notice) {
+          notice = document.createElement("div");
+          notice.className = "alert alert-info mt-3";
+          notice.setAttribute("role", "status");
+          notice.setAttribute("aria-live", "polite");
+          const spinner = document.createElement("span");
+          spinner.className = "spinner-border spinner-border-sm mr-2 me-2";
+          spinner.setAttribute("aria-hidden", "true");
+          message = document.createElement("span");
+          notice.append(spinner, message);
+          notices.set(button, notice);
+          button.closest(".challenge-files").append(notice);
+          const icon = button.querySelector("i.fa-download");
+          if (icon) {
+            const buttonSpinner = document.createElement("span");
+            buttonSpinner.className = "spinner-border spinner-border-sm";
+            buttonSpinner.setAttribute("aria-hidden", "true");
+            icon.replaceWith(buttonSpinner);
+          }
         }
         message.textContent = data.message;
         await new Promise((resolve) => setTimeout(resolve, 3000));
       }
     } catch (error) {
-      notice.className = "alert alert-danger mt-3";
-      notice.setAttribute("role", "alert");
-      spinner.remove();
-      message.textContent = error.name === "AbortError"
-        ? "Your file request timed out. Please try again."
-        : error.message || "Your file could not be downloaded. Please try again.";
+      if (open()) {
+        if (!notice) {
+          notice = document.createElement("div");
+          notice.setAttribute("aria-live", "polite");
+          notices.set(button, notice);
+          button.closest(".challenge-files").append(notice);
+        }
+        notice.className = "alert alert-danger mt-3";
+        notice.setAttribute("role", "alert");
+        notice.textContent = error.name === "AbortError"
+          ? "Your file request timed out. Please try again."
+          : error.message || "Your file could not be downloaded. Please try again.";
+      }
     } finally {
       if (active.get(url.href) === button) active.delete(url.href);
       if (button.href === url.href) {
@@ -134,7 +147,7 @@
         button.removeAttribute("aria-disabled");
         button.removeAttribute("aria-busy");
       }
-      if (!open()) notice.remove();
+      if (!open()) notice?.remove();
     }
   });
 })();
