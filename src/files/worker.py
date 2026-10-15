@@ -13,8 +13,9 @@ import time
 from contextlib import closing, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
-from requests.exceptions import ReadTimeout
+from requests.exceptions import ConnectionError, ReadTimeout
 
 if TYPE_CHECKING or __package__:
     from .store import ArtifactUnavailable, QueueFull, RecipeChanged, Store, StoreBusy, StoreError, remove_if_exists
@@ -22,6 +23,7 @@ else:
     from store import ArtifactUnavailable, QueueFull, RecipeChanged, Store, StoreBusy, StoreError, remove_if_exists
 
 logger = logging.getLogger("personalized-files")
+_RECOVERY_SECONDS = 30
 _EXIT = re.compile(rb"CTFD_ARTIFACT_EXIT:([0-9]+)\n\Z")
 _WRAPPER = (
     '(sleep "$CTFD_ARTIFACT_TIMEOUT"; kill -KILL "$$") & '  # the worker can die before cleanup
@@ -33,20 +35,59 @@ class GenerationError(StoreError):
     pass
 
 
+def _docker_details(exc):
+    response = getattr(exc, "response", None)
+    request = getattr(exc, "request", None)
+    if request is None and response is not None:
+        request = getattr(response, "request", None)
+    method = getattr(request, "method", None)
+    if method not in ("GET", "POST", "DELETE", "HEAD", "PUT", "PATCH", "OPTIONS"):
+        method = "unknown"
+    status = getattr(response, "status_code", None) if response is not None else None
+    if type(status) is not int:
+        status = "unknown"
+    endpoint = "unknown"
+    url = getattr(request, "url", None)
+    if isinstance(url, str):
+        try:
+            path = re.sub(r"^/v[0-9]+\.[0-9]+/", "/", urlsplit(url).path)
+        except ValueError:
+            path = ""
+        for pattern, category in (
+            (r"/containers/create", "container-create"),
+            (r"/containers/json", "container-list"),
+            (r"/containers/[^/]+/json", "container-inspect"),
+            (r"/containers/[^/]+/start", "container-start"),
+            (r"/containers/[^/]+/kill", "container-kill"),
+            (r"/containers/[^/]+/logs", "container-logs"),
+            (r"/containers/[^/]+/exec", "exec-create"),
+            (r"/containers/[^/]+", "container-remove"),
+            (r"/exec/[^/]+/start", "exec-start"),
+            (r"/exec/[^/]+/json", "exec-inspect"),
+            (r"/images/.+/json", "image-inspect"),
+            (r"/_ping", "ping"),
+        ):
+            if re.fullmatch(pattern, path):
+                endpoint = category
+                break
+    return f"method={method} endpoint={endpoint} status={status}"
+
+
+def _check_generation(deadline, cancelled=None):
+    if cancelled is not None and cancelled.is_set():
+        raise RecipeChanged("generation is no longer current")
+    if time.monotonic() >= deadline:
+        raise GenerationError("generation timed out")
+
+
 def _wait_for_start(container, deadline, cancelled):
     while True:
-        if cancelled.is_set():
-            raise RecipeChanged("generation is no longer current")
-        if time.monotonic() >= deadline:
-            raise GenerationError("generation timed out")
+        _check_generation(deadline, cancelled)
         try:
             container.reload()
         except ReadTimeout:
             continue
-        if cancelled.is_set():
-            raise RecipeChanged("generation is no longer current")
-        if time.monotonic() >= deadline:
-            raise GenerationError("generation timed out")
+        _check_generation(deadline, cancelled)
         if container.attrs.get("State", {}).get("Error") or container.status not in ("created", "running"):
             raise GenerationError("generator failed to start")
         if container.status == "running":
@@ -164,6 +205,57 @@ class DockerGenerator:
         name = "ctfd-personalized-" + job["key"]
         return name + "-" + job["generation"] if job.get("generation") else name
 
+    def _labels(self, job):
+        labels = {"ctfd.personalized.key": job["key"]}
+        if job.get("generation"):
+            labels["ctfd.personalized.generation"] = job["generation"]
+        if self.store is not None:
+            labels["ctfd.personalized.store"] = self.store.namespace
+        return labels
+
+    def _check_owned(self, container, job):
+        if container.name != self.container_name(job) or any(
+            container.labels.get(name) != value for name, value in self._labels(job).items()
+        ):
+            raise GenerationError("generator container name is already in use")
+
+    def _check_current(self, job, deadline, cancelled=None):
+        _check_generation(deadline, cancelled)
+        if self.store is not None and not _retry_store(self.store.current, job):
+            raise RecipeChanged("generation is no longer current")
+        _check_generation(deadline, cancelled)
+
+    def _remove(self, container, *, deadline=None):
+        from docker.errors import APIError, NotFound
+
+        self.phase = "cleanup-remove"
+        try:
+            container.remove(force=True)
+        except NotFound:
+            return
+        except (ReadTimeout, APIError) as exc:
+            if isinstance(exc, APIError) and not (
+                exc.response is not None
+                and exc.response.status_code == 409
+                and exc.explanation == f"removal of container {container.id} is already in progress"
+            ):
+                raise
+            recovery_end = time.monotonic() + _RECOVERY_SECONDS
+            if deadline is not None:
+                recovery_end = min(recovery_end, deadline)
+            self.phase = "cleanup-wait"
+            while time.monotonic() < recovery_end:
+                try:
+                    self.client.containers.get(container.id)
+                except NotFound:
+                    return
+                except ReadTimeout:
+                    pass
+                remaining = recovery_end - time.monotonic()
+                if remaining > 0:
+                    time.sleep(min(0.2, remaining))
+            raise
+
     def cleanup(self, job):
         from docker.errors import NotFound
 
@@ -174,25 +266,22 @@ class DockerGenerator:
             container = self.client.containers.get(self.container_name(job))
         except NotFound:
             return
-        labels = {"ctfd.personalized.key": job["key"]}
-        if job.get("generation"):
-            labels["ctfd.personalized.generation"] = job["generation"]
-        if self.store is not None:
-            labels["ctfd.personalized.store"] = self.store.namespace
-        if any(container.labels.get(name) != value for name, value in labels.items()):
-            raise GenerationError("generator container name is already in use")
-        self.phase = "cleanup-remove"
-        container.remove(force=True)
+        self._check_owned(container, job)
+        self._remove(container)
 
     def cleanup_all(self, jobs):
+        deadline = time.monotonic() + _RECOVERY_SECONDS
         keys = {job["key"] for job in jobs}
         label = f"ctfd.personalized.store={self.store.namespace}" if self.store is not None else "ctfd.personalized.key"
         self.phase = "cleanup-list"
-        for container in self.client.containers.list(all=True, filters={"label": label}):
-            scoped = self.store is not None and container.labels.get("ctfd.personalized.store") == self.store.namespace
-            if scoped or (self.store is None and container.labels.get("ctfd.personalized.key") in keys):
-                self.phase = "cleanup-remove"
-                container.remove(force=True)
+        containers = self.client.containers.list(all=True, filters={"label": label}, sparse=True)
+        for container in containers:
+            if time.monotonic() >= deadline:
+                return
+            labels = container.attrs.get("Labels") or {}
+            scoped = self.store is not None and labels.get("ctfd.personalized.store") == self.store.namespace
+            if scoped or (self.store is None and labels.get("ctfd.personalized.key") in keys):
+                self._remove(container, deadline=deadline)
 
     def __call__(self, job, stage):
         self.phase = "check-current"
@@ -210,37 +299,7 @@ class DockerGenerator:
             "PYTHONDONTWRITEBYTECODE": "1",
             "CTFD_ARTIFACT_TIMEOUT": str(recipe["timeout_seconds"]),
         }
-        labels = {"ctfd.personalized.key": job["key"]}
-        if job.get("generation"):
-            labels["ctfd.personalized.generation"] = job["generation"]
-        if self.store is not None:
-            labels["ctfd.personalized.store"] = self.store.namespace
-        self.phase = "create"
-        container = self.client.containers.create(
-            image=image.id,
-            entrypoint=["/bin/sh"],
-            command=["-c", _WRAPPER],
-            name=self.container_name(job),
-            environment=environment,
-            working_dir="/output",
-            user="65534:65534",
-            read_only=True,
-            network_mode="none",
-            cap_drop=["ALL"],
-            security_opt=["no-new-privileges:true"],
-            pids_limit=64,
-            mem_limit=268435456,
-            memswap_limit=268435456,
-            nano_cpus=1000000000,
-            init=True,
-            healthcheck={"test": ["NONE"]},
-            tmpfs={
-                "/output": f"rw,noexec,nosuid,nodev,size={recipe['max_output_bytes']},mode=1777",
-                "/tmp": "rw,noexec,nosuid,nodev,size=16777216,mode=1777",
-            },
-            labels=labels,
-            log_config={"type": "json-file", "config": {"max-size": "16k", "max-file": "1"}},
-        )
+        container = None
 
         finished = threading.Event()
         cancelled = threading.Event()
@@ -264,10 +323,67 @@ class DockerGenerator:
                     container.kill()
                 return
 
-        watchdog = threading.Thread(target=stop_obsolete_container, daemon=True)
-        watchdog.start()
+        watchdog = None
         failed = False
         try:
+            self._check_current(job, deadline)
+            self.phase = "create"
+            try:
+                candidate = self.client.containers.create(
+                    image=image.id,
+                    entrypoint=["/bin/sh"],
+                    command=["-c", _WRAPPER],
+                    name=self.container_name(job),
+                    environment=environment,
+                    working_dir="/output",
+                    user="65534:65534",
+                    read_only=True,
+                    network_mode="none",
+                    cap_drop=["ALL"],
+                    security_opt=["no-new-privileges:true"],
+                    pids_limit=64,
+                    mem_limit=268435456,
+                    memswap_limit=268435456,
+                    nano_cpus=1000000000,
+                    init=True,
+                    healthcheck={"test": ["NONE"]},
+                    tmpfs={
+                        "/output": f"rw,noexec,nosuid,nodev,size={recipe['max_output_bytes']},mode=1777",
+                        "/tmp": "rw,noexec,nosuid,nodev,size=16777216,mode=1777",
+                    },
+                    labels=self._labels(job),
+                    log_config={"type": "json-file", "config": {"max-size": "16k", "max-file": "1"}},
+                )
+            except ReadTimeout:
+                from docker.errors import NotFound
+
+                recovery_end = min(deadline, time.monotonic() + _RECOVERY_SECONDS)
+                while container is None:
+                    self._check_current(job, deadline)
+                    if time.monotonic() >= recovery_end:
+                        raise
+                    self.phase = "create-wait"
+                    try:
+                        candidate = self.client.containers.get(self.container_name(job))
+                    except (NotFound, ReadTimeout):
+                        remaining = recovery_end - time.monotonic()
+                        if remaining > 0:
+                            time.sleep(min(0.2, remaining))
+                        continue
+                    self._check_owned(candidate, job)
+                    container = candidate
+                    self._check_current(job, deadline)
+                    if time.monotonic() >= recovery_end:
+                        raise
+            else:
+                self._check_owned(candidate, job)
+                container = candidate
+            if container.status != "created":
+                raise GenerationError("generator failed to start")
+            self._check_current(job, deadline)
+            watchdog = threading.Thread(target=stop_obsolete_container, daemon=True)
+            watchdog.start()
+            _check_generation(deadline, cancelled)
             self.phase = "start"
             try:
                 container.start()
@@ -275,21 +391,21 @@ class DockerGenerator:
                 self.phase = "start-wait"
                 _wait_for_start(container, deadline, cancelled)
             while True:
-                if cancelled.is_set():
-                    raise RecipeChanged("generation is no longer current")
-                if time.monotonic() >= deadline:
-                    raise GenerationError("generation timed out")
+                _check_generation(deadline, cancelled)
                 self.phase = "logs"
                 marker = _EXIT.fullmatch(container.logs(stdout=True, stderr=False, tail=1))
+                _check_generation(deadline, cancelled)
                 if marker:
                     if int(marker.group(1)):
                         raise GenerationError("generator exited unsuccessfully")
                     break
                 self.phase = "reload"
                 container.reload()
+                _check_generation(deadline, cancelled)
                 if container.status != "running":
                     raise GenerationError("generator stopped before completing")
                 time.sleep(0.2)
+            _check_generation(deadline, cancelled)
             self.phase = "exec-create"
             execution = self.client.api.exec_create(
                 container.id,
@@ -298,6 +414,7 @@ class DockerGenerator:
                 stderr=True,
                 user="65534:65534",
             )["Id"]
+            _check_generation(deadline, cancelled)
             self.phase = "exec-start"
             with closing(self.client.api.exec_start(execution, socket=True)) as connection:
                 self.phase = "archive"
@@ -310,30 +427,31 @@ class DockerGenerator:
                 if self.client.api.exec_inspect(execution)["ExitCode"] != 0:
                     raise GenerationError("could not read generator output")
                 self.phase = "check-current"
-                if cancelled.is_set() or (self.store is not None and not _retry_store(self.store.current, job)):
-                    raise RecipeChanged("generation is no longer current")
+                self._check_current(job, deadline, cancelled)
                 self.phase = "archive-close"
         except BaseException:
             failed = True
             raise
         finally:
             finished.set()
-            watchdog.join(timeout=5)
-            phase = self.phase
-            self.phase = "cleanup-remove"
-            try:
-                container.remove(force=True)
-            except Exception as exc:
-                if not failed:
-                    raise
-                logger.warning(
-                    "artifact cleanup failed for challenge %s (%s) phase=%s",
-                    job["challenge_id"],
-                    type(exc).__name__,
-                    self.phase,
-                )
-            if failed:
-                self.phase = phase
+            if watchdog is not None:
+                watchdog.join(timeout=5)
+            if container is not None:
+                phase = self.phase
+                try:
+                    self._remove(container)
+                except Exception as exc:
+                    if not failed:
+                        raise
+                    logger.warning(
+                        "artifact cleanup failed for challenge %s (%s) phase=%s %s",
+                        job["challenge_id"],
+                        type(exc).__name__,
+                        self.phase,
+                        _docker_details(exc),
+                    )
+                if failed:
+                    self.phase = phase
 
 
 def _retry_store(operation, *args, **kwargs):
@@ -354,10 +472,22 @@ def run_once(store, generator=None, *, maintenance=None):
             generator = generator or DockerGenerator(store=store)
             if maintenance is None or time.monotonic() >= maintenance["next"]:
                 reconcile = getattr(generator, "cleanup_all", None)
-                if reconcile:
+                if reconcile and (maintenance is None or time.monotonic() >= maintenance.get("sweep_next", 0)):
+                    from docker.errors import APIError
+
                     with store.lock(shared=True):
                         jobs = store._jobs()
-                    reconcile(jobs)
+                    try:
+                        reconcile(jobs)
+                    except (ReadTimeout, APIError) as exc:
+                        logger.warning(
+                            "artifact namespace cleanup failed (%s) phase=%s %s",
+                            type(exc).__name__,
+                            generator.phase if isinstance(generator, DockerGenerator) else "cleanup-all",
+                            _docker_details(exc),
+                        )
+                    if maintenance is not None:
+                        maintenance["sweep_next"] = time.monotonic() + 60
                 for interrupted in store.interrupted():
                     cleanup = getattr(generator, "cleanup", None)
                     if cleanup:
@@ -393,13 +523,16 @@ def run_once(store, generator=None, *, maintenance=None):
             except Exception as exc:
                 if maintenance is not None:
                     maintenance["next"] = 0
+                    if isinstance(exc, ConnectionError):
+                        maintenance["sweep_next"] = 0
                 message = str(exc) if isinstance(exc, (GenerationError, ArtifactUnavailable)) else "generation failed"
                 _retry_store(store.fail, job, message)
                 logger.warning(
-                    "artifact generation failed for challenge %s (%s) phase=%s",
+                    "artifact generation failed for challenge %s (%s) phase=%s %s",
                     job["challenge_id"],
                     type(exc).__name__,
                     generator.phase if phase == "generation" and isinstance(generator, DockerGenerator) else phase,
+                    _docker_details(exc),
                 )
             finally:
                 shutil.rmtree(stage, ignore_errors=True)
@@ -439,9 +572,10 @@ def main():
         except Exception as exc:
             maintenance["next"] = 0
             logger.error(
-                "artifact worker unavailable (%s) docker_phase=%s",
+                "artifact worker unavailable (%s) docker_phase=%s %s",
                 type(exc).__name__,
                 generator.phase if generator is not None else "connect",
+                _docker_details(exc),
             )
         time.sleep(1)
 
