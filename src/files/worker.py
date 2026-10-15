@@ -199,6 +199,7 @@ class DockerGenerator:
         self.client = client
         self.store = store
         self.phase = "idle"
+        self.cleanup_connection_failed = False
 
     @staticmethod
     def container_name(job):
@@ -443,6 +444,8 @@ class DockerGenerator:
                 except Exception as exc:
                     if not failed:
                         raise
+                    if isinstance(exc, ConnectionError):
+                        self.cleanup_connection_failed = True
                     logger.warning(
                         "artifact cleanup failed for challenge %s (%s) phase=%s %s",
                         job["challenge_id"],
@@ -470,6 +473,8 @@ def run_once(store, generator=None, *, maintenance=None):
     try:
         with store.lock("worker"):
             generator = generator or DockerGenerator(store=store)
+            if isinstance(generator, DockerGenerator):
+                generator.cleanup_connection_failed = False
             if maintenance is None or time.monotonic() >= maintenance["next"]:
                 reconcile = getattr(generator, "cleanup_all", None)
                 if reconcile and (maintenance is None or time.monotonic() >= maintenance.get("sweep_next", 0)):
@@ -523,7 +528,9 @@ def run_once(store, generator=None, *, maintenance=None):
             except Exception as exc:
                 if maintenance is not None:
                     maintenance["next"] = 0
-                    if isinstance(exc, ConnectionError):
+                    if isinstance(exc, ConnectionError) or (
+                        isinstance(generator, DockerGenerator) and generator.cleanup_connection_failed
+                    ):
                         maintenance["sweep_next"] = 0
                 message = str(exc) if isinstance(exc, (GenerationError, ArtifactUnavailable)) else "generation failed"
                 _retry_store(store.fail, job, message)
