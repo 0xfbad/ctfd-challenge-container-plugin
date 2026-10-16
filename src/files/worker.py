@@ -5,6 +5,7 @@ import os
 import re
 import select
 import shutil
+import signal
 import sys
 import tarfile
 import tempfile
@@ -191,13 +192,14 @@ def unpack_outputs(stream, stage, outputs, byte_limit):
 
 
 class DockerGenerator:
-    def __init__(self, client=None, *, store=None):
+    def __init__(self, client=None, *, store=None, on_deadline=None):
         if client is None:
             import docker
 
             client = docker.from_env(timeout=5)
         self.client = client
         self.store = store
+        self.on_deadline = on_deadline
         self.phase = "idle"
         self.cleanup_connection_failed = False
 
@@ -291,6 +293,8 @@ class DockerGenerator:
         self.cleanup(job)
         recipe = job["recipe"]
         deadline = time.monotonic() + recipe["timeout_seconds"]
+        if self.on_deadline is not None:
+            self.on_deadline(deadline)
         self.phase = "image"
         image = self.client.images.get(recipe["image"])
         if image.attrs.get("Config", {}).get("Volumes"):
@@ -567,13 +571,22 @@ def check():
 
 
 def main():
+    signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
+    signal.setitimer(signal.ITIMER_REAL, _RECOVERY_SECONDS)
     logging.basicConfig(level=logging.INFO)
     store = Store(os.environ.get("PERSONALIZED_FILES_ROOT", "/var/personalized-files"))
     generator = None
     maintenance = {"next": 0}
     while True:
+        signal.setitimer(signal.ITIMER_REAL, _RECOVERY_SECONDS)
         try:
-            generator = generator or DockerGenerator(store=store)
+            generator = generator or DockerGenerator(
+                store=store,
+                on_deadline=lambda deadline: signal.setitimer(
+                    signal.ITIMER_REAL, max(0, deadline - time.monotonic()) + _RECOVERY_SECONDS
+                ),
+            )
             if run_once(store, generator, maintenance=maintenance):
                 continue
         except Exception as exc:
