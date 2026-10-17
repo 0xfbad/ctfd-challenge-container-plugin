@@ -46,7 +46,9 @@ _SSH_CONNECT_TIMEOUT = threading.local()
 
 def _apply_ssh_connect_timeouts(params: dict[str, object], timeout: int | float) -> None:
     bounded = max(1.0, float(timeout))
-    params.update(timeout=bounded, banner_timeout=bounded, auth_timeout=bounded)  # docker omits ssh connect timeouts
+    params.update(
+        timeout=bounded, banner_timeout=bounded, auth_timeout=bounded, channel_timeout=bounded
+    )  # docker omits ssh connect timeouts
 
 
 def _install_bounded_ssh_adapter() -> None:
@@ -72,9 +74,11 @@ def _install_bounded_ssh_adapter() -> None:
             _ctfd_ssh_connect_timeout = _SSH_CONNECT_TIMEOUT
 
             def _create_paramiko_client(self, base_url):
+                local = getattr(type(self), "_ctfd_ssh_connect_timeout", _SSH_CONNECT_TIMEOUT)
+                if hasattr(local, "adapter"):
+                    local.adapter = self
                 super()._create_paramiko_client(base_url)
-
-                timeout = getattr(getattr(type(self), "_ctfd_ssh_connect_timeout", None), "value", SSH_CONNECT_TIMEOUT)
+                timeout = getattr(local, "value", SSH_CONNECT_TIMEOUT)
                 _apply_ssh_connect_timeouts(self.ssh_params, timeout)
 
         api_client.SSHHTTPAdapter = BoundedSSHHTTPAdapter
@@ -97,9 +101,18 @@ def _new_docker_client(endpoint: str, timeout: int = DEFAULT_CLIENT_TIMEOUT) -> 
     _install_bounded_ssh_adapter()
     local = _ssh_timeout_local()
     local.value = timeout
+    local.adapter = None
     try:
         return docker.DockerClient(base_url=endpoint, timeout=timeout)
+    except BaseException:
+        if local.adapter is not None:
+            try:
+                local.adapter.ssh_client.close()
+            except BaseException:
+                pass
+        raise
     finally:
+        del local.adapter
         try:
             del local.value
         except AttributeError:
