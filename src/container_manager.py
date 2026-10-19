@@ -25,11 +25,17 @@ from sqlalchemy import text
 from CTFd.models import db
 
 from .coordination import InstanceCoordinator
-from .docker_host_manager import DockerHostManager, ReconcileEntry, _DockerRunVal
+from .docker_host_manager import DockerHostManager, ReconcileEntry, _DockerRunVal, require_no_challenge_resources
 from .event_logger import event_logger
 from .exceptions import ContainerException, ContainerUnavailableException
 from .messages import CPU_LIMIT_INVALID, IMAGE_NOT_FOUND, MEMORY_LIMIT_INVALID
-from .models import ContainerInfoModel, ContainerInstanceModel, ContainerMaintenanceModel
+from .models import (
+    INSTANCE_STATES,
+    ContainerInfoModel,
+    ContainerInstanceModel,
+    ContainerMaintenanceModel,
+    DockerContextModel,
+)
 from .orchestrator import Orchestrator
 from .utils import get_setting
 
@@ -196,6 +202,52 @@ class ContainerManager:
 
         self.load_docker_contexts()
         self.setup_expiration_scheduler()
+
+    def _mapped_pool_drain_snapshot(self) -> tuple[list[tuple], dict[str, str]]:
+        db.session.rollback()
+        try:
+            contexts = DockerContextModel.query.populate_existing().order_by(DockerContextModel.id).all()
+            if any(context.state not in {"draining", "disabled", "retired_orphaned"} for context in contexts):
+                raise RuntimeError("make every challenge Docker context nonactive before provisioning the mapped pool")
+            if (
+                ContainerInstanceModel.query.filter(ContainerInstanceModel.state.in_(INSTANCE_STATES)).first()
+                is not None
+                or ContainerInfoModel.query.first() is not None
+            ):
+                raise RuntimeError("settle every challenge instance and physical ownership row before provisioning")
+
+            hosts = DockerHostManager()
+            hosts.load_contexts(contexts)
+            endpoints = hosts.get_endpoints()
+            if set(endpoints) != {context.context_name for context in contexts}:
+                raise RuntimeError("could not load every configured challenge Docker context")
+            catalogue = [
+                (context.id, context.context_name, context.hostname, context.state, context.placement_version)
+                for context in contexts
+            ]
+            return catalogue, endpoints
+        finally:
+            db.session.rollback()
+
+    def require_drained_for_mapped_pool(self, desktop_endpoints: dict[str, str]) -> Callable[[], None]:
+        catalogue, endpoints = self._mapped_pool_drain_snapshot()
+        targets = [("desktop", name, endpoint) for name, endpoint in desktop_endpoints.items()] + [
+            ("challenge", name, endpoint) for name, endpoint in endpoints.items()
+        ]
+        observations = [
+            (kind, name, endpoint, require_no_challenge_resources(endpoint)) for kind, name, endpoint in targets
+        ]
+
+        def recheck() -> None:
+            if self._mapped_pool_drain_snapshot() != (catalogue, endpoints):
+                raise RuntimeError("challenge Docker catalogue changed during mapped pool provisioning")
+            for kind, name, endpoint, daemon_id in observations:
+                if require_no_challenge_resources(endpoint) != daemon_id:
+                    raise RuntimeError(f"Docker daemon changed for {kind} context {name!r} during provisioning")
+            if self._mapped_pool_drain_snapshot() != (catalogue, endpoints):
+                raise RuntimeError("challenge Docker catalogue changed during mapped pool provisioning")
+
+        return recheck
 
     def load_docker_contexts(self) -> None:
         self.orchestrator.load_from_db()

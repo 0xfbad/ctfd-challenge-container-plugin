@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import random
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -19,6 +20,7 @@ from docker.models.containers import Container
 from docker.models.networks import Network
 from requests.exceptions import Timeout as RequestTimeout
 
+from .challenge_uid_fence import prepare_challenge
 from .exceptions import ContainerStartTimeout, ContainerUnavailableException
 from .models import DockerContextModel
 from .volume_policy import VolumeMetadata, docker_volume_metadata
@@ -260,6 +262,73 @@ def _resolve_endpoint(context_name: str, hostname: str | None) -> str | None:
     return None
 
 
+def require_no_challenge_resources(endpoint: str) -> str:
+    client = _new_docker_client(endpoint)
+    try:
+        daemon_id = client.info().get("ID")
+        if not isinstance(daemon_id, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:._-]*", daemon_id) is None:
+            raise RuntimeError("challenge drain inventory is missing a daemon ID")
+
+        containers = client.containers.list(all=True, ignore_removed=False)
+        networks = client.networks.list()
+        if not isinstance(containers, list) or not isinstance(networks, list):
+            raise RuntimeError("challenge drain inventory is incomplete")
+
+        resources = [(resource, True) for resource in containers]
+        resources.extend((resource, False) for resource in networks)
+        for resource, is_container in resources:
+            resource_id = resource.id
+            resource.reload()
+            attrs = resource.attrs
+            if not isinstance(attrs, dict):
+                raise RuntimeError("challenge drain inventory has malformed resource attributes")
+            name = attrs.get("Name")
+            if (
+                not isinstance(resource_id, str)
+                or re.fullmatch(r"[0-9a-f]{64}", resource_id) is None
+                or attrs.get("Id") != resource_id
+                or not isinstance(name, str)
+                or not name.strip("/")
+            ):
+                raise RuntimeError("challenge drain inventory has malformed resource identity")
+
+            if is_container:
+                config = attrs.get("Config")
+                state = attrs.get("State")
+                if (
+                    not isinstance(config, dict)
+                    or "Labels" not in config
+                    or not isinstance(state, dict)
+                    or state.get("Status")
+                    not in {"created", "restarting", "running", "removing", "paused", "exited", "dead"}
+                ):
+                    raise RuntimeError("challenge drain inventory has malformed container state")
+                labels = config.get("Labels")
+            else:
+                if "Labels" not in attrs:
+                    raise RuntimeError("challenge drain inventory is missing network labels")
+                labels = attrs["Labels"]
+
+            if labels is None:
+                labels = {}
+            if not isinstance(labels, dict) or any(
+                not isinstance(key, str) or not isinstance(value, str) for key, value in labels.items()
+            ):
+                raise RuntimeError("challenge drain inventory has malformed ownership labels")
+            if (
+                any(key in labels for key in ("ctf.instance_id", "ctf.provision_token", "ctf.stack_id"))
+                or is_container
+                and name.lstrip("/").startswith("chal-")
+            ):
+                raise RuntimeError(f"drain challenge resource {resource_id!r} on {endpoint!r} before provisioning")
+
+        if client.info().get("ID") != daemon_id:
+            raise RuntimeError("Docker daemon changed during challenge drain inventory")
+        return daemon_id
+    finally:
+        client.close()
+
+
 def discover_contexts() -> list[DiscoveredContext]:
     discovered: list[DiscoveredContext] = []
     for meta in _scan_context_meta():
@@ -477,6 +546,10 @@ class DockerHostManager:
         with self._lock:
             return sorted(self._connected_contexts)
 
+    def get_endpoints(self) -> dict[str, str]:
+        with self._lock:
+            return dict(self._context_configs)
+
     def get_configured_contexts(self) -> list[str]:
         with self._lock:
             return sorted(self._context_configs)
@@ -555,17 +628,19 @@ class DockerHostManager:
     ) -> Container:
         def _do():
             client = self._get_client(context_name)
+            pinned_image, pinned_user, security_opt = prepare_challenge(client, image, kwargs)
 
             def attempt(host_port: int) -> Container:
                 return _run_with_creation_timeout(
                     client,
-                    image,
+                    pinned_image,
+                    user=pinned_user,
                     ports={str(port): host_port},
                     command=command,
                     detach=True,
                     auto_remove=True,
                     cap_drop=["ALL"],
-                    security_opt=["no-new-privileges:true"],
+                    security_opt=security_opt,
                     pids_limit=256,
                     environment=environment,
                     **kwargs,
@@ -609,7 +684,7 @@ class DockerHostManager:
     ) -> tuple[Container, int | None]:
         def _do():
             client = self._get_client(context_name)
-            sec_opt = ["no-new-privileges:true"]
+            pinned_image, pinned_user, sec_opt = prepare_challenge(client, image, kwargs)
 
             def pin_static_ip(container: Container) -> None:
                 if not ip_address:
@@ -622,7 +697,8 @@ class DockerHostManager:
             if not publish_port or not internal_port:
                 container = _run_with_creation_timeout(
                     client,
-                    image,
+                    pinned_image,
+                    user=pinned_user,
                     name=container_name,
                     hostname=hostname or container_name,
                     command=command or None,
@@ -641,7 +717,8 @@ class DockerHostManager:
             def attempt(host_port: int) -> tuple[Container, int]:
                 container = _run_with_creation_timeout(
                     client,
-                    image,
+                    pinned_image,
+                    user=pinned_user,
                     name=container_name,
                     hostname=hostname or container_name,
                     command=command or None,
