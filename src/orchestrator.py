@@ -51,13 +51,11 @@ class Orchestrator:
             }
 
     def load_from_db(self) -> None:
-        # catalog only, health is owned by the periodic health check so boot does no network io
-        # no state filter, draining and retired contexts still need cleanup and down hosts stay retryable
         with self._catalog_lock:
             session = sessionmaker(bind=db.engine)()
             try:
-                contexts = session.query(DockerContextModel).all()
-                self.host_manager.load_contexts(contexts)
+                contexts = session.query(DockerContextModel).all()  # draining and retired contexts still need cleanup
+                self.host_manager.load_contexts(contexts)  # periodic checks own health so boot does no network io
             finally:
                 session.close()
         self._refresh_db_counts()
@@ -107,8 +105,7 @@ class Orchestrator:
             if context is None:
                 continue
             previous_state = context.health_state
-            # stale probe must not overwrite a newer result written by a second maintenance process
-            updated = DockerContextModel.query.filter(
+            updated = DockerContextModel.query.filter(  # stale probes must not replace newer results
                 DockerContextModel.id == context.id,
                 db.or_(
                     DockerContextModel.health_checked_at.is_(None),

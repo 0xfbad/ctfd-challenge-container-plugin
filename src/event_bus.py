@@ -12,8 +12,7 @@ logger = logging.getLogger(__name__)
 
 CHANNEL = "challenge_containers:events"
 
-# unique per process token, subscribers use it to skip messages they published themselves
-WORKER_ID = f"{os.getpid()}-{secrets.token_hex(4)}"
+WORKER_ID = f"{os.getpid()}-{secrets.token_hex(4)}"  # subscribers skip their own messages
 
 _app = None
 _pub_client = None
@@ -48,8 +47,9 @@ def _get_publish_client():
         try:
             import redis
 
-            # short socket_timeout so a hung redis does not park the request greenlet
-            client = redis.from_url(url, decode_responses=True, socket_timeout=2, socket_connect_timeout=2)
+            client = redis.from_url(  # redis failures must return within the request budget
+                url, decode_responses=True, socket_timeout=2, socket_connect_timeout=2
+            )
             client.ping()
             _pub_client = client
         except Exception:
@@ -65,8 +65,9 @@ def _new_subscribe_client():
     try:
         import redis
 
-        # no socket_timeout because pubsub listen must block forever waiting for messages
-        client = redis.from_url(url, decode_responses=True, socket_connect_timeout=2, socket_keepalive=True)
+        client = redis.from_url(  # pubsub waits indefinitely between messages
+            url, decode_responses=True, socket_connect_timeout=2, socket_keepalive=True
+        )
         client.ping()
         return client
     except Exception:
@@ -141,7 +142,7 @@ def _subscriber_loop(on_message: Callable[[dict], None]) -> None:
             pubsub = client.pubsub(ignore_subscribe_messages=True)
             pubsub.subscribe(CHANNEL)
             backoff = 1.0
-            assert _app is not None  # start_subscriber guarantees this
+            assert _app is not None
             with _app.app_context():
                 for msg in pubsub.listen():
                     _dispatch_message(msg, on_message)

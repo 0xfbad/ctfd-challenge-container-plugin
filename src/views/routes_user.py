@@ -29,8 +29,7 @@ from .helpers import (
     view_container_info,
 )
 
-# setting keys resolve per request, decorators bind before an app context exists
-_RL_VIEW = "rate_limit_requests"
+_RL_VIEW = "rate_limit_requests"  # decorators bind before an app context exists
 _RL_VIEW_INTERVAL = "rate_limit_interval"
 _RL_MUTATE = "mutation_rate_limit_requests"
 _RL_MUTATE_INTERVAL = "mutation_rate_limit_interval"
@@ -41,7 +40,6 @@ def validate_request(
 ) -> tuple[dict[str, str] | None, int | None, Users | None]:
     user = get_current_user()
 
-    # a list or scalar json body would make the get calls below raise AttributeError
     body = request_json()
     if body is None:
         return error_body(INVALID_REQUEST, "user"), 400, None
@@ -160,8 +158,7 @@ def route_renew_container_route():
     interval=_RL_MUTATE_INTERVAL,
 )
 @handle_container_errors
-# no visibility guard here, a hidden challenge discloses nothing on stop and blocking it would strand the owner quota slot
-def route_stop_container():
+def route_stop_container():  # hidden challenges must remain stoppable to release owner quota
     error_response, status_code, user = validate_request(["chal_id"])
     if error_response:
         return error_response, status_code

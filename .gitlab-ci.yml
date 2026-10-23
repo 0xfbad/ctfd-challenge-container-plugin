@@ -5,7 +5,6 @@
 
 unit-tests:
   extends: .python-checks
-  # tests are untracked so this job only materializes when they are present
   rules:
     - exists: ["tests/**/*"]
   script:

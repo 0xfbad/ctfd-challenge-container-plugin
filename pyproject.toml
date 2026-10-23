@@ -7,9 +7,7 @@ target-version = "py311"
 select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.ruff.lint.isort]
-# the checkout puts CTFd/ above this plugin so ruff infers it as first party, the flake sandbox
-# copies the plugin alone and would infer third party, pin it so both agree
-known-first-party = ["CTFd"]
+known-first-party = ["CTFd"] # standalone flake builds must use the same import order as the parent checkout
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

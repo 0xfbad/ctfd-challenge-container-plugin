@@ -220,8 +220,7 @@
     function esc(s) {
         var d = document.createElement('div');
         d.textContent = s || '';
-        // textContent escaping leaves quotes alone and this output also lands in attribute values
-        return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;'); // attribute values need quote escaping
     }
 
     function ccFetch(path, opts) {
@@ -654,8 +653,7 @@
                         '<i class="fas fa-check-circle text-success" title="Available"></i></td>';
                 }
 
-                // compare by size instead of hash, locally built images have unique ids per host
-                var isRef = ref && info.created === ref.created && info.size_mb === ref.size_mb;
+                var isRef = ref && info.created === ref.created && info.size_mb === ref.size_mb; // local builds have different image ids on each host
                 var sizeDiff = ref ? Math.abs(info.size_mb - ref.size_mb) : 0;
                 var threshold = ref ? Math.max(ref.size_mb * 0.05, 1) : 0;
                 var isStale = ref && !isRef && sizeDiff > threshold;

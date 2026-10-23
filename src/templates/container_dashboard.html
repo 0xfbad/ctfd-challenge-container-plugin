@@ -494,7 +494,7 @@
 {% block scripts %}
 <script src="https://cdn.jsdelivr.net/npm/echarts@6.0.0/dist/echarts.min.js"
 	integrity="sha384-F07Cpw5v8spSU0H113F33m2NQQ/o6GqPTnTjf45ssG4Q6q58ZwhxBiQtIaqvnSpR"
-	crossorigin="anonymous"></script><!-- ctfd core pins echarts 5, we load 6 separately for scatter jitter support on category axes -->
+	crossorigin="anonymous"></script><!-- ctfd ships echarts 5, scatter jitter requires version 6 -->
 <script>
 	let autoRefreshInterval = null;
 	let eventSource = null;

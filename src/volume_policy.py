@@ -53,8 +53,7 @@ _DOCKER_VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
 _CONTEXT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _POLICY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
-# kernel pseudo filesystems and daemon socket paths stay rejected even when a policy lists them
-_FORBIDDEN_TARGET_ROOTS = (
+_FORBIDDEN_TARGET_ROOTS = (  # infrastructure policy cannot permit kernel filesystems or daemon sockets
     "/dev",
     "/proc",
     "/run",
@@ -66,11 +65,11 @@ MountScope = Literal["entry", "service"]
 
 
 class VolumePolicyError(ValueError):
-    """the infrastructure policy from the environment is invalid"""
+    pass
 
 
 class MountConfigError(ValueError):
-    """a challenge authored mount declaration is invalid or not permitted"""
+    pass
 
 
 @dataclass(frozen=True)
@@ -236,8 +235,6 @@ def _parse_volume_rule(
 
 
 def parse_volume_policy(raw: str | None) -> VolumePolicy:
-    """volumes must be pre created with the labels from required_volume_labels, drivers are not configurable"""
-
     if raw is None or not raw.strip():
         return VolumePolicy.disabled()
 
@@ -301,8 +298,6 @@ def load_volume_policy(environ: Mapping[str, str] | None = None) -> VolumePolicy
 
 
 def parse_mount_config(raw: str | object | None, *, expected_scope: MountScope) -> tuple[MountRequest, ...]:
-    """entry and service declarations share one schema so the caller states the scope it reads from"""
-
     if expected_scope not in ("entry", "service"):
         raise MountConfigError("mount scope must be entry or service")
     if raw is None or raw == "":
@@ -403,8 +398,7 @@ def docker_volume_metadata(client: DockerClientWithVolumes, docker_name: str) ->
     try:
         volume = client.volumes.get(docker_name)
     except Exception as exc:
-        # only a 404 means absent, docker is not imported here so match the status code instead of NotFound
-        status_code = getattr(exc, "status_code", None)
+        status_code = getattr(exc, "status_code", None)  # avoid a docker dependency in policy validation
         response = getattr(exc, "response", None)
         if status_code == 404 or getattr(response, "status_code", None) == 404:
             return None
@@ -478,9 +472,10 @@ def _context_issues(
         seen_docker_names.add(rule.docker_name)
         try:
             metadata = lookup(context_name, rule.docker_name)
-        # collapse every docker ssh and transport failure so endpoint and credential details cannot escape
         except Exception:  # noqa: BLE001
-            issues.append(ReadinessIssue(context_name, mount.logical_name, "volume_inspection_unavailable"))
+            issues.append(  # transport errors must not disclose endpoints or credentials
+                ReadinessIssue(context_name, mount.logical_name, "volume_inspection_unavailable")
+            )
             continue
 
         issues.extend(_volume_issues(policy, context_name, rule, metadata))

@@ -15,8 +15,7 @@ _FLAG_SHARE_DIGEST_DOMAIN = b"ctfd-challenge-containers:flag-share-token:v1\x00"
 
 
 def submitter_user_xid(user: object) -> str:
-    """identifies the submitting user even in team mode, teammates are distinct submitters and team ids are nullable"""
-    user_id = getattr(user, "id", None)
+    user_id = getattr(user, "id", None)  # team members must remain distinct submitters
     if type(user_id) is not int or user_id <= 0:
         raise ValueError("a persisted submitting user is required")
     return f"user:{user_id}"
@@ -29,13 +28,12 @@ def challenge_xid(challenge_id: int) -> str:
 
 
 def submitted_token_digest(secret: str, submitted_token: str, *, challenge_id: int) -> str:
-    """keyed so a leaked database cannot be enumerated, freshness tokens are short enough to brute force unkeyed"""
     if not isinstance(secret, str) or not secret:
         raise ValueError("freshness secret is required")
     if not isinstance(submitted_token, str) or not submitted_token or len(submitted_token) > 191:
         raise ValueError("submitted token must contain 1-191 characters")
     challenge_identity = challenge_xid(challenge_id).encode("ascii")
-    return _hmac.new(
+    return _hmac.new(  # short tokens require a key to prevent enumeration from a leaked database
         secret.encode("utf-8"),
         _FLAG_SHARE_DIGEST_DOMAIN + challenge_identity + b"\x00" + submitted_token.encode("utf-8"),
         hashlib.sha256,

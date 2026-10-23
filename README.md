@@ -1,24 +1,15 @@
-# Challenge Containers
+# challenge containers
 
-CTFd plugin that provisions per-user Docker containers for challenges across a pool of Docker hosts,
-with automatic port assignment, expiration timers, and lifecycle management. Multi-host setups
-load-balance across Docker contexts with health checks; single-server deployments work out of the box.
+ctfd plugin for per user or per team docker challenges, freshness flags, and generated handouts
 
-## Install
+install this repo under `CTFd/plugins/challenge-containers`, install `requirements.txt`, then restart ctfd and configure docker contexts under `/admin/config`
 
-Clone into `CTFd/CTFd/plugins/` on a fresh CTFd installation and restart CTFd.
+for generated handouts, set `PERSONALIZED_FILES_ROOT` outside `UPLOAD_FOLDER`, share that directory with the file worker, and run `python src/files/worker.py` with access to the generator docker daemon
 
-This build supports new installations only. Start it with an empty database that has no
-challenge-container tables.
+generator images run `/generate` and write the configured output files into `OUTPUT_DIR`, the worker supplies `FRESHNESS_TOKEN`, `FRESHNESS_SEED`, and `FLAGS_JSON`, and supplies `FLAG` when there is one freshness flag, build the example with `docker build -t handout-example src/files/examples`
 
-## Settings
+challenge mounts require preexisting read only docker volumes declared in `CHALLENGE_CONTAINERS_VOLUME_POLICY_JSON`, volume names and labels must match the infrastructure policy
 
-Managed live through `/admin/config` under the Challenge Containers section, no config files.
+startup creates missing tables and adds the instance ssh password column, other incompatible schemas require a reviewed migration before upgrading
 
-## Development
-
-Tests in `tests/` are local-only.
-
-```
-python -m pytest tests
-```
+run `ruff check .`, `ruff format --check .`, and `mypy .` for local checks, integration tests live in an untracked local `tests/` directory of the deployment checkout, its compose files configure the worker
