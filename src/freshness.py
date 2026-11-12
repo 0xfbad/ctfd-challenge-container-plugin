@@ -9,7 +9,7 @@ BASE36_ALPHABET = string.digits + string.ascii_lowercase
 MIN_TOKEN_LENGTH = 6
 MAX_TOKEN_LENGTH = 12  # the token draws on 64 hmac bits, which fill 12 base36 characters
 TOKEN_LENGTHS = range(MIN_TOKEN_LENGTH, MAX_TOKEN_LENGTH + 1)
-COLLISION_SCALE = 5000  # owners squared times this stays under 36 to the length, so two owners share a token on one challenge under 1 in 10000
+COLLISION_SCALE = 5000  # keeps the chance any two owners share a token on one challenge under 1 in 10000
 
 
 def generate_secret() -> str:
@@ -17,11 +17,11 @@ def generate_secret() -> str:
 
 
 def token_length_for(owner_count: int) -> int:
-    length = MIN_TOKEN_LENGTH
-    while length < MAX_TOKEN_LENGTH and owner_count * owner_count * COLLISION_SCALE > 36**length:
-        length += 1
+    for length in TOKEN_LENGTHS:
+        if owner_count * owner_count * COLLISION_SCALE <= 36**length:
+            return length
 
-    return length
+    return MAX_TOKEN_LENGTH
 
 
 def compute_token(secret: str, challenge_id: int | str, xid: int | str, length: int = MIN_TOKEN_LENGTH) -> str:

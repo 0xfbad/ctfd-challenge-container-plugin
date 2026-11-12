@@ -276,10 +276,13 @@
     }
 
     document.getElementById('cc-save-btn').addEventListener('click', function() {
-        if (!document.getElementById('cc-settings-form').reportValidity()) return;
+        if (!document.getElementById('cc-settings-form').reportValidity())
+            return;
+
         var payload = {};
         document.querySelectorAll('.cc-setting-input').forEach(function(el) {
-            if (el.value !== '') payload[el.dataset.key] = el.type === 'number' ? Number(el.value) : el.value;
+            if (el.value !== '')
+                payload[el.dataset.key] = el.type === 'number' ? Number(el.value) : el.value;
         });
         durationFieldsSecs.forEach(function(df) {
             payload[df.key] = msToSecs(
@@ -297,7 +300,8 @@
             .then(function(res) {
                 if (res.success)
                     CTFd.ui.ezq.ezAlert({ title: 'Success', body: 'Settings saved and applied.', button: 'OK' });
-                else CTFd.ui.ezq.ezAlert({ title: 'Error', body: res.error || 'Save failed', button: 'OK' });
+                else
+                    CTFd.ui.ezq.ezAlert({ title: 'Error', body: res.error || 'Save failed', button: 'OK' });
             });
     });
 

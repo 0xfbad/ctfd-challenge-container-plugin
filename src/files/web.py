@@ -145,14 +145,18 @@ def _templates(challenge_id: int) -> list[tuple[str, str]]:
 
 def _identity(challenge_id: int, user: Users, team_mode: bool) -> tuple[str, str, dict[str, str]]:
     xid = user.team_id if team_mode else user.id
+
     if xid is None:
         abort(403)
+
     templates = _templates(challenge_id)
-    identity = _owner_identity(
-        challenge_id, xid, team_mode, utils.get_freshness_secret(), utils.freshness_token_length(), templates
-    )
+    secret = utils.get_freshness_secret()
+    length = utils.freshness_token_length()
+    identity = _owner_identity(challenge_id, xid, team_mode, secret, length, templates)
+
     if utils.is_team_mode() != team_mode:
         raise StoreError("Owner mode changed, reload the challenge.")
+
     return identity
 
 

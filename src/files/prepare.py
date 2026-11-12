@@ -18,9 +18,12 @@ def reconcile(app: Flask, *, batch_size: int = 64) -> None:
         try:
             if "personalized_files_store" not in app.extensions:
                 return
+
             team_mode = utils.is_team_mode()
+
             if team_mode is None:
                 return
+
             secret = utils.get_freshness_secret()
             length = utils.freshness_token_length()
             store = _store()
@@ -109,9 +112,11 @@ def _prepare_batch(store, team_mode, secret, length, batch_size):
                 )
             except StoreError:
                 current = False
+
             if not current:
                 _store_io(store._write, path, cursor)
                 return
+
             if existing_owners is not None and (challenge_id, owner) not in existing_owners:
                 continue
             try:
