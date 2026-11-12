@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import ipaddress
 import logging
 import time
 from functools import wraps
@@ -172,9 +174,10 @@ def build_connection_response(
     expires: int | None = None,
     renewals_used: int | None = None,
 ) -> JsonResponse:
+    web_instance = container.instance_id if challenge.ctype == "web" else None
     response: JsonResponse = {
         "status": status,
-        "hostname": get_hostname_for_context(context_name),
+        "hostname": get_hostname_for_context(context_name, web_instance=web_instance),
         "port": container.port,
         "connect": challenge.ctype,
         "expires": container.expires if expires is None else expires,
@@ -193,12 +196,37 @@ def _request_hostname() -> str:
     return request.host.split(":")[0]
 
 
-def get_hostname_for_context(context_name: str | None) -> str:
-    if not context_name or context_name == LOCAL_CONTEXT_NAME:
-        return _request_hostname()
+def web_instance_label(instance_id: str) -> str:
+    return hashlib.sha256(instance_id.encode()).hexdigest()[:6]
 
-    context = DockerContextModel.query.filter_by(context_name=context_name).first()
-    if context is None:
+
+def _ipv4(value: str | None) -> str | None:
+    if not value:
+        return None
+
+    try:
+        return str(ipaddress.IPv4Address(value))
+    except ValueError:
+        return None
+
+
+def get_hostname_for_context(context_name: str | None, *, web_instance: str | None = None) -> str:
+    context = DockerContextModel.query.filter_by(context_name=context_name).first() if context_name else None
+    hostname = _bare_hostname(context_name, context)
+
+    if not web_instance:
+        return hostname
+
+    address = _ipv4(context.pub_hostname if context else None) or _ipv4(hostname)
+
+    if address is None:
+        return hostname
+
+    return f"{web_instance_label(web_instance)}.{address.replace('.', '-')}.sslip.io"
+
+
+def _bare_hostname(context_name: str | None, context: DockerContextModel | None) -> str:
+    if context is None or context_name == LOCAL_CONTEXT_NAME:
         return _request_hostname()
 
     if context.pub_hostname:

@@ -258,7 +258,8 @@ def route_get_running_containers():
         physical_instance_ids.add(container.instance_id)
         container.is_running = container.container_id in running_ids
 
-        hostname = get_hostname_for_context(container.docker_context)
+        web_instance = container.instance_id if container.challenge.ctype == "web" else None
+        hostname = get_hostname_for_context(container.docker_context, web_instance=web_instance)
 
         cname = container_name(
             container.user_id or "deleted",

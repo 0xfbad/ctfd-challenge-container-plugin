@@ -79,6 +79,7 @@ class FinalizedInstance:
     team_id: int | None
     docker_context: str
     ssh_password: str | None = field(default=None, repr=False)
+    instance_id: str | None = None
 
 
 def owner_key(xid: int, is_team: bool) -> str:
@@ -517,6 +518,7 @@ class InstanceCoordinator:
                 team_id=instance.team_id,
                 docker_context=instance.docker_context.context_name,
                 ssh_password=instance.ssh_password,
+                instance_id=instance.id,
             )
             session.commit()
             return result
