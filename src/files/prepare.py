@@ -19,13 +19,13 @@ def reconcile(app: Flask, *, batch_size: int = 64) -> None:
             if "personalized_files_store" not in app.extensions:
                 return
             team_mode = utils.is_team_mode()
-            secret = utils.get_setting("freshness_secret")
-            if team_mode is None or not secret:
+            if team_mode is None:
                 return
-            length = int(utils.get_setting("freshness_token_length", 6) or 6)
+            secret = utils.get_freshness_secret()
+            length = utils.freshness_token_length()
             store = _store()
             with store.lock("preparation"):
-                _prepare_batch(store, team_mode, str(secret), length, batch_size)
+                _prepare_batch(store, team_mode, secret, length, batch_size)
         except (OSError, StoreError) as error:
             app.logger.debug("File preparation deferred (%s)", type(error).__name__)
         finally:
@@ -102,8 +102,8 @@ def _prepare_batch(store, team_mode, secret, length, batch_size):
             db.session.remove()  # fresh transactions observe author edits during a preparation batch
             try:
                 current = (
-                    str(utils.get_setting("freshness_secret")) == secret
-                    and int(utils.get_setting("freshness_token_length", 6) or 6) == length
+                    utils.get_freshness_secret() == secret
+                    and utils.freshness_token_length() == length
                     and _templates(challenge_id) == templates
                     and utils.is_team_mode() == team_mode
                 )

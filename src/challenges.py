@@ -25,7 +25,7 @@ from .challenge_config import normalize_challenge_fields, normalize_services
 from .coordination import InstanceCoordinator
 from .event_logger import event_logger, flag_share_message, flag_share_metadata
 from .flag_type import flag_share_identity_fields
-from .freshness import compute_token, extract_token, render_flag
+from .freshness import TOKEN_LENGTHS, accepted_flags, compute_token, extract_token
 from .messages import FLAG_NOT_YOURS, TEAM_REQUIRED_FLAG, USER_NOT_FOUND
 from .models import (
     ContainerChallengeModel,
@@ -34,7 +34,7 @@ from .models import (
     ContainerInstanceModel,
     DockerContextModel,
 )
-from .utils import _TOKEN_LENGTH_KEY, ValidationError, get_setting, is_team_mode, owner_filter, resolve_xid
+from .utils import ValidationError, get_freshness_secret, get_setting, is_team_mode, owner_filter, resolve_xid
 from .volume_policy import MountConfigError, VolumePolicyError
 
 logger = logging.getLogger(__name__)
@@ -43,14 +43,13 @@ _token_map_lock = threading.Lock()
 _token_map_cache: dict[tuple[str, int, bool, int], tuple[int, dict[str, tuple[int, str]]]] = {}
 
 
-def _get_token_length() -> int:
-    return int(get_setting(_TOKEN_LENGTH_KEY, 6) or 6)
-
-
 def _find_token_owner(
     secret: str, challenge_id: int, submitted_token: str, exclude_xid: int, team_mode: bool
 ) -> tuple[int, str] | None:
-    token_length = _get_token_length()
+    token_length = len(submitted_token)
+    if token_length not in TOKEN_LENGTHS:
+        return None
+
     entity_class = Teams if team_mode else Users
     cache_key = (secret, challenge_id, team_mode, token_length)
     current_count = entity_class.query.count()
@@ -292,11 +291,6 @@ class ContainerChallenge(BaseChallenge):
         data = request.form or request.get_json()
         submission = data["submission"].strip()
 
-        secret_raw = get_setting("freshness_secret")
-        if not secret_raw:
-            return super().attempt(challenge, request)
-        secret = str(secret_raw)
-
         from CTFd.models import Flags
 
         freshness_flags = Flags.query.filter_by(challenge_id=challenge.id, type="freshness").all()
@@ -313,18 +307,17 @@ class ContainerChallenge(BaseChallenge):
         if xid is None:
             return False, TEAM_REQUIRED_FLAG
 
+        secret = get_freshness_secret()
         for flag in freshness_flags:
             template = flag.content
-            token_length = _get_token_length()
-            token = compute_token(secret, challenge.id, xid, length=token_length)
-            expected = render_flag(template, token)
+            expected = accepted_flags(template, secret, challenge.id, xid)
 
             case_insensitive = flag.data and flag.data.lower() == "case_insensitive"
 
             if case_insensitive:
-                match = expected.lower() == submission.lower()
+                match = submission.lower() in {candidate.lower() for candidate in expected}
             else:
-                match = expected == submission
+                match = submission in expected
 
             if match:
                 return True, "correct"

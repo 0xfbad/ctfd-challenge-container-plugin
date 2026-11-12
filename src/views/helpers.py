@@ -54,7 +54,15 @@ from ..messages import (
     SOLVED_NO_RENEW,
 )
 from ..models import ContainerChallengeModel, ContainerInfoModel, ContainerInstanceModel, DockerContextModel
-from ..utils import ValidationError, error_body, get_setting, owner_filter, sanitize_container_error
+from ..utils import (
+    ValidationError,
+    error_body,
+    freshness_token_length,
+    get_freshness_secret,
+    get_setting,
+    owner_filter,
+    sanitize_container_error,
+)
 from ..volume_policy import (
     MountConfigError,
     MountRequest,
@@ -508,13 +516,11 @@ def create_container(
     if challenge is None:
         return error_body(CHALLENGE_NOT_FOUND, "permanent"), 400
 
-    extra_env: dict[str, str] = {}
-    freshness_secret_raw = get_setting("freshness_secret")
-    if freshness_secret_raw:
-        token_length = int(get_setting("freshness_token_length", 6) or 6)
-        token = compute_token(str(freshness_secret_raw), chal_id, xid, length=token_length)
-        extra_env["FRESHNESS_TOKEN"] = token
-        extra_env["FRESHNESS_SEED"] = compute_seed(str(freshness_secret_raw), chal_id, xid, team_mode=is_team)
+    secret = get_freshness_secret()
+    extra_env = {
+        "FRESHNESS_TOKEN": compute_token(secret, chal_id, xid, length=freshness_token_length()),
+        "FRESHNESS_SEED": compute_seed(secret, chal_id, xid, team_mode=is_team),
+    }
 
     if challenge.ssh_username:
         extra_env["SSH_USERNAME"] = challenge.ssh_username

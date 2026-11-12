@@ -15,6 +15,7 @@ from flask import jsonify, request
 from CTFd.utils import get_config
 
 from .exceptions import ContainerException, ContainerStartTimeout, ContainerUnavailableException
+from .freshness import token_length_for
 from .messages import (
     CHALLENGE_NOT_FOUND,
     CONTAINER_NOT_FOUND,
@@ -34,8 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 SettingValue = int | str
-SettingKind = Literal["integer", "duration", "string"]
-ApplyMode = Literal["live", "live_disruptive"]
+SettingKind = Literal["integer", "duration"]
 
 
 class ValidationError(ValueError):
@@ -48,20 +48,8 @@ class SettingSpec:
     kind: SettingKind
     minimum: int | None = None
     maximum: int | None = None
-    max_length: int | None = None
-    allow_empty: bool = False
-    apply_mode: ApplyMode = "live"
-    sensitive: bool = False
 
     def parse(self, value: object, key: str) -> SettingValue:
-        if self.kind == "string":
-            if not isinstance(value, str):
-                raise ValidationError(f"{key} must be a string")
-            if not value and not self.allow_empty:
-                raise ValidationError(f"{key} must not be empty")
-            if self.max_length is not None and len(value) > self.max_length:
-                raise ValidationError(f"{key} must be at most {self.max_length} characters")
-            return value
         if self.kind == "duration":
             return parse_duration_seconds(
                 value,
@@ -80,10 +68,6 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     "mutation_rate_limit_interval": SettingSpec(60, "duration", minimum=1, maximum=86_400),
     "expiration_check_interval": SettingSpec(5, "duration", minimum=1, maximum=3_600),
     "max_concurrent_creates": SettingSpec(2, "integer", minimum=1, maximum=32),
-    "freshness_secret": SettingSpec(
-        "", "string", max_length=4_096, allow_empty=True, apply_mode="live_disruptive", sensitive=True
-    ),
-    "freshness_token_length": SettingSpec(6, "integer", minimum=4, maximum=16, apply_mode="live_disruptive"),
     "post_solve_expiry_seconds": SettingSpec(90, "duration", minimum=0, maximum=604_800),
     "default_expiration_seconds": SettingSpec(1_800, "duration", minimum=1, maximum=604_800),
     "default_max_renewals": SettingSpec(2, "integer", minimum=0, maximum=1_000),
@@ -98,7 +82,7 @@ MAX_JSON_BYTES = 65_536
 MAX_JSON_DEPTH = 8
 MAX_JSON_ITEMS = 1_000
 
-_TOKEN_LENGTH_KEY = "freshness_token_length"
+FRESHNESS_SECRET_KEY = "freshness_secret"
 
 USERS_MODE = "users"
 TEAMS_MODE = "teams"
@@ -474,3 +458,18 @@ def ratelimit_per_user(
         return wrapper
 
     return decorator
+
+
+def get_freshness_secret() -> str:
+    secret = get_setting(FRESHNESS_SECRET_KEY)
+    if not secret:
+        raise RuntimeError("freshness secret is missing, restart ctfd to generate one")
+
+    return str(secret)
+
+
+def freshness_token_length() -> int:
+    from CTFd.models import Teams, Users
+
+    owners = Teams if is_team_mode() else Users
+    return token_length_for(owners.query.count())

@@ -18,7 +18,7 @@ from .event_logger import event_logger
 from .flag_type import register as register_freshness_flag
 from .freshness import generate_secret
 from .models import ContainerSettingsModel, DockerContextModel
-from .utils import DEFAULTS, settings_to_dict
+from .utils import DEFAULTS, FRESHNESS_SECRET_KEY, settings_to_dict
 from .views import containers_bp
 
 logger = logging.getLogger(__name__)
@@ -29,11 +29,11 @@ def _seed_defaults(app: Flask) -> None:
 
     existing = {s.key: s.value for s in ContainerSettingsModel.query.all()}
     for key, value in DEFAULTS.items():
-        if key != "freshness_secret" and key not in existing:  # empty secrets disable freshness
+        if key not in existing:
             db.session.add(ContainerSettingsModel(key=key, value=str(value)))
 
-    if "freshness_secret" not in existing:
-        db.session.add(ContainerSettingsModel(key="freshness_secret", value=generate_secret()))
+    if not existing.get(FRESHNESS_SECRET_KEY):
+        db.session.merge(ContainerSettingsModel(key=FRESHNESS_SECRET_KEY, value=generate_secret()))
 
     db.session.commit()
 

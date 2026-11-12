@@ -66,18 +66,6 @@
                 <label>Mutation interval (seconds) <span class="cfg-help" data-tip="Window used for start, stop, and renew throttling.">?</span></label>
                 <input type="number" class="form-control no-spin cc-setting-input" data-key="mutation_rate_limit_interval" min="1">
             </div>
-            <div class="form-group">
-                <label>Freshness token length <span class="cfg-help" data-tip="Character length of the per-user token embedded in freshness flags. Longer tokens are harder to brute-force. Changing this invalidates existing flags in running containers.">?</span></label>
-                <input type="number" class="form-control no-spin cc-setting-input" data-key="freshness_token_length" min="4" max="16">
-            </div>
-            <div class="form-group">
-                <label>Freshness flags</label>
-                <div><span class="badge badge-secondary" id="cc-freshness-status">Loading</span></div>
-                <div class="mt-2">
-                    <button type="button" class="btn btn-sm btn-outline-primary" id="cc-freshness-regenerate">Enable / Regenerate</button>
-                    <button type="button" class="btn btn-sm btn-outline-danger" id="cc-freshness-disable">Disable</button>
-                </div>
-            </div>
         </div>
     </div>
     <div class="clearfix">
@@ -284,11 +272,6 @@
                     document.getElementById(df.m).value = hm.m;
                 }
             });
-            var freshness = s.freshness_secret;
-            var freshnessStatus = document.getElementById('cc-freshness-status');
-            freshnessStatus.textContent = freshness && freshness.configured ? 'Enabled' : 'Disabled';
-            freshnessStatus.className = freshness && freshness.configured
-                ? 'badge badge-success' : 'badge badge-secondary';
         });
     }
 
@@ -312,39 +295,10 @@
         });
         ccFetch('/api/settings', { method: 'PUT', body: JSON.stringify(payload) })
             .then(function(res) {
-                if (res.success) {
-                    var body = res.disruptive && res.disruptive.length
-                        ? 'Settings saved. Existing running freshness flags were invalidated.'
-                        : 'Settings saved and applied.';
-                    CTFd.ui.ezq.ezAlert({ title: 'Success', body: body, button: 'OK' });
-                }
+                if (res.success)
+                    CTFd.ui.ezq.ezAlert({ title: 'Success', body: 'Settings saved and applied.', button: 'OK' });
                 else CTFd.ui.ezq.ezAlert({ title: 'Error', body: res.error || 'Save failed', button: 'OK' });
             });
-    });
-
-    function updateFreshnessSecret(action) {
-        var warning = action === 'disable'
-            ? 'Disable freshness flags? Existing freshness challenges will reject submissions.'
-            : 'Generate a new freshness secret? Existing running freshness flags will be invalidated.';
-        if (!confirm(warning)) return;
-        ccFetch('/api/settings/freshness-secret', {
-            method: 'POST',
-            body: JSON.stringify({ action: action })
-        }).then(function(res) {
-            if (res.success) {
-                loadSettings();
-                CTFd.ui.ezq.ezAlert({ title: 'Success', body: 'Freshness settings applied.', button: 'OK' });
-            } else {
-                CTFd.ui.ezq.ezAlert({ title: 'Error', body: res.error || 'Update failed', button: 'OK' });
-            }
-        });
-    }
-
-    document.getElementById('cc-freshness-regenerate').addEventListener('click', function() {
-        updateFreshnessSecret('regenerate');
-    });
-    document.getElementById('cc-freshness-disable').addEventListener('click', function() {
-        updateFreshnessSecret('disable');
     });
 
 

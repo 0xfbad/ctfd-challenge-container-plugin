@@ -43,7 +43,6 @@ from ..event_logger import (
     user_flag_values,
 )
 from ..exceptions import ContainerException
-from ..freshness import generate_secret
 from ..messages import INVALID_REQUEST
 from ..models import (
     CONTEXT_STATES,
@@ -1267,14 +1266,11 @@ def route_get_settings():
     for key, default in DEFAULTS.items():
         spec = SETTING_SPECS[key]
         current_settings[key] = {
-            "value": "" if spec.sensitive else get_setting(key),
+            "value": get_setting(key),
             "default": default,
             "type": spec.kind,
             "minimum": spec.minimum,
             "maximum": spec.maximum,
-            "apply_mode": spec.apply_mode,
-            "sensitive": spec.sensitive,
-            "configured": bool(get_setting(key)) if spec.sensitive else None,
         }
     return jsonify(settings=current_settings)
 
@@ -1289,8 +1285,6 @@ def route_update_settings():
         changed = validate_settings_patch(request.get_json(silent=True))
     except ValidationError as exc:
         return jsonify(error=str(exc)), 400
-    if "freshness_secret" in changed:
-        return jsonify(error="use the freshness secret controls to change this setting"), 400
 
     try:
         for key, value in changed.items():
@@ -1305,41 +1299,7 @@ def route_update_settings():
         logger.exception("failed to update container settings")
         return jsonify(error="failed to update settings"), 500
 
-    disruptive = sorted(key for key in changed if SETTING_SPECS[key].apply_mode == "live_disruptive")
-    return jsonify(
-        success="settings updated",
-        disruptive=disruptive,
-    )
-
-
-@containers_bp.route("/api/settings/freshness-secret", methods=["POST"])
-@admins_only
-def route_update_freshness_secret():
-    if not request.is_json:
-        return jsonify(error=INVALID_REQUEST), 400
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict) or payload.get("action") not in {"regenerate", "disable"}:
-        return jsonify(error="action must be regenerate or disable"), 400
-
-    action = payload["action"]
-    value = generate_secret() if action == "regenerate" else ""
-    try:
-        row = ContainerSettingsModel.query.filter_by(key="freshness_secret").first()
-        if row is None:
-            db.session.add(ContainerSettingsModel(key="freshness_secret", value=value))
-        else:
-            row.value = value
-        db.session.commit()
-    except Exception:
-        db.session.rollback()
-        logger.exception("failed to update freshness secret")
-        return jsonify(error="failed to update freshness secret"), 500
-
-    _log_admin_action(
-        f"freshness tokens {action}d" if action == "regenerate" else "freshness tokens disabled",
-        action=f"freshness_{action}",
-    )
-    return jsonify(success="freshness secret updated", configured=bool(value))
+    return jsonify(success="settings updated")
 
 
 @containers_bp.route("/api/logs/<container_id>", methods=["GET"])
