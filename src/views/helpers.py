@@ -230,7 +230,7 @@ def get_hostname_for_context(context_name: str | None, *, web_instance: str | No
     if address is None:
         return hostname
 
-    return f"{web_instance_label(web_instance)}.{address.replace('.', '-')}.sslip.io"
+    return f"{web_instance_label(web_instance)}.{address.replace('.', '-')}.nip.io"
 
 
 def _bare_hostname(context_name: str | None, context: DockerContextModel | None) -> str:
