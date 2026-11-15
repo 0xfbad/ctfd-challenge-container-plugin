@@ -1,6 +1,6 @@
 (() => {
   const root = (window.init?.urlRoot || window.CTFd?.config?.urlRoot || "").replace(/\/$/, "");
-  const prefix = `${root}/plugins/personalized-files/`;
+  const prefix = `${root}/files/`;
   const active = new Map();
   const notices = new WeakMap();
   const downloads = new Map();
@@ -12,28 +12,49 @@
     } catch {
       return null;
     }
-    if (url.origin !== window.location.origin || !url.pathname.startsWith(prefix)) return null;
-    if (!/^[1-9]\d*\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(url.pathname.slice(prefix.length))) return null;
+
+    if (url.origin !== window.location.origin || url.search !== "" || !url.pathname.startsWith(prefix))
+      return null;
+
+    if (!/^[0-9a-f]{32}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(url.pathname.slice(prefix.length)))
+      return null;
+
     return url;
   }
 
   const modal = document.querySelector("#challenge-window");
   if (!window.init?.userId && modal) {
+    const probed = new WeakSet();
+    const lock = (button) => {
+      button.classList.remove("btn-info");
+      button.classList.add("btn-outline-secondary", "disabled");
+      button.setAttribute("aria-disabled", "true");
+      button.setAttribute("tabindex", "-1");
+      const icon = button.querySelector("i");
+
+      if (icon) {
+        icon.className = "fas fa-lock";
+        icon.style.marginInlineEnd = "6px";
+        icon.setAttribute("aria-hidden", "true");
+      }
+
+      button.parentElement.title = "Sign in to download this file";
+    };
     const lockFiles = () => {
       for (const files of modal.querySelectorAll(".challenge-files")) {
         for (const button of files.querySelectorAll("a.btn-file")) {
-          if (!generatedURL(button)) continue;
-          button.classList.remove("btn-info");
-          button.classList.add("btn-outline-secondary", "disabled");
-          button.setAttribute("aria-disabled", "true");
-          button.setAttribute("tabindex", "-1");
-          const icon = button.querySelector("i");
-          if (icon) {
-            icon.className = "fas fa-lock";
-            icon.style.marginInlineEnd = "6px";
-            icon.setAttribute("aria-hidden", "true");
-          }
-          button.parentElement.title = "Sign in to download this file";
+          const url = generatedURL(button); // uploaded challenge files match too, only generated links redirect to login
+
+          if (!url || probed.has(button))
+            continue;
+
+          probed.add(button);
+          fetch(url, { method: "HEAD", redirect: "manual", credentials: "same-origin", cache: "no-store" })
+            .then((response) => {
+              if (response.type === "opaqueredirect" && button.href === url.href)
+                lock(button);
+            })
+            .catch(() => {});
         }
       }
     };
@@ -47,9 +68,13 @@
     const button = event.target.closest("#challenge-window .challenge-files a.btn-file");
     if (!button || (button.target && button.target !== "_self")) return;
     const url = generatedURL(button);
-    if (!url) return;
+    if (!url)
+      return;
+
+    if (!window.init?.userId)
+      return;
+
     event.preventDefault();
-    if (!window.init?.userId) return;
     const previous = active.get(url.href);
     if (previous?.isConnected && previous.closest("#challenge-window.show")) return;
     active.set(url.href, button);

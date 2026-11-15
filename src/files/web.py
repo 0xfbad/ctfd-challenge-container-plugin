@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import hmac
 import json
 import os
+import re
 
 from flask import (
     Blueprint,
@@ -42,6 +44,8 @@ from .store import (
 
 blueprint = Blueprint("personalized_files", __name__, url_prefix="/plugins/personalized-files")
 _FINGERPRINT_DOMAIN = b"ctfd-personalized-files:identity:v1\x00"
+_LINK_DOMAIN = b"ctfd-personalized-files:link:v1\x00"
+_LINK = re.compile(r"([0-9a-f]{32})/([A-Za-z0-9][A-Za-z0-9._-]{0,127})")  # filename group copies the store name pattern
 _RETRY_SECONDS = 3
 _GENERATING_MESSAGE = "Preparing your file. Your download will start automatically when it is ready."
 _WAITING_MESSAGE = "Your file is waiting to be prepared. Your download will start automatically when it is ready."
@@ -189,6 +193,35 @@ def _owner_identity(
     return owner, fingerprint, environment
 
 
+def _link_id(challenge_id: int, filename: str) -> str:
+    key = current_app.secret_key
+
+    if isinstance(key, str):
+        key = key.encode("utf-8")
+
+    message = _LINK_DOMAIN + f"{challenge_id}/{filename}".encode()
+    return hmac.new(key, message, hashlib.sha256).hexdigest()[:32]
+
+
+def _resolve_link(path: str) -> tuple[int, str] | None:
+    match = _LINK.fullmatch(path)
+
+    if match is None:
+        return None
+
+    digest, filename = match.groups()
+    try:
+        challenge_ids = _store_io(_store().recipe_ids)
+    except (StoreError, OSError):
+        return None
+
+    for challenge_id in challenge_ids:
+        if hmac.compare_digest(_link_id(challenge_id, filename), digest):
+            return challenge_id, filename
+
+    return None
+
+
 def challenge_links(challenge: Challenges) -> list[str]:
     try:
         store = _store()
@@ -216,9 +249,7 @@ def challenge_links(challenge: Challenges) -> list[str]:
             )
         except (StoreError, OSError, HTTPException):
             current_app.logger.debug("File priority deferred for challenge %s", challenge.id)
-    return [
-        url_for("personalized_files.download", challenge_id=challenge.id, filename=name) for name in recipe["outputs"]
-    ]
+    return [url_for("views.files", path=f"{_link_id(challenge.id, name)}/{name}") for name in recipe["outputs"]]
 
 
 def _status_response(state: str, status: int, message: str, *, pending: bool = False) -> Response:
@@ -241,7 +272,6 @@ def _status_response(state: str, status: int, message: str, *, pending: bool = F
     return response
 
 
-@blueprint.route("/<int:challenge_id>/<filename>", methods=["GET"])
 @authed_only
 @check_challenge_visibility
 @during_ctf_time_only
@@ -388,6 +418,23 @@ def install(app: Flask) -> None:
     app.extensions["personalized_files_links"] = challenge_links
     app.register_blueprint(blueprint)
 
+    core_files = app.view_functions["views.files"]
+
+    @functools.wraps(core_files)
+    def files(path: str) -> Response:
+        if "token" in request.args:
+            return core_files(path)
+
+        target = _resolve_link(path)
+
+        if target is None:
+            return core_files(path)
+
+        g._personalized_files_request = True
+        return download(*target)
+
+    app.view_functions["views.files"] = files
+
     @app.teardown_request
     def close_failed_download(error: BaseException | None) -> None:
         download = g.pop("_personalized_files_download", None)
@@ -398,7 +445,13 @@ def install(app: Flask) -> None:
     def private_downloads(response: Response) -> Response:
         path = request.environ.get("PATH_INFO", "")
         prefix = "/plugins/personalized-files"
-        if request.blueprint == blueprint.name or path == prefix or path.startswith(f"{prefix}/"):
+
+        if (
+            request.blueprint == blueprint.name
+            or path == prefix
+            or path.startswith(f"{prefix}/")
+            or g.get("_personalized_files_request")
+        ):
             response.headers["Cache-Control"] = "private, no-store"
             response.headers["Pragma"] = "no-cache"
             response.headers["X-Content-Type-Options"] = "nosniff"
