@@ -9,6 +9,7 @@ from typing import Any
 
 from flask import current_app, g, request
 
+from CTFd.models import Teams
 from CTFd.utils.user import is_admin
 
 from ..challenge_config import normalize_network, normalize_services
@@ -246,7 +247,9 @@ def _bare_hostname(context_name: str | None, context: DockerContextModel | None)
     return context.hostname.split("@")[-1]
 
 
-def _log_request_failed(challenge: ContainerChallengeModel, uid: int, err: Exception) -> None:
+def _log_request_failed(
+    challenge: ContainerChallengeModel, uid: int, team_meta: dict[str, int | str], err: Exception
+) -> None:
     event_logger.log_event(
         "request_failed",
         f"container request failed for {challenge.name}: {err}",
@@ -255,6 +258,7 @@ def _log_request_failed(challenge: ContainerChallengeModel, uid: int, err: Excep
         metadata={
             "challenge_id": challenge.id,
             "challenge_name": challenge.name,
+            **team_meta,
             "reason": str(err),
         },
     )
@@ -516,6 +520,9 @@ def create_container(
     if challenge is None:
         return error_body(CHALLENGE_NOT_FOUND, "permanent"), 400
 
+    team = Teams.query.filter_by(id=xid).first() if is_team else None
+    team_meta = {"team_id": team.id, "team_name": team.name} if team else {}
+
     secret = get_freshness_secret()
     extra_env = {
         "FRESHNESS_TOKEN": compute_token(secret, chal_id, xid, length=freshness_token_length()),
@@ -530,10 +537,10 @@ def create_container(
         network_json = normalize_network(challenge.network_json, set(services))
         policy, volume_plan, eligible_contexts = _runtime_volume_plan(challenge, container_manager)
     except ValidationError as err:
-        _log_request_failed(challenge, uid, err)
+        _log_request_failed(challenge, uid, team_meta, err)
         return error_body(sanitize_container_error(err), "permanent"), 400
     except ContainerException as err:
-        _log_request_failed(challenge, uid, err)
+        _log_request_failed(challenge, uid, team_meta, err)
         return error_body(sanitize_container_error(err)), 400
 
     expiration = resolve_expiration(challenge)
@@ -615,6 +622,7 @@ def create_container(
         metadata={
             "challenge_id": challenge.id,
             "challenge_name": challenge.name,
+            **team_meta,
             "is_stack": bool(challenge.services_json),
             "hosts": {
                 h["context_name"]: {
@@ -651,7 +659,7 @@ def create_container(
                 service_volumes=service_volumes,
             )
         except Exception as err:
-            _log_request_failed(challenge, uid, err)
+            _log_request_failed(challenge, uid, team_meta, err)
             _cleanup_failed_reservation(container_manager, reservation, err, ambiguous_external_io=True)
             return error_body(sanitize_container_error(err)), 503, {"Retry-After": "300"}
 
@@ -686,7 +694,7 @@ def create_container(
                 resolved_volumes=entry_volumes,
             )
         except Exception as err:
-            _log_request_failed(challenge, uid, err)
+            _log_request_failed(challenge, uid, team_meta, err)
             _cleanup_failed_reservation(container_manager, reservation, err, ambiguous_external_io=True)
             return error_body(sanitize_container_error(err)), 503, {"Retry-After": "300"}
 
@@ -720,7 +728,7 @@ def create_container(
         user_id=finalized.user_id,
         user_name=None,
         team_id=finalized.team_id,
-        team_name=None,
+        team_name=team.name if team else None,
         docker_context=context_name,
         message=f"container created for {challenge.name}",
     )
